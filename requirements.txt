@@ -1,5 +1,0 @@
-psychopy==2026.1.0
-pylsl
-mne
-numpy
-scipy
