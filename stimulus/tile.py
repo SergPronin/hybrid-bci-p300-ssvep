@@ -1,8 +1,9 @@
 class Tile:
-    def __init__(self, position, size, frequency):
+    def __init__(self, position, size, frequency, color):
         self.position = position
         self.size = size
         self.frequency = frequency
+        self.color = color  # (r, g, b) in [-1, 1] for SSVEP "on" state
         self.is_on = False
         self.frames_per_cycle = None
         self.current_frame = 0
