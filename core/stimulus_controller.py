@@ -1,5 +1,6 @@
 import random
 from psychopy import visual, core, event
+from pylsl import StreamInfo, StreamOutlet
 
 class Tile:
     def __init__(self, row, col, id_):
@@ -27,6 +28,32 @@ class StimulusController:
         self._state_start = 0.0
         self._current_tile = None
         self._running = False
+        self._lsl_outlet = None
+        self._init_lsl()
+
+    def _init_lsl(self):
+        try:
+            info = StreamInfo(
+                name="BCI_StimMarkers",
+                type="Markers",
+                channel_count=1,
+                nominal_srate=0,
+                channel_format="string",
+                source_id="stimulus-controller-001",
+            )
+            self._lsl_outlet = StreamOutlet(info)
+        except Exception as e:
+            print(f"Failed to initialize LSL outlet: {e}")
+            self._lsl_outlet = None
+
+    def _push_lsl(self, event_data):
+        if not self._lsl_outlet:
+            return
+        marker = f"{event_data['tile_id']}|{event_data['event']}"
+        try:
+            self._lsl_outlet.push_sample([marker])
+        except Exception as e:
+            print(f"Failed to send LSL marker: {e}")
 
     def start(self):
         self._running = True
@@ -50,7 +77,9 @@ class StimulusController:
                 self._current_tile.active = True
                 self._state = "on"
                 self._state_start = now
-                return {"tile_id": self._current_tile.id, "event": "on", "timestamp": now}
+                event_data = {"tile_id": self._current_tile.id, "event": "on", "timestamp": now}
+                self._push_lsl(event_data)
+                return event_data
 
         elif self._state == "on":
             if now - self._state_start >= self.flash_duration:
@@ -58,6 +87,7 @@ class StimulusController:
                 event_data = {"tile_id": self._current_tile.id, "event": "off", "timestamp": now}
                 self._state = "isi"
                 self._state_start = now
+                self._push_lsl(event_data)
                 return event_data
 
         return None
