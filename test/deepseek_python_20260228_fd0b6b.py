@@ -66,8 +66,8 @@ if eeg_streams:
                 eeg_count += len(eeg_samples)
 
             # Статистика каждые 5 секунд
-            if time.time() - start_time >= 5:
-                print(f"\n📊 Статистика за 5 сек:")
+            if time.time() - start_time >= 0.1:
+                print(f"\n📊 Статистика за 0.1 сек:")
                 print(f"   Маркеров: {marker_count}")
                 print(f"   Сэмплов ЭЭГ: {eeg_count}")
                 print(f"   Частота ЭЭГ: {eeg_count / 5:.1f} Гц")
