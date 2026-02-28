@@ -5,12 +5,12 @@ from core.stimulus_controller import StimulusController
 
 class StimulusApp:
     def __init__(self):
-        #self.win = visual.Window(size=(800, 800), color="black", units="pix")
-        self.win = visual.Window(
-            fullscr=True,
-            color="black",
-            units="pix"
-        )
+        self.win = visual.Window(size=(1200, 800), color="black", units="pix")
+        # self.win = visual.Window(
+        #     fullscr=True,
+        #     color="black",
+        #     units="pix"
+        # )
 
         self.grid = Grid(size=3)
         self.controller = StimulusController(self.grid)
