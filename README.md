@@ -77,41 +77,44 @@ python -m app.main
 
 ### Проверка LSL-стрима
 
-**В отдельном терминале** (с активированным venv):
+Сначала запустите приложение и нажмите START. Затем в **другом терминале** (с активированным venv):
 
 ```bash
-python -c "
-from pylsl import StreamInlet, resolve_byprop
-print('Waiting for BCI_StimMarkers stream...')
-streams = resolve_byprop('name', 'BCI_StimMarkers', timeout=5)
-if not streams:
-    print('No stream found!')
-else:
-    inlet = StreamInlet(streams[0])
-    print('Connected! Receiving markers:')
-    while True:
-        sample, timestamp = inlet.pull_sample()
-        print(f'{timestamp:.3f}: {sample[0]}')
-"
+python scripts/lsl_listen.py
 ```
 
-**Важно:** сначала запустите приложение и нажмите START, затем запускайте скрипт проверки.
+Скрипт выведет в консоль маркеры вида `0|on`, `0|off` и т.д.
 
 ## Структура проекта
 
 ```
 hybrid-bci-p300-ssvep/
 ├── app/
-│   └── main.py              # Точка входа
+│   └── main.py                 # Точка входа
+├── config.py                   # Константы (окно, сетка, слайдеры)
 ├── core/
-│   ├── grid.py              # Логика сетки плиток
-│   ├── tile.py              # Модель плитки
-│   └── stimulus_controller.py  # Контроллер стимуляции + LSL
+│   ├── tile.py                 # Модель плитки
+│   ├── grid.py                 # Модель сетки плиток
+│   ├── lsl.py                  # Отправка маркеров в LSL
+│   └── stimulus_controller.py   # Контроллер стимуляции
 ├── gui/
-│   └── gui.py               # Интерфейс PsychoPy
-├── requirements.txt         # Зависимости
-└── README.md               # Этот файл
+│   └── gui.py                  # Интерфейс PsychoPy
+├── scripts/
+│   └── lsl_listen.py           # Скрипт проверки приёма маркеров LSL
+├── test/
+│   └── test_lsl_streams.py     # Проверка обнаружения LSL-стримов
+├── requirements.txt
+└── README.md
 ```
+
+## Архитектура
+
+- **core/tile.py** — модель одной плитки (id, row, col, active).
+- **core/grid.py** — модель сетки плиток, создаёт и хранит список Tile.
+- **core/lsl.py** — отправка маркеров в LSL-стрим (класс LslMarkerSender).
+- **core/stimulus_controller.py** — логика стимуляции: таймер, выбор случайной плитки, смена состояний isi/on, вызов LSL.
+- **gui/gui.py** — отрисовка (PsychoPy): окно, сетка прямоугольников, кнопки, слайдеры; использует config и core.
+- **config.py** — константы приложения (размеры, цвета, диапазоны слайдеров).
 
 ## Зависимости
 
@@ -165,7 +168,7 @@ PsychoPy требует Python 3.8–3.10. Используйте Python 3.10.
 Убедитесь, что:
 1. Приложение запущено
 2. Нажата кнопка START
-3. В коде `StimulusController._init_lsl()` нет ошибок (проверьте консоль)
+3. В консоли при запуске нет ошибок LSL (проверьте вывод)
 
 ## Лицензия
 

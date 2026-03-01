@@ -42,6 +42,7 @@ env/
 .env
 .env.local
 *.log
+lsl_report_*.txt
 
 # OS
 .DS_Store

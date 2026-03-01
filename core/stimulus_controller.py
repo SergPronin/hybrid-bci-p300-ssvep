@@ -1,75 +1,69 @@
+"""Контроллер последовательности стимулов (мигание плиток) и отправка маркеров в LSL."""
+
 import random
-from psychopy import visual, core, event
-from pylsl import StreamInfo, StreamOutlet
+from typing import Dict, Optional
 
-class Tile:
-    def __init__(self, row, col, id_):
-        self.row = row
-        self.col = col
-        self.id = id_
-        self.active = False
+from psychopy import core
 
-class Grid:
-    def __init__(self, size=3):
-        self.size = size
-        self.tiles = [Tile(r, c, r*size + c) for r in range(size) for c in range(size)]
+from .grid import Grid
+from .lsl import LslMarkerSender
+from .tile import Tile
 
-    def reset(self):
-        for tile in self.tiles:
-            tile.active = False
 
 class StimulusController:
-    def __init__(self, grid, flash_duration: float = 0.1, isi: float = 0.05):
+    """
+    Управляет поочерёдным миганием плиток сетки и отправкой маркеров в LSL.
+
+    Состояния: idle → isi → on → isi → on → ...
+    - isi: пауза между вспышками.
+    - on: плитка подсвечена на время flash_duration.
+    """
+
+    def __init__(
+        self,
+        grid: Grid,
+        flash_duration: float = 0.1,
+        isi: float = 0.05,
+    ) -> None:
+        """
+        Args:
+            grid: Сетка плиток (модель).
+            flash_duration: Длительность одной вспышки, сек.
+            isi: Интервал между вспышками (Inter-Stimulus Interval), сек.
+        """
         self.grid = grid
         self.flash_duration = flash_duration
         self.isi = isi
-        self.clock = core.Clock()
+        self._clock = core.Clock()
         self._state = "idle"
         self._state_start = 0.0
-        self._current_tile = None
+        self._current_tile: Optional[Tile] = None
         self._running = False
-        self._lsl_outlet = None
-        self._init_lsl()
+        self._lsl = LslMarkerSender()
 
-    def _init_lsl(self):
-        try:
-            info = StreamInfo(
-                name="BCI_StimMarkers",
-                type="Markers",
-                channel_count=1,
-                nominal_srate=0,
-                channel_format="string",
-                source_id="stimulus-controller-001",
-            )
-            self._lsl_outlet = StreamOutlet(info)
-        except Exception as e:
-            print(f"Failed to initialize LSL outlet: {e}")
-            self._lsl_outlet = None
-
-    def _push_lsl(self, event_data):
-        if not self._lsl_outlet:
-            return
-        marker = f"{event_data['tile_id']}|{event_data['event']}"
-        try:
-            self._lsl_outlet.push_sample([marker])
-        except Exception as e:
-            print(f"Failed to send LSL marker: {e}")
-
-    def start(self):
+    def start(self) -> None:
+        """Запустить стимуляцию."""
         self._running = True
         self._state = "isi"
-        self._state_start = self.clock.getTime()
+        self._state_start = self._clock.getTime()
 
-    def stop(self):
+    def stop(self) -> None:
+        """Остановить стимуляцию и сбросить сетку."""
         self._running = False
         self.grid.reset()
         self._state = "idle"
 
-    def update(self):
+    def update(self) -> Optional[Dict[str, object]]:
+        """
+        Обновить состояние по таймеру. Вызывать каждый кадр.
+
+        Returns:
+            Словарь с полями tile_id, event, timestamp при смене события, иначе None.
+        """
         if not self._running:
             return None
 
-        now = self.clock.getTime()
+        now = self._clock.getTime()
 
         if self._state == "isi":
             if now - self._state_start >= self.isi:
@@ -77,17 +71,25 @@ class StimulusController:
                 self._current_tile.active = True
                 self._state = "on"
                 self._state_start = now
-                event_data = {"tile_id": self._current_tile.id, "event": "on", "timestamp": now}
-                self._push_lsl(event_data)
+                event_data = {
+                    "tile_id": self._current_tile.id,
+                    "event": "on",
+                    "timestamp": now,
+                }
+                self._lsl.send(self._current_tile.id, "on")
                 return event_data
 
-        elif self._state == "on":
+        if self._state == "on":
             if now - self._state_start >= self.flash_duration:
                 self._current_tile.active = False
-                event_data = {"tile_id": self._current_tile.id, "event": "off", "timestamp": now}
+                event_data = {
+                    "tile_id": self._current_tile.id,
+                    "event": "off",
+                    "timestamp": now,
+                }
+                self._lsl.send(self._current_tile.id, "off")
                 self._state = "isi"
                 self._state_start = now
-                self._push_lsl(event_data)
                 return event_data
 
         return None
