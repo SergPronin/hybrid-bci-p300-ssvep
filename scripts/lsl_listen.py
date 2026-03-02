@@ -44,8 +44,25 @@ def main() -> None:
     inlets: List[Tuple[str, str, StreamInlet]] = []
     for s in streams:
         inlet = StreamInlet(s)
-        inlets.append((s.name(), s.type(), inlet))
-        print(f"  Подключено: {s.name()} (тип: {s.type()}, каналов: {s.channel_count()})")
+        # Безопасное получение имени стрима
+        try:
+            stream_name = s.name()
+        except (UnicodeDecodeError, UnicodeError, Exception) as e:
+            # Если не удаётся декодировать имя, используем UID как fallback
+            try:
+                uid = s.uid()
+                stream_name = f"Stream_{uid[:8] if len(uid) > 8 else uid}"
+            except:
+                stream_name = "Unknown_Stream"
+        
+        # Безопасное получение типа стрима
+        try:
+            stream_type = s.type()
+        except (UnicodeDecodeError, UnicodeError, Exception):
+            stream_type = "Unknown"
+        
+        inlets.append((stream_name, stream_type, inlet))
+        print(f"  Подключено: {stream_name} (тип: {stream_type}, каналов: {s.channel_count()})")
 
     print("\nПриём данных (Ctrl+C — выход):\n")
     try:

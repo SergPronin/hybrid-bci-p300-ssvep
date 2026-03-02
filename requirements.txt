@@ -1,2 +1,5 @@
 psychopy==2026.1.0
 pylsl
+numpy
+scipy
+matplotlib
