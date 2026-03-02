@@ -2,4 +2,5 @@ psychopy==2026.1.0
 pylsl
 numpy
 scipy
-matplotlib
+pyqtgraph
+PyQt5

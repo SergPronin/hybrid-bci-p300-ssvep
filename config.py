@@ -15,8 +15,8 @@ TILE_LINE_COLOR = "white"
 FLASH_COLORS = ["yellow", "green", "red", "white"]
 
 # Слайдеры
-ISI_RANGE = (0.02, 5.0)
-FLASH_DURATION_RANGE = (0.05, 2.0)
+ISI_RANGE = (0.001, 5.0)  # Уменьшено минимальное значение для более быстрого мигания (до 0.01 сек = 100 Гц)
+FLASH_DURATION_RANGE = (0.01, 2.0)
 SLIDER_GRANULARITY = 0.01
 
 # Кнопки

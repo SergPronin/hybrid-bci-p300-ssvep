@@ -27,11 +27,16 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import pickle
 import os
+import hashlib
 
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 from scipy import signal
-from pylsl import StreamInlet, resolve_byprop
+from pylsl import StreamInlet, resolve_byprop, local_clock
+
+# PyQt5 и pyqtgraph для событийно-ориентированной визуализации
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QGridLayout, QLabel
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QColor
+import pyqtgraph as pg
 
 # ============================================================================
 # КОНСТАНТЫ И ПАРАМЕТРЫ
@@ -55,7 +60,7 @@ NUM_TILES = 9  # Сетка 3x3, плитки с ID от 0 до 8
 
 # Параметры буфера данных
 BUFFER_DURATION = 30.0  # Храним последние 30 секунд ЭЭГ данных
-UPDATE_INTERVAL = 0.05  # Обновление графика каждые 50 мс (более плавно)
+UPDATE_INTERVAL_MS = 33  # Обновление графика каждые 33 мс (~30 FPS для плавности)
 STATUS_UPDATE_INTERVAL = 1.0  # Обновление статуса в консоли каждую секунду
 
 # Имена потоков LSL
@@ -260,9 +265,8 @@ class EEGBuffer:
     """
     Класс для хранения скользящего буфера ЭЭГ данных.
 
-    Хранит последние N секунд данных по нативным LSL-таймстемпам.
-    LSL синхронизирует время между потоками (ЭЭГ, маркеры) под капотом —
-    pull_chunk и pull_sample возвращают timestamps в едином времени.
+    Хранит последние N секунд данных по относительному времени от первого сэмпла ЭЭГ.
+    Использует относительное время для синхронизации с маркерами.
     """
 
     def __init__(self, sampling_rate: float, num_channels: int, duration: float = BUFFER_DURATION):
@@ -276,28 +280,41 @@ class EEGBuffer:
         self.num_channels = num_channels
         self.buffer_size = int(duration * sampling_rate)
 
-        # Буфер: кортежи (lsl_timestamp, data) — нативные метки из pull_chunk
+        # Буфер: кортежи (relative_time, data) — относительное время от первого сэмпла
         self.buffer: deque = deque(maxlen=self.buffer_size)
+        self.first_sample_time: Optional[float] = None  # Время первого сэмпла (LSL время)
 
         print(f"Инициализирован буфер ЭЭГ:")
         print(f"  Размер буфера: {self.buffer_size} точек ({duration} сек)")
-        print(f"  Используются нативные LSL-таймстемпы (единое время для ЭЭГ и маркеров)")
+        print(f"  Используется относительное время от первого сэмпла ЭЭГ для синхронизации")
 
     def add_sample(self, timestamp: float, data: np.ndarray) -> None:
         """
         Добавляет сэмпл в буфер.
 
         Args:
-            timestamp: LSL-таймстемп из pull_chunk (единое время)
+            timestamp: LSL-таймстемп из pull_chunk
             data: Массив формы (num_channels,)
         """
         if data.shape != (self.num_channels,):
             print(f"ОШИБКА: Неверный размер данных. Ожидается ({self.num_channels},), "
                   f"получено {data.shape}")
             return
-        self.buffer.append((timestamp, data.copy()))
+        
+        # Запоминаем время первого сэмпла
+        if self.first_sample_time is None:
+            self.first_sample_time = timestamp
+        
+        # Вычисляем относительное время от первого сэмпла
+        relative_time = timestamp - self.first_sample_time
+        
+        self.buffer.append((relative_time, data.copy()))
+    
+    def get_first_sample_time(self) -> Optional[float]:
+        """Возвращает время первого сэмпла (для синхронизации маркеров)."""
+        return self.first_sample_time
 
-    def is_ready(self, marker_timestamp: float, pre_stim: float, post_stim: float) -> Tuple[bool, str]:
+    def is_ready(self, marker_timestamp: float, pre_stim: float, post_stim: float, eeg_first_time: Optional[float] = None) -> Tuple[bool, str]:
         """
         Проверяет, достаточно ли данных для извлечения эпохи.
 
@@ -305,15 +322,25 @@ class EEGBuffer:
             marker_timestamp: LSL-таймстемп маркера из pull_sample
             pre_stim: Время до стимула, сек
             post_stim: Время после стимула, сек
+            eeg_first_time: Время первого сэмпла ЭЭГ (для синхронизации)
 
         Returns:
             (is_ready, message)
         """
         if len(self.buffer) < 2:
             return False, f"Буфер пуст (нужно минимум 2 точки, есть {len(self.buffer)})"
-
-        epoch_start = marker_timestamp - pre_stim
-        epoch_end = marker_timestamp + post_stim
+        
+        if self.first_sample_time is None:
+            return False, "Буфер не инициализирован (нет первого сэмпла)"
+        
+        # Конвертируем маркер в относительное время
+        if eeg_first_time is None:
+            eeg_first_time = self.first_sample_time
+        
+        marker_relative_time = marker_timestamp - eeg_first_time
+        
+        epoch_start = marker_relative_time - pre_stim
+        epoch_end = marker_relative_time + post_stim
 
         buffer_times = np.array([ts for ts, _ in self.buffer])
         buffer_start = buffer_times[0]
@@ -333,7 +360,7 @@ class EEGBuffer:
         return True, f"Буфер готов (длительность: {buffer_duration:.2f} сек, точек: {len(self.buffer)})"
 
     def get_buffer_info(self) -> dict:
-        """Возвращает состояние буфера (LSL-таймстемпы)."""
+        """Возвращает состояние буфера (относительное время)."""
         if len(self.buffer) < 2:
             return {'size': len(self.buffer), 'duration': 0.0, 'start_time': None, 'end_time': None}
         buffer_times = np.array([ts for ts, _ in self.buffer])
@@ -342,23 +369,28 @@ class EEGBuffer:
             'duration': buffer_times[-1] - buffer_times[0],
             'start_time': buffer_times[0],
             'end_time': buffer_times[-1],
+            'first_sample_time': self.first_sample_time,  # Абсолютное время первого сэмпла
         }
 
     def extract_epoch(
-        self, marker_timestamp: float, pre_stim: float, post_stim: float
+        self, marker_timestamp: float, pre_stim: float, post_stim: float, eeg_first_time: Optional[float] = None
     ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """
-        Извлекает эпоху вокруг маркера по LSL-таймстемпам.
+        Извлекает эпоху вокруг маркера по относительному времени.
 
         Args:
             marker_timestamp: LSL-таймстемп маркера
             pre_stim: Время до стимула, сек
             post_stim: Время после стимула, сек
+            eeg_first_time: Время первого сэмпла ЭЭГ (для синхронизации)
 
         Returns:
             (epoch_data, time_vector) или None
         """
-        is_ready, _ = self.is_ready(marker_timestamp, pre_stim, post_stim)
+        if eeg_first_time is None:
+            eeg_first_time = self.first_sample_time
+        
+        is_ready, _ = self.is_ready(marker_timestamp, pre_stim, post_stim, eeg_first_time)
         if not is_ready:
             return None
 
@@ -372,8 +404,11 @@ class EEGBuffer:
         buffer_times = np.array([ts for ts, _ in self.buffer])
         buffer_data = np.array([data for _, data in self.buffer])
 
-        # Абсолютные LSL-времена точек эпохи
-        target_times = time_vector + marker_timestamp
+        # Конвертируем маркер в относительное время
+        marker_relative_time = marker_timestamp - eeg_first_time
+        
+        # Относительные времена точек эпохи
+        target_times = time_vector + marker_relative_time
 
         for ch in range(self.num_channels):
             epoch_data[ch, :] = np.interp(
@@ -458,124 +493,601 @@ def parse_marker(marker_string: str) -> Optional[Tuple[int, str]]:
 
 
 # ============================================================================
-# ФУНКЦИИ ДЛЯ ВИЗУАЛИЗАЦИИ
+# ФУНКЦИИ ДЛЯ ВИЗУАЛИЗАЦИИ (PyQt5 + pyqtgraph)
 # ============================================================================
 
-class RealtimePlotter:
+class RealtimePlotter(QMainWindow):
     """
-    Класс для отображения графиков в реальном времени.
+    Класс для отображения графиков в реальном времени на основе PyQt5 и pyqtgraph.
     
     Показывает усреднённые эпохи для всех 9 плиток в виде сетки графиков.
+    Использует событийно-ориентированную модель с QTimer для плавного обновления.
     """
     
-    def __init__(self, sampling_rate: float, num_channels: int):
+    def __init__(self, sampling_rate: float, num_channels: int, processor: Optional['EpochProcessor'] = None):
         """
         Инициализация визуализации.
         
         Args:
             sampling_rate: Частота дискретизации
             num_channels: Количество каналов ЭЭГ
+            processor: Экземпляр EpochProcessor (будет установлен позже)
         """
+        super().__init__()
         self.sampling_rate = sampling_rate
         self.num_channels = num_channels
-        
-        # Создаём фигуру с сеткой 3x3 для 9 плиток
-        self.fig, self.axes = plt.subplots(3, 3, figsize=(15, 12))
-        self.fig.suptitle('Усреднённые эпохи ЭЭГ по плиткам (обновление в реальном времени)', 
-                          fontsize=14, fontweight='bold')
+        self.processor = processor
         
         # Создаём вектор времени для эпохи
         self.time_vector = np.linspace(-EPOCH_PRE_STIM, EPOCH_POST_STIM, 
                                        int(EPOCH_TOTAL * sampling_rate))
         
         # Инициализируем графики для каждой плитки
-        self.lines = {}
-        self.texts = {}
+        self.plots = {}  # pyqtgraph PlotWidget для каждой плитки
+        self.lines = {}  # Линии графиков
+        self.text_labels = {}  # QLabel для отображения количества эпох
+        self.highlight_times = {}  # Время последней подсветки
+        self.last_epoch_counts = {}  # Последнее количество эпох
+        self.last_data_hash = {}  # Хеш последних данных
+        
+        # Настройка pyqtgraph
+        pg.setConfigOptions(antialias=True, background='black', foreground='white')
+        
+        # Создаём центральный виджет и сетку
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QGridLayout(central_widget)
+        
+        # Создаём графики для каждой плитки
         for tile_id in range(NUM_TILES):
             row = tile_id // 3
             col = tile_id % 3
-            ax = self.axes[row, col]
             
-            # Создаём пустые линии для каждого канала
-            lines = []
-            for ch in range(num_channels):
-                line, = ax.plot([], [], label=f'Канал {ch+1}', alpha=0.7, linewidth=1.5)
-                lines.append(line)
+            # Создаём PlotWidget
+            plot_widget = pg.PlotWidget(title=f'Плитка {tile_id}')
+            plot_widget.setLabel('left', 'Амплитуда (мкВ)')
+            plot_widget.setLabel('bottom', 'Время (сек)')
+            # Фиксированный диапазон по X: от -0.2 до +0.8 секунды (длина эпохи)
+            # Это нормально - каждая эпоха имеет фиксированную длину для ERP анализа
+            plot_widget.setXRange(-EPOCH_PRE_STIM, EPOCH_POST_STIM)
+            plot_widget.setYRange(-50, 50)
+            plot_widget.showGrid(x=True, y=True, alpha=0.3)
             
-            self.lines[tile_id] = lines
+            # Вертикальная линия на моменте стимула
+            stim_line = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('r', style=Qt.DashLine, width=2))
+            plot_widget.addItem(stim_line)
             
-            # Настраиваем оси
-            ax.set_xlim(-EPOCH_PRE_STIM, EPOCH_POST_STIM)
-            ax.set_ylim(-50, 50)  # Начальные пределы, будут автоматически подстраиваться
-            ax.axvline(x=0, color='r', linestyle='--', linewidth=2, label='Стимул')
-            ax.set_xlabel('Время (сек)', fontsize=9)
-            ax.set_ylabel('Амплитуда (мкВ)', fontsize=9)
-            ax.set_title(f'Плитка {tile_id}', fontsize=10, fontweight='bold')
-            ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=7, loc='upper right')
+            # Создаём линию для данных
+            if num_channels > 1:
+                # Для нескольких каналов будем показывать средний
+                line = plot_widget.plot([], [], pen=pg.mkPen('w', width=1.5))
+            else:
+                # Для одного канала
+                line = plot_widget.plot([], [], pen=pg.mkPen('w', width=1.5))
             
-            # Текст с количеством эпох
-            text = ax.text(0.02, 0.98, 'Эпох: 0', transform=ax.transAxes,
-                          fontsize=8, verticalalignment='top',
-                          bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-            self.texts[tile_id] = text
+            self.plots[tile_id] = plot_widget
+            self.lines[tile_id] = line
+            
+            # Создаём метку для количества эпох (добавляем на график через TextItem)
+            # Используем относительные координаты через ViewBox
+            text_item = pg.TextItem('Эпох: 0', color='white', anchor=(0, 1))
+            # Позиция в координатах данных: x в секундах, y в мкВ
+            text_item.setPos(-EPOCH_PRE_STIM + 0.05, 45)  # Позиция в координатах графика
+            plot_widget.addItem(text_item)
+            self.text_labels[tile_id] = text_item
+            
+            # Добавляем в layout
+            layout.addWidget(plot_widget, row, col)
+            
+            # Инициализация состояний
+            self.highlight_times[tile_id] = 0
+            self.last_epoch_counts[tile_id] = 0
+            self.last_data_hash[tile_id] = None
         
-        plt.tight_layout()
-        plt.ion()  # Интерактивный режим
-        plt.show()
+        self.setWindowTitle('Усреднённые эпохи ЭЭГ по плиткам (обновление в реальном времени)')
+        self.resize(1500, 1000)
+        
+        # Сохраняем состояние окна
+        self.window_open = True
+        
     
-    def update(self, processor: EpochProcessor):
+    def set_processor(self, processor: 'EpochProcessor'):
+        """Устанавливает процессор эпох для обновления графиков."""
+        self.processor = processor
+    
+    def update(self, processor: Optional['EpochProcessor'] = None):
         """
         Обновляет графики на основе текущих данных процессора.
         
         Args:
-            processor: Экземпляр EpochProcessor с накопленными данными
+            processor: Экземпляр EpochProcessor с накопленными данными (опционально, если не указан, используется self.processor)
         """
-        averaged = processor.get_averaged_epochs()
-        counts = processor.get_epoch_counts()
+        if not self.window_open or not self.isVisible():
+            return
         
-        for tile_id in range(NUM_TILES):
-            row = tile_id // 3
-            col = tile_id % 3
-            ax = self.axes[row, col]
+        if processor is None:
+            processor = self.processor
+        
+        if processor is None:
+            return
+        
+        try:
+            averaged = processor.get_averaged_epochs()
+            counts = processor.get_epoch_counts()
+            current_time = time.time()
+            highlight_duration = 0.15  # Длительность подсветки в секундах
             
-            if averaged[tile_id] is not None:
-                # Обновляем данные для каждого канала
-                epoch_data = averaged[tile_id]
+            
+            for tile_id in range(NUM_TILES):
+                plot_widget = self.plots[tile_id]
+                line = self.lines[tile_id]
                 
-                # Если несколько каналов, показываем средний по каналам
-                if self.num_channels > 1:
-                    mean_signal = np.mean(epoch_data, axis=0)
-                    self.lines[tile_id][0].set_data(self.time_vector, mean_signal)
-                    # Скрываем остальные линии, если они есть
-                    for i in range(1, len(self.lines[tile_id])):
-                        self.lines[tile_id][i].set_data([], [])
+                data_changed = False
+                count_changed = False
+                
+                if averaged[tile_id] is not None:
+                    epoch_data = averaged[tile_id]
+                    
+                    # Вычисляем хеш данных для определения реальных изменений
+                    data_hash = hashlib.md5(epoch_data.tobytes()).hexdigest()
+                    
+                    if self.last_data_hash[tile_id] != data_hash:
+                        data_changed = True
+                        self.last_data_hash[tile_id] = data_hash
+                    
+                    # Если несколько каналов, показываем средний по каналам
+                    if self.num_channels > 1:
+                        mean_signal = np.mean(epoch_data, axis=0)
+                        line.setData(self.time_vector, mean_signal)
+                    else:
+                        # Один канал
+                        line.setData(self.time_vector, epoch_data[0, :])
+                    
+                    # Автоматически подстраиваем масштаб по Y
+                    if data_changed:
+                        y_data = epoch_data.flatten()
+                        if len(y_data) > 0:
+                            y_min, y_max = np.min(y_data), np.max(y_data)
+                            if y_max != y_min:
+                                margin = (y_max - y_min) * 0.1
+                                plot_widget.setYRange(y_min - margin, y_max + margin)
+                            else:
+                                plot_widget.setYRange(y_min - 10, y_max + 10)
                 else:
-                    # Один канал
-                    self.lines[tile_id][0].set_data(self.time_vector, epoch_data[0, :])
+                    # Нет данных - очищаем график
+                    line.setData([], [])
+                    plot_widget.setYRange(-50, 50)  # Возвращаем стандартный диапазон
                 
-                # Автоматически подстраиваем масштаб по Y
-                y_data = epoch_data.flatten()
-                if len(y_data) > 0:
-                    y_min, y_max = np.min(y_data), np.max(y_data)
-                    margin = (y_max - y_min) * 0.1
-                    ax.set_ylim(y_min - margin, y_max + margin)
-            else:
-                # Нет данных - очищаем график
-                for line in self.lines[tile_id]:
-                    line.set_data([], [])
+                # Обновляем текст с количеством эпох
+                count = counts[tile_id]
+                if self.last_epoch_counts[tile_id] != count:
+                    count_changed = True
+                    self.last_epoch_counts[tile_id] = count
+                    self.text_labels[tile_id].setText(f'Эпох: {count}')
+                
+                # Подсветка графика при изменении данных
+                if data_changed or count_changed:
+                    self.highlight_times[tile_id] = current_time
+                    # Временно меняем цвет линии на зелёный для подсветки
+                    line.setPen(pg.mkPen('lime', width=2))
+                else:
+                    # Плавно возвращаем обычный цвет
+                    time_since_highlight = current_time - self.highlight_times[tile_id]
+                    if time_since_highlight < highlight_duration:
+                        progress = time_since_highlight / highlight_duration
+                        # Плавный переход от зелёного к белому
+                        if progress < 0.5:
+                            line.setPen(pg.mkPen('lime', width=2))
+                        else:
+                            line.setPen(pg.mkPen('w', width=1.5))
+                    else:
+                        line.setPen(pg.mkPen('w', width=1.5))
             
-            # Обновляем текст с количеством эпох
-            count = counts[tile_id]
-            self.texts[tile_id].set_text(f'Эпох: {count}')
-        
-        # Обновляем отображение
-        self.fig.canvas.draw()
-        self.fig.canvas.flush_events()
+        except Exception as e:
+            if not hasattr(self, '_error_shown'):
+                print(f"⚠ Ошибка при обновлении графиков: {e}")
+                self._error_shown = True
+    
+    def closeEvent(self, event):
+        """Обработчик закрытия окна."""
+        self.window_open = False
+        # Вызываем shutdown через QApplication
+        app = QApplication.instance()
+        if app and hasattr(app, 'shutdown'):
+            app.shutdown()
+        event.accept()
     
     def close(self):
         """Закрывает окно графика."""
-        plt.close(self.fig)
+        self.window_open = False
+        super().close()
+
+
+# ============================================================================
+# КЛАСС ПРИЛОЖЕНИЯ ДЛЯ СОБЫТИЙНО-ОРИЕНТИРОВАННОЙ МОДЕЛИ
+# ============================================================================
+
+class EEGProcessorApp(QApplication):
+    """
+    Главное приложение для обработки ЭЭГ в реальном времени.
+    Использует событийно-ориентированную модель с QTimer.
+    """
+    
+    def __init__(self, argv):
+        super().__init__(argv)
+        
+        # Компоненты обработки (будут инициализированы позже)
+        self.buffer: Optional[EEGBuffer] = None
+        self.processor: Optional[EpochProcessor] = None
+        self.plotter: Optional[RealtimePlotter] = None
+        self.marker_inlet: Optional[StreamInlet] = None
+        self.eeg_inlet: Optional[StreamInlet] = None
+        
+        # Статистика
+        self.processed_markers = 0
+        self.skipped_markers = 0
+        self.start_time = time.time()
+        self.last_status_time = time.time()
+        self.last_eeg_log_time = 0
+        
+        # Таймеры для событийно-ориентированной модели
+        self.update_timer = QTimer()  # Таймер для обновления графиков
+        self.update_timer.timeout.connect(self.update_plots)
+        
+        self.data_timer = QTimer()  # Таймер для чтения данных LSL
+        self.data_timer.timeout.connect(self.read_lsl_data)
+        
+        self.status_timer = QTimer()  # Таймер для вывода статуса
+        self.status_timer.timeout.connect(self.print_status)
+        
+        # Очередь маркеров
+        self.marker_queue = []
+        
+    def initialize(self):
+        """Инициализация компонентов обработки."""
+        print("=" * 70)
+        print("ОБРАБОТКА ЭЭГ ДАННЫХ В РЕАЛЬНОМ ВРЕМЕНИ")
+        print("=" * 70)
+        print("\nЭтот скрипт будет:")
+        print("  1. Подключаться к потокам маркеров и ЭЭГ")
+        print("  2. Извлекать эпохи при каждом событии 'on'")
+        print("  3. Фильтровать и обрабатывать данные")
+        print("  4. Показывать усреднённые сигналы в реальном времени")
+        print("  5. Сохранять результаты при остановке\n")
+        
+        # Шаг 1: Находим потоки
+        marker_info, eeg_info = find_streams()
+        if marker_info is None or eeg_info is None:
+            print("\nНе удалось найти необходимые потоки. Выход.")
+            return False
+        
+        # Шаг 2: Создаём inlets для чтения данных
+        print("\nПодключение к потокам...")
+        self.marker_inlet = StreamInlet(marker_info)
+        self.eeg_inlet = StreamInlet(eeg_info)
+        
+        # Получаем параметры потока ЭЭГ
+        eeg_sampling_rate = eeg_info.nominal_srate()
+        eeg_num_channels = eeg_info.channel_count()
+        
+        if eeg_sampling_rate == 0:
+            print("ОШИБКА: Частота дискретизации ЭЭГ не определена!")
+            return False
+        
+        print(f"  ✓ Подключено к потоку маркеров")
+        print(f"  ✓ Подключено к потоку ЭЭГ ({eeg_num_channels} каналов, {eeg_sampling_rate} Гц)")
+        print("\n  Синхронизация: относительное время от первого сэмпла ЭЭГ")
+        
+        # Шаг 3: Инициализируем компоненты обработки
+        print("\nИнициализация компонентов обработки...")
+        self.buffer = EEGBuffer(eeg_sampling_rate, eeg_num_channels)
+        self.processor = EpochProcessor(eeg_sampling_rate, eeg_num_channels)
+        self.plotter = RealtimePlotter(eeg_sampling_rate, eeg_num_channels, self.processor)
+        
+        print("  ✓ Все компоненты инициализированы")
+        
+        # Шаг 3.5: Накапливаем данные в буфере перед началом обработки
+        min_buffer_duration = EPOCH_POST_STIM + 0.5
+        print(f"\nНакопление данных в буфере (минимум {min_buffer_duration:.1f} сек для эпох)...")
+        buffer_ready = False
+        start_time = time.time()
+        
+        while not buffer_ready:
+            self.processEvents()  # Обрабатываем события Qt
+            chunk, timestamps = self.eeg_inlet.pull_chunk(timeout=0.1, max_samples=100)
+            if chunk and timestamps:
+                chunk_array = np.array(chunk)
+                if chunk_array.shape[1] == eeg_num_channels:
+                    pass
+                elif chunk_array.shape[0] == eeg_num_channels:
+                    chunk_array = chunk_array.T
+                else:
+                    continue
+                
+                for i, ts in enumerate(timestamps):
+                    self.buffer.add_sample(ts, chunk_array[i, :])
+            
+            marker_sample, marker_timestamp = self.marker_inlet.pull_sample(timeout=0.0)
+            if marker_sample is not None:
+                parsed = parse_marker(marker_sample[0])
+                if parsed is not None:
+                    tile_id, event = parsed
+                    if event == "on" and 0 <= tile_id < NUM_TILES:
+                        self.marker_queue.append((tile_id, marker_timestamp))
+                        if len(self.marker_queue) == 1:
+                            print(f"  Получен первый маркер (плитка {tile_id}), ждём накопления данных...")
+            
+            buffer_info = self.buffer.get_buffer_info()
+            if buffer_info['duration'] >= min_buffer_duration:
+                buffer_ready = True
+                eeg_first_time = self.buffer.get_first_sample_time()
+                if eeg_first_time:
+                    print(f"  ✓ Буфер готов: {buffer_info['duration']:.2f} сек данных, {buffer_info['size']} точек")
+                    print(f"  Время первого сэмпла ЭЭГ: {eeg_first_time:.3f}")
+                else:
+                    print(f"  ✓ Буфер готов: {buffer_info['duration']:.2f} сек данных, {buffer_info['size']} точек")
+                if len(self.marker_queue) > 0:
+                    print(f"  В очереди {len(self.marker_queue)} маркеров для обработки")
+            elif time.time() - start_time > 15:
+                print(f"  ⚠ Буфер частично готов: {buffer_info['duration']:.2f} сек данных")
+                print(f"     Продолжаем, но некоторые маркеры могут быть пропущены")
+                buffer_ready = True
+        
+        # Обрабатываем маркеры из очереди
+        self.process_marker_queue()
+        
+        print("\n" + "=" * 70)
+        print("НАЧАЛО ОБРАБОТКИ")
+        print("Закройте окно для остановки и сохранения результатов")
+        print("=" * 70 + "\n")
+        
+        # Запускаем таймеры
+        self.update_timer.start(UPDATE_INTERVAL_MS)  # Обновление графиков
+        self.data_timer.start(10)  # Чтение данных LSL каждые 10 мс
+        self.status_timer.start(int(STATUS_UPDATE_INTERVAL * 1000))  # Статус каждую секунду
+        
+        # Показываем окно
+        self.plotter.show()
+        self.plotter.raise_()
+        self.plotter.activateWindow()
+        QApplication.processEvents()
+        
+        return True
+    
+    def process_marker_queue(self):
+        """Обрабатывает маркеры из очереди."""
+        if not self.marker_queue:
+            return
+        
+        # Получаем время первого сэмпла ЭЭГ для синхронизации
+        eeg_first_time = self.buffer.get_first_sample_time()
+        if eeg_first_time is None:
+            print("⚠ Предупреждение: время первого сэмпла ЭЭГ не определено, пропускаем очередь маркеров")
+            self.marker_queue.clear()
+            return
+        
+        print(f"\n{'='*70}")
+        print(f"ОБРАБОТКА {len(self.marker_queue)} МАРКЕРОВ ИЗ ОЧЕРЕДИ")
+        print(f"{'='*70}")
+        
+        # Фильтруем маркеры: оставляем только те, которые пришли ПОСЛЕ первого сэмпла ЭЭГ
+        valid_markers = []
+        skipped_before_start = 0
+        
+        for tile_id, marker_ts in self.marker_queue:
+            marker_relative_time = marker_ts - eeg_first_time
+            if marker_relative_time < 0:
+                skipped_before_start += 1
+                continue  # Пропускаем маркеры, которые пришли до первого сэмпла ЭЭГ
+            valid_markers.append((tile_id, marker_ts))
+        
+        if skipped_before_start > 0:
+            print(f"⚠ Пропущено {skipped_before_start} маркеров, которые пришли до первого сэмпла ЭЭГ")
+        
+        if not valid_markers:
+            print("Нет валидных маркеров для обработки (все пришли до начала записи ЭЭГ)")
+            self.marker_queue.clear()
+            return
+        
+        for idx, (tile_id, marker_ts) in enumerate(valid_markers, 1):
+            is_ready, ready_message = self.buffer.is_ready(
+                marker_ts, EPOCH_PRE_STIM, EPOCH_POST_STIM, eeg_first_time
+            )
+            marker_relative_time = marker_ts - eeg_first_time
+            print(f"\n[{idx}/{len(valid_markers)}] Маркер плитки {tile_id} (относительное время: {marker_relative_time:.3f} сек)")
+            
+            if is_ready:
+                epoch_result = self.buffer.extract_epoch(
+                    marker_ts, EPOCH_PRE_STIM, EPOCH_POST_STIM, eeg_first_time
+                )
+                
+                if epoch_result is not None:
+                    epoch_data, time_vector = epoch_result
+                    self.processor.add_epoch(tile_id, epoch_data)
+                    self.processed_markers += 1
+                    epoch_counts = self.processor.get_epoch_counts()
+                    count_for_tile = epoch_counts[tile_id]
+                    print(f"  ✓ Обработана успешно | Эпох для плитки: {count_for_tile}")
+                else:
+                    self.skipped_markers += 1
+                    print(f"  ✗ Пропущена: ошибка извлечения эпохи")
+            else:
+                self.skipped_markers += 1
+                buffer_info = self.buffer.get_buffer_info()
+                print(f"  ✗ Пропущена: {ready_message}")
+        
+        print(f"\n{'='*70}")
+        print(f"Обработано из очереди: {self.processed_markers}, пропущено: {self.skipped_markers + skipped_before_start}")
+        print(f"{'='*70}\n")
+        
+        self.marker_queue.clear()
+    
+    def read_lsl_data(self):
+        """Читает данные из LSL потоков (вызывается таймером)."""
+        if self.marker_inlet is None or self.eeg_inlet is None:
+            return
+        
+        # Получаем время первого сэмпла ЭЭГ для синхронизации
+        eeg_first_time = self.buffer.get_first_sample_time()
+        if eeg_first_time is None:
+            return  # Ещё нет данных ЭЭГ
+        
+        # Читаем маркеры (может быть несколько в очереди)
+        while True:
+            marker_sample, marker_timestamp = self.marker_inlet.pull_sample(timeout=0.0)
+            if marker_sample is None:
+                break  # Больше нет маркеров
+            
+            raw_marker = marker_sample[0] if isinstance(marker_sample, (list, tuple)) else marker_sample
+            
+            parsed = parse_marker(raw_marker)
+            if parsed is None:
+                continue
+            
+            tile_id, event = parsed
+            if event != "on":
+                continue
+            
+            if not (0 <= tile_id < NUM_TILES):
+                continue
+            
+            # Вычисляем коррекцию времени для синхронизации маркеров с ЭЭГ
+            if not hasattr(self, '_marker_time_correction'):
+                if marker_timestamp < eeg_first_time:
+                    # Маркер использует локальное время LSL, а ЭЭГ - абсолютное
+                    # Вычисляем смещение для синхронизации
+                    self._marker_time_correction = eeg_first_time - marker_timestamp
+                else:
+                    self._marker_time_correction = 0.0
+            
+            # Применяем коррекцию времени к маркеру
+            corrected_marker_time = marker_timestamp + self._marker_time_correction
+            marker_relative_time = corrected_marker_time - eeg_first_time
+            
+            if marker_relative_time < 0:
+                # Маркер пришёл до начала записи ЭЭГ - пропускаем
+                self.skipped_markers += 1
+                continue
+            
+            # Используем скорректированное время для проверки готовности
+            is_ready, ready_message = self.buffer.is_ready(
+                corrected_marker_time, EPOCH_PRE_STIM, EPOCH_POST_STIM, eeg_first_time
+            )
+            
+            if not is_ready:
+                self.skipped_markers += 1
+                continue
+            
+            # Пытаемся извлечь эпоху (используем скорректированное время)
+            epoch_result = self.buffer.extract_epoch(
+                corrected_marker_time, EPOCH_PRE_STIM, EPOCH_POST_STIM, eeg_first_time
+            )
+            
+            if epoch_result is None:
+                self.skipped_markers += 1
+                continue
+            
+            epoch_data, time_vector = epoch_result
+            self.processor.add_epoch(tile_id, epoch_data)
+            self.processed_markers += 1
+        
+        # Читаем данные ЭЭГ
+        chunk, timestamps = self.eeg_inlet.pull_chunk(timeout=0.0, max_samples=100)
+        if chunk and timestamps:
+            chunk_array = np.array(chunk)
+            if chunk_array.shape[1] == self.buffer.num_channels:
+                pass
+            elif chunk_array.shape[0] == self.buffer.num_channels:
+                chunk_array = chunk_array.T
+            else:
+                return
+            
+            samples_added = 0
+            for i, ts in enumerate(timestamps):
+                self.buffer.add_sample(ts, chunk_array[i, :])
+                samples_added += 1
+            
+            # Периодически выводим информацию о полученных данных
+            current_time = time.time()
+            if current_time - self.last_eeg_log_time >= 5.0:
+                buffer_info = self.buffer.get_buffer_info()
+                print(f"📊 Получено {samples_added} сэмплов ЭЭГ | "
+                      f"Буфер: {buffer_info['size']} точек, {buffer_info['duration']:.2f} сек")
+                self.last_eeg_log_time = current_time
+    
+    def update_plots(self):
+        """Обновляет графики (вызывается таймером)."""
+        if self.plotter is not None and self.processor is not None:
+            self.plotter.update(self.processor)
+    
+    def print_status(self):
+        """Выводит статус обработки (вызывается таймером)."""
+        if self.buffer is None or self.processor is None:
+            return
+        
+        current_time = time.time()
+        buffer_info = self.buffer.get_buffer_info()
+        epoch_counts = self.processor.get_epoch_counts()
+        total_epochs = sum(epoch_counts.values())
+        
+        print(f"\n{'='*70}")
+        print(f"СТАТУС [t={current_time - self.start_time:.1f}s работы]")
+        print(f"  Буфер ЭЭГ: {buffer_info['size']} точек, "
+              f"{buffer_info['duration']:.2f} сек данных")
+        if buffer_info['start_time'] is not None:
+            print(f"    Временной диапазон: {buffer_info['start_time']:.3f} - {buffer_info['end_time']:.3f} сек")
+        print(f"  Обработано маркеров: {self.processed_markers} | Пропущено: {self.skipped_markers}")
+        if total_epochs > 0:
+            success_rate = self.processed_markers / (self.processed_markers + self.skipped_markers) * 100 if (self.processed_markers + self.skipped_markers) > 0 else 0
+            print(f"  Успешность: {success_rate:.1f}%")
+            print(f"  Всего эпох накоплено: {total_epochs}")
+            print(f"  Эпохи по плиткам:")
+            for tile_id in range(NUM_TILES):
+                count = epoch_counts[tile_id]
+                if count > 0:
+                    print(f"    Плитка {tile_id}: {count} эпох")
+        print(f"{'='*70}\n")
+    
+    def shutdown(self):
+        """Останавливает обработку и сохраняет результаты."""
+        print("\n\n" + "=" * 70)
+        print("ОСТАНОВКА ОБРАБОТКИ")
+        print("=" * 70)
+        
+        # Останавливаем таймеры
+        self.update_timer.stop()
+        self.data_timer.stop()
+        self.status_timer.stop()
+        
+        # Выводим статистику
+        print(f"\nСтатистика обработки:")
+        print(f"  Обработано маркеров: {self.processed_markers}")
+        print(f"  Пропущено маркеров: {self.skipped_markers}")
+        if self.processed_markers + self.skipped_markers > 0:
+            success_rate = self.processed_markers / (self.processed_markers + self.skipped_markers) * 100
+            print(f"  Процент успешной обработки: {success_rate:.1f}%")
+        
+        # Информация о буфере
+        if self.buffer is not None:
+            buffer_info = self.buffer.get_buffer_info()
+            print(f"\nСостояние буфера:")
+            print(f"  Размер: {buffer_info['size']} точек")
+            print(f"  Длительность: {buffer_info['duration']:.2f} сек")
+        
+        # Сохраняем результаты
+        if self.processor is not None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            results_dir = "results"
+            os.makedirs(results_dir, exist_ok=True)
+            filename = os.path.join(results_dir, f"eeg_epochs_{timestamp}.pkl")
+            
+            self.processor.save_results(filename)
+            
+            print("\nОбработка завершена. Результаты сохранены.")
+            print(f"Для загрузки результатов используйте:")
+            print(f"  import pickle")
+            print(f"  with open('{filename}', 'rb') as f:")
+            print(f"      results = pickle.load(f)")
 
 
 # ============================================================================
@@ -585,313 +1097,29 @@ class RealtimePlotter:
 def main():
     """
     Главная функция: запускает обработку ЭЭГ в реальном времени.
+    Использует событийно-ориентированную модель с PyQt5 и pyqtgraph.
     """
-    print("=" * 70)
-    print("ОБРАБОТКА ЭЭГ ДАННЫХ В РЕАЛЬНОМ ВРЕМЕНИ")
-    print("=" * 70)
-    print("\nЭтот скрипт будет:")
-    print("  1. Подключаться к потокам маркеров и ЭЭГ")
-    print("  2. Извлекать эпохи при каждом событии 'on'")
-    print("  3. Фильтровать и обрабатывать данные")
-    print("  4. Показывать усреднённые сигналы в реальном времени")
-    print("  5. Сохранять результаты при остановке (Ctrl+C)\n")
+    import sys
     
-    # Шаг 1: Находим потоки
-    marker_info, eeg_info = find_streams()
-    if marker_info is None or eeg_info is None:
-        print("\nНе удалось найти необходимые потоки. Выход.")
-        return
+    # Создаём приложение Qt
+    app = EEGProcessorApp(sys.argv)
     
-    # Шаг 2: Создаём inlets для чтения данных
-    print("\nПодключение к потокам...")
-    marker_inlet = StreamInlet(marker_info)
-    eeg_inlet = StreamInlet(eeg_info)
+    # Инициализируем компоненты
+    if not app.initialize():
+        return 1
     
-    # Получаем параметры потока ЭЭГ
-    eeg_sampling_rate = eeg_info.nominal_srate()
-    eeg_num_channels = eeg_info.channel_count()
+    # Подключаем обработчик закрытия окна через сигналы Qt
+    app.aboutToQuit.connect(app.shutdown)
     
-    if eeg_sampling_rate == 0:
-        print("ОШИБКА: Частота дискретизации ЭЭГ не определена!")
-        return
+    # Запускаем главный цикл событий Qt
+    exit_code = app.exec_()
     
-    print(f"  ✓ Подключено к потоку маркеров")
-    print(f"  ✓ Подключено к потоку ЭЭГ ({eeg_num_channels} каналов, {eeg_sampling_rate} Гц)")
-    print("\n  Синхронизация: нативные LSL-таймстемпы (единое время для ЭЭГ и маркеров)")
+    # Сохраняем результаты при выходе
+    app.shutdown()
     
-    # Шаг 3: Инициализируем компоненты обработки
-    print("\nИнициализация компонентов обработки...")
-    buffer = EEGBuffer(eeg_sampling_rate, eeg_num_channels)
-    processor = EpochProcessor(eeg_sampling_rate, eeg_num_channels)
-    plotter = RealtimePlotter(eeg_sampling_rate, eeg_num_channels)
-    
-    print("  ✓ Все компоненты инициализированы")
-    
-    # Шаг 3.5: Накапливаем данные в буфере перед началом обработки
-    # Нужно накопить достаточно данных, чтобы можно было извлечь эпоху после маркера
-    # Эпоха требует EPOCH_POST_STIM секунд после маркера, поэтому нужно накопить минимум столько
-    min_buffer_duration = EPOCH_POST_STIM + 0.5  # Добавляем запас 0.5 сек
-    print(f"\nНакопление данных в буфере (минимум {min_buffer_duration:.1f} сек для эпох)...")
-    buffer_ready = False
-    start_time = time.time()
-    
-    # Также накапливаем маркеры в очереди, чтобы обработать их позже
-    marker_queue = []
-    
-    while not buffer_ready:
-        # Читаем данные ЭЭГ
-        chunk, timestamps = eeg_inlet.pull_chunk(timeout=0.1, max_samples=100)
-        if chunk and timestamps:
-            chunk_array = np.array(chunk)
-            if chunk_array.shape[1] == eeg_num_channels:
-                pass
-            elif chunk_array.shape[0] == eeg_num_channels:
-                chunk_array = chunk_array.T
-            else:
-                continue
-
-            for i, ts in enumerate(timestamps):
-                buffer.add_sample(ts, chunk_array[i, :])
-
-        marker_sample, marker_timestamp = marker_inlet.pull_sample(timeout=0.0)
-        if marker_sample is not None:
-            parsed = parse_marker(marker_sample[0])
-            if parsed is not None:
-                tile_id, event = parsed
-                if event == "on" and 0 <= tile_id < NUM_TILES:
-                    marker_queue.append((tile_id, marker_timestamp))
-                    if len(marker_queue) == 1:
-                        print(f"  Получен первый маркер (плитка {tile_id}), ждём накопления данных...")
-        
-        # Проверяем готовность буфера
-        buffer_info = buffer.get_buffer_info()
-        if buffer_info['duration'] >= min_buffer_duration:
-            buffer_ready = True
-            print(f"  ✓ Буфер готов: {buffer_info['duration']:.2f} сек данных, {buffer_info['size']} точек")
-            if len(marker_queue) > 0:
-                print(f"  В очереди {len(marker_queue)} маркеров для обработки")
-        elif time.time() - start_time > 15:
-            # Если прошло 15 секунд, но буфер не готов, продолжаем с предупреждением
-            print(f"  ⚠ Буфер частично готов: {buffer_info['duration']:.2f} сек данных")
-            print(f"     Продолжаем, но некоторые маркеры могут быть пропущены")
-            buffer_ready = True
-    
-    print("\n" + "=" * 70)
-    print("НАЧАЛО ОБРАБОТКИ")
-    print("Нажмите Ctrl+C для остановки и сохранения результатов")
-    print("=" * 70 + "\n")
-    
-    # Шаг 4: Главный цикл обработки
-    last_update_time = time.time()
-    skipped_markers = 0  # Счётчик пропущенных маркеров
-    processed_markers = 0  # Счётчик обработанных маркеров
-    main.start_time = time.time()  # Время начала работы для статуса
-    main.last_status_time = time.time()  # Время последнего статуса
-    
-    if marker_queue:
-        print(f"\nОжидание накопления данных для обработки {len(marker_queue)} маркеров из очереди...")
-        last_marker_ts = max(ts for _, ts in marker_queue)
-        required_buffer_end = last_marker_ts + EPOCH_POST_STIM + 0.1
-
-        wait_start = time.time()
-        while True:
-            chunk, timestamps = eeg_inlet.pull_chunk(timeout=0.1, max_samples=100)
-            if chunk and timestamps:
-                chunk_array = np.array(chunk)
-                if chunk_array.shape[1] == eeg_num_channels:
-                    pass
-                elif chunk_array.shape[0] == eeg_num_channels:
-                    chunk_array = chunk_array.T
-                else:
-                    continue
-                for i, ts in enumerate(timestamps):
-                    buffer.add_sample(ts, chunk_array[i, :])
-
-            buffer_info = buffer.get_buffer_info()
-            if buffer_info['end_time'] is not None and buffer_info['end_time'] >= required_buffer_end:
-                print(f"  ✓ Данных достаточно (буфер до {buffer_info['end_time']:.2f}, требуется до {required_buffer_end:.2f})")
-                break
-            elif time.time() - wait_start > 10:
-                print(f"  ⚠ Таймаут ожидания. Продолжаем с текущим буфером (до {buffer_info.get('end_time', 0):.2f})")
-                break
-    
-    if marker_queue:
-        print(f"\n{'='*70}")
-        print(f"ОБРАБОТКА {len(marker_queue)} МАРКЕРОВ ИЗ ОЧЕРЕДИ")
-        print(f"{'='*70}")
-        for idx, (tile_id, marker_ts) in enumerate(marker_queue, 1):
-            is_ready, ready_message = buffer.is_ready(
-                marker_ts, EPOCH_PRE_STIM, EPOCH_POST_STIM
-            )
-            print(f"\n[{idx}/{len(marker_queue)}] Маркер плитки {tile_id} (LSL ts={marker_ts:.3f})")
-
-            if is_ready:
-                epoch_result = buffer.extract_epoch(
-                    marker_ts, EPOCH_PRE_STIM, EPOCH_POST_STIM
-                )
-                
-                if epoch_result is not None:
-                    epoch_data, time_vector = epoch_result
-                    processor.add_epoch(tile_id, epoch_data)
-                    processed_markers += 1
-                    epoch_counts = processor.get_epoch_counts()
-                    count_for_tile = epoch_counts[tile_id]
-                    print(f"  ✓ Обработана успешно | Эпох для плитки: {count_for_tile}")
-                else:
-                    skipped_markers += 1
-                    print(f"  ✗ Пропущена: ошибка извлечения эпохи")
-            else:
-                skipped_markers += 1
-                buffer_info = buffer.get_buffer_info()
-                print(f"  ✗ Пропущена: {ready_message}")
-                if buffer_info['duration'] > 0:
-                    print(f"    Буфер: {buffer_info['duration']:.2f} сек, "
-                          f"от {buffer_info.get('start_time', 0):.3f} до {buffer_info.get('end_time', 0):.3f} сек")
-        
-        print(f"\n{'='*70}")
-        print(f"Обработано из очереди: {processed_markers}, пропущено: {skipped_markers}")
-        print(f"{'='*70}\n")
-    
-    try:
-        while True:
-            marker_sample, marker_timestamp = marker_inlet.pull_sample(timeout=0.0)
-            if marker_sample is not None:
-                parsed = parse_marker(marker_sample[0])
-                if parsed is not None:
-                    tile_id, event = parsed
-
-                    if event == "on" and 0 <= tile_id < NUM_TILES:
-                        is_ready, ready_message = buffer.is_ready(
-                            marker_timestamp, EPOCH_PRE_STIM, EPOCH_POST_STIM
-                        )
-
-                        if is_ready:
-                            epoch_result = buffer.extract_epoch(
-                                marker_timestamp, EPOCH_PRE_STIM, EPOCH_POST_STIM
-                            )
-
-                            if epoch_result is not None:
-                                epoch_data, time_vector = epoch_result
-                                processor.add_epoch(tile_id, epoch_data)
-                                processed_markers += 1
-                                epoch_counts = processor.get_epoch_counts()
-                                count_for_tile = epoch_counts[tile_id]
-                                print(f"✓ [LSL ts={marker_timestamp:.3f}] Маркер плитки {tile_id} обработана | "
-                                      f"Эпох для плитки: {count_for_tile} | "
-                                      f"Всего: {processed_markers}, пропущено: {skipped_markers}")
-                            else:
-                                skipped_markers += 1
-                                print(f"✗ [LSL ts={marker_timestamp:.3f}] Маркер плитки {tile_id} пропущен: ошибка извлечения эпохи")
-                        else:
-                            skipped_markers += 1
-                            buffer_info = buffer.get_buffer_info()
-                            print(f"✗ [LSL ts={marker_timestamp:.3f}] Маркер плитки {tile_id} пропущен: {ready_message}")
-                            if buffer_info['duration'] > 0:
-                                print(f"    Буфер: {buffer_info['duration']:.2f} сек, "
-                                      f"от {buffer_info.get('start_time', 0):.3f} до {buffer_info.get('end_time', 0):.3f} сек")
-            
-            chunk, timestamps = eeg_inlet.pull_chunk(timeout=0.0, max_samples=100)
-            if chunk and timestamps:
-                chunk_array = np.array(chunk)
-                if chunk_array.shape[1] == eeg_num_channels:
-                    pass
-                elif chunk_array.shape[0] == eeg_num_channels:
-                    chunk_array = chunk_array.T
-                else:
-                    print(f"ОШИБКА: Неожиданная форма данных: {chunk_array.shape}")
-                    continue
-
-                samples_added = 0
-                for i, ts in enumerate(timestamps):
-                    buffer.add_sample(ts, chunk_array[i, :])
-                    samples_added += 1
-                
-                # Периодически выводим информацию о полученных данных
-                if not hasattr(main, 'last_eeg_log_time'):
-                    main.last_eeg_log_time = 0
-                
-                current_time = time.time()
-                if current_time - main.last_eeg_log_time >= 5.0:  # Каждые 5 секунд
-                    buffer_info = buffer.get_buffer_info()
-                    print(f"📊 Получено {samples_added} сэмплов ЭЭГ | "
-                          f"Буфер: {buffer_info['size']} точек, {buffer_info['duration']:.2f} сек")
-                    main.last_eeg_log_time = current_time
-            
-            # Обновляем график периодически (часто для плавности)
-            current_time = time.time()
-            if current_time - last_update_time >= UPDATE_INTERVAL:
-                plotter.update(processor)
-                last_update_time = current_time
-            
-            # Выводим подробный статус периодически
-            if not hasattr(main, 'last_status_time'):
-                main.last_status_time = current_time
-            
-            if current_time - main.last_status_time >= STATUS_UPDATE_INTERVAL:
-                # Подробная информация о состоянии
-                buffer_info = buffer.get_buffer_info()
-                epoch_counts = processor.get_epoch_counts()
-                total_epochs = sum(epoch_counts.values())
-                
-                print(f"\n{'='*70}")
-                print(f"СТАТУС [t={current_time - start_time:.1f}s работы]")
-                print(f"  Буфер ЭЭГ: {buffer_info['size']} точек, "
-                      f"{buffer_info['duration']:.2f} сек данных")
-                if buffer_info['start_time'] is not None:
-                    print(f"    Временной диапазон: {buffer_info['start_time']:.3f} - {buffer_info['end_time']:.3f} сек")
-                print(f"  Обработано маркеров: {processed_markers} | Пропущено: {skipped_markers}")
-                if total_epochs > 0:
-                    success_rate = processed_markers / (processed_markers + skipped_markers) * 100 if (processed_markers + skipped_markers) > 0 else 0
-                    print(f"  Успешность: {success_rate:.1f}%")
-                    print(f"  Всего эпох накоплено: {total_epochs}")
-                    print(f"  Эпохи по плиткам:")
-                    for tile_id in range(NUM_TILES):
-                        count = epoch_counts[tile_id]
-                        if count > 0:
-                            print(f"    Плитка {tile_id}: {count} эпох")
-                print(f"{'='*70}\n")
-                
-                main.last_status_time = current_time
-            
-            # Небольшая задержка, чтобы не нагружать CPU
-            time.sleep(0.01)
-    
-    except KeyboardInterrupt:
-        print("\n\n" + "=" * 70)
-        print("ОСТАНОВКА ОБРАБОТКИ")
-        print("=" * 70)
-        
-        # Выводим статистику
-        print(f"\nСтатистика обработки:")
-        print(f"  Обработано маркеров: {processed_markers}")
-        print(f"  Пропущено маркеров: {skipped_markers}")
-        if processed_markers + skipped_markers > 0:
-            success_rate = processed_markers / (processed_markers + skipped_markers) * 100
-            print(f"  Процент успешной обработки: {success_rate:.1f}%")
-        
-        # Информация о буфере
-        buffer_info = buffer.get_buffer_info()
-        print(f"\nСостояние буфера:")
-        print(f"  Размер: {buffer_info['size']} точек")
-        print(f"  Длительность: {buffer_info['duration']:.2f} сек")
-        
-        # Сохраняем результаты
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        results_dir = "results"
-        os.makedirs(results_dir, exist_ok=True)
-        filename = os.path.join(results_dir, f"eeg_epochs_{timestamp}.pkl")
-        
-        processor.save_results(filename)
-        
-        # Закрываем график
-        plotter.close()
-        
-        print("\nОбработка завершена. Результаты сохранены.")
-        print(f"Для загрузки результатов используйте:")
-        print(f"  import pickle")
-        print(f"  with open('{filename}', 'rb') as f:")
-        print(f"      results = pickle.load(f)")
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())
