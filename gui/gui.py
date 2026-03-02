@@ -172,6 +172,12 @@ class StimulusApp:
 
             event_data = self.controller.update()
             if event_data:
+                # Отправка маркера привязана к аппаратному flip — минимизирует джиттер для SSVEP
+                self.win.callOnFlip(
+                    self.controller.lsl.send,
+                    event_data["tile_id"],
+                    event_data["event"],
+                )
                 print(event_data)
 
             self._draw()

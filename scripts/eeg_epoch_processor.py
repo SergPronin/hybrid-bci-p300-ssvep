@@ -31,7 +31,7 @@ import os
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from scipy import signal
-from pylsl import StreamInlet, resolve_byprop, local_clock
+from pylsl import StreamInlet, resolve_byprop
 
 # ============================================================================
 # КОНСТАНТЫ И ПАРАМЕТРЫ
@@ -259,18 +259,14 @@ class EpochProcessor:
 class EEGBuffer:
     """
     Класс для хранения скользящего буфера ЭЭГ данных.
-    
-    Хранит последние N секунд данных, чтобы можно было извлечь эпоху
-    при получении маркера.
-    
-    Использует относительное время от момента получения первого сэмпла
-    для синхронизации с маркерами.
+
+    Хранит последние N секунд данных по нативным LSL-таймстемпам.
+    LSL синхронизирует время между потоками (ЭЭГ, маркеры) под капотом —
+    pull_chunk и pull_sample возвращают timestamps в едином времени.
     """
-    
+
     def __init__(self, sampling_rate: float, num_channels: int, duration: float = BUFFER_DURATION):
         """
-        Инициализация буфера.
-        
         Args:
             sampling_rate: Частота дискретизации
             num_channels: Количество каналов
@@ -279,96 +275,67 @@ class EEGBuffer:
         self.sampling_rate = sampling_rate
         self.num_channels = num_channels
         self.buffer_size = int(duration * sampling_rate)
-        
-        # Буфер данных: список кортежей (relative_time, data_array)
-        # relative_time - относительное время в секундах от первого сэмпла
-        # data_array имеет форму (num_channels,)
+
+        # Буфер: кортежи (lsl_timestamp, data) — нативные метки из pull_chunk
         self.buffer: deque = deque(maxlen=self.buffer_size)
-        
-        # Время первого сэмпла (используем системное время для синхронизации)
-        self.first_sample_time: Optional[float] = None
-        
+
         print(f"Инициализирован буфер ЭЭГ:")
         print(f"  Размер буфера: {self.buffer_size} точек ({duration} сек)")
-        print(f"  Используется относительное время от первого сэмпла")
-    
-    def add_sample(self, timestamp: float, data: np.ndarray, local_time: float):
+        print(f"  Используются нативные LSL-таймстемпы (единое время для ЭЭГ и маркеров)")
+
+    def add_sample(self, timestamp: float, data: np.ndarray) -> None:
         """
-        Добавляет новый сэмпл в буфер.
-        
+        Добавляет сэмпл в буфер.
+
         Args:
-            timestamp: Временная метка LSL (не используется, только для совместимости)
+            timestamp: LSL-таймстемп из pull_chunk (единое время)
             data: Массив формы (num_channels,)
-            local_time: Локальное системное время (time.time() или local_clock())
         """
         if data.shape != (self.num_channels,):
             print(f"ОШИБКА: Неверный размер данных. Ожидается ({self.num_channels},), "
                   f"получено {data.shape}")
             return
-        
-        # Запоминаем время первого сэмпла
-        if self.first_sample_time is None:
-            self.first_sample_time = local_time
-        
-        # Вычисляем относительное время от первого сэмпла
-        relative_time = local_time - self.first_sample_time
-        
-        self.buffer.append((relative_time, data.copy()))
-    
-    def get_first_sample_time(self) -> Optional[float]:
-        """Возвращает время первого сэмпла (для синхронизации с маркерами)."""
-        return self.first_sample_time
-    
-    def is_ready(self, marker_relative_time: float, pre_stim: float, post_stim: float) -> Tuple[bool, str]:
+        self.buffer.append((timestamp, data.copy()))
+
+    def is_ready(self, marker_timestamp: float, pre_stim: float, post_stim: float) -> Tuple[bool, str]:
         """
-        Проверяет, достаточно ли данных в буфере для извлечения эпохи.
-        
+        Проверяет, достаточно ли данных для извлечения эпохи.
+
         Args:
-            marker_relative_time: Относительное время маркера (от момента первого сэмпла ЭЭГ)
-            pre_stim: Время до стимула в секундах
-            post_stim: Время после стимула в секундах
-        
+            marker_timestamp: LSL-таймстемп маркера из pull_sample
+            pre_stim: Время до стимула, сек
+            post_stim: Время после стимула, сек
+
         Returns:
-            Кортеж (is_ready, message) - готов ли буфер и сообщение о состоянии
+            (is_ready, message)
         """
         if len(self.buffer) < 2:
             return False, f"Буфер пуст (нужно минимум 2 точки, есть {len(self.buffer)})"
-        
-        if self.first_sample_time is None:
-            return False, "Буфер не инициализирован (нет первого сэмпла)"
-        
-        # Вычисляем временные границы эпохи (в относительном времени)
-        epoch_start_time = marker_relative_time - pre_stim
-        epoch_end_time = marker_relative_time + post_stim
-        
-        # Получаем временные границы буфера
+
+        epoch_start = marker_timestamp - pre_stim
+        epoch_end = marker_timestamp + post_stim
+
         buffer_times = np.array([ts for ts, _ in self.buffer])
         buffer_start = buffer_times[0]
         buffer_end = buffer_times[-1]
         buffer_duration = buffer_end - buffer_start
-        
-        # Проверяем наличие данных до маркера
-        if buffer_start > epoch_start_time:
-            needed_before = epoch_start_time - buffer_start
-            return False, f"Недостаточно данных ДО маркера (нужно {pre_stim:.3f} сек до, буфер начинается на {needed_before:.3f} сек позже)"
-        
-        # Проверяем наличие данных после маркера
-        if buffer_end < epoch_end_time:
-            needed_after = epoch_end_time - buffer_end
-            return False, f"Недостаточно данных ПОСЛЕ маркера (нужно {post_stim:.3f} сек после, буфер заканчивается на {needed_after:.3f} сек раньше)"
-        
+
+        if buffer_start > epoch_start:
+            return False, (
+                f"Недостаточно данных ДО маркера (нужно {pre_stim:.3f} сек до, "
+                f"буфер начинается на {buffer_start - epoch_start:.3f} сек позже)"
+            )
+        if buffer_end < epoch_end:
+            return False, (
+                f"Недостаточно данных ПОСЛЕ маркера (нужно {post_stim:.3f} сек после, "
+                f"буфер заканчивается на {epoch_end - buffer_end:.3f} сек раньше)"
+            )
         return True, f"Буфер готов (длительность: {buffer_duration:.2f} сек, точек: {len(self.buffer)})"
-    
+
     def get_buffer_info(self) -> dict:
-        """Возвращает информацию о текущем состоянии буфера."""
+        """Возвращает состояние буфера (LSL-таймстемпы)."""
         if len(self.buffer) < 2:
-            return {
-                'size': len(self.buffer),
-                'duration': 0.0,
-                'start_time': None,
-                'end_time': None,
-            }
-        
+            return {'size': len(self.buffer), 'duration': 0.0, 'start_time': None, 'end_time': None}
         buffer_times = np.array([ts for ts, _ in self.buffer])
         return {
             'size': len(self.buffer),
@@ -376,49 +343,44 @@ class EEGBuffer:
             'start_time': buffer_times[0],
             'end_time': buffer_times[-1],
         }
-    
-    def extract_epoch(self, marker_relative_time: float, pre_stim: float, post_stim: float) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+
+    def extract_epoch(
+        self, marker_timestamp: float, pre_stim: float, post_stim: float
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """
-        Извлекает эпоху вокруг маркера.
-        
+        Извлекает эпоху вокруг маркера по LSL-таймстемпам.
+
         Args:
-            marker_relative_time: Относительное время маркера (от момента первого сэмпла ЭЭГ)
-            pre_stim: Время до стимула в секундах
-            post_stim: Время после стимула в секундах
-        
+            marker_timestamp: LSL-таймстемп маркера
+            pre_stim: Время до стимула, сек
+            post_stim: Время после стимула, сек
+
         Returns:
-            Кортеж (epoch_data, time_vector) или None, если данных недостаточно
-            epoch_data: массив формы (num_channels, num_samples)
-            time_vector: массив времени в секундах относительно стимула
+            (epoch_data, time_vector) или None
         """
-        # Проверяем готовность буфера
-        is_ready, message = self.is_ready(marker_relative_time, pre_stim, post_stim)
+        is_ready, _ = self.is_ready(marker_timestamp, pre_stim, post_stim)
         if not is_ready:
             return None
-        
-        # Вычисляем количество точек
+
         num_samples_pre = int(pre_stim * self.sampling_rate)
         num_samples_post = int(post_stim * self.sampling_rate)
         num_samples_total = num_samples_pre + num_samples_post
-        
-        # Создаём массив для эпохи
+
         epoch_data = np.zeros((self.num_channels, num_samples_total))
         time_vector = np.linspace(-pre_stim, post_stim, num_samples_total)
-        
-        # Заполняем эпоху данными из буфера
-        # Используем линейную интерполяцию для точного извлечения
+
         buffer_times = np.array([ts for ts, _ in self.buffer])
         buffer_data = np.array([data for _, data in self.buffer])
-        
-        # Интерполируем данные для каждого канала
-        # Используем относительное время
+
+        # Абсолютные LSL-времена точек эпохи
+        target_times = time_vector + marker_timestamp
+
         for ch in range(self.num_channels):
             epoch_data[ch, :] = np.interp(
-                time_vector + marker_relative_time,  # Относительное время
-                buffer_times,  # Временные метки в буфере (тоже относительные)
-                buffer_data[:, ch]  # Данные канала
+                target_times,
+                buffer_times,
+                buffer_data[:, ch],
             )
-        
         return epoch_data, time_vector
 
 
@@ -655,9 +617,7 @@ def main():
     
     print(f"  ✓ Подключено к потоку маркеров")
     print(f"  ✓ Подключено к потоку ЭЭГ ({eeg_num_channels} каналов, {eeg_sampling_rate} Гц)")
-    
-    print("\n  ВАЖНО: Используется относительное время для синхронизации")
-    print("         Временные метки будут синхронизированы относительно момента получения первого сэмпла ЭЭГ")
+    print("\n  Синхронизация: нативные LSL-таймстемпы (единое время для ЭЭГ и маркеров)")
     
     # Шаг 3: Инициализируем компоненты обработки
     print("\nИнициализация компонентов обработки...")
@@ -689,24 +649,17 @@ def main():
                 chunk_array = chunk_array.T
             else:
                 continue
-            
-            # Используем локальное время для синхронизации
-            current_local_time = local_clock()
-            
+
             for i, ts in enumerate(timestamps):
-                sample = chunk_array[i, :]
-                # Передаём локальное время для синхронизации
-                buffer.add_sample(ts, sample, current_local_time)
-        
-        # Читаем маркеры, но пока не обрабатываем - сохраняем в очередь
+                buffer.add_sample(ts, chunk_array[i, :])
+
         marker_sample, marker_timestamp = marker_inlet.pull_sample(timeout=0.0)
         if marker_sample is not None:
             parsed = parse_marker(marker_sample[0])
             if parsed is not None:
                 tile_id, event = parsed
                 if event == "on" and 0 <= tile_id < NUM_TILES:
-                    marker_local_time = local_clock()
-                    marker_queue.append((tile_id, marker_local_time))
+                    marker_queue.append((tile_id, marker_timestamp))
                     if len(marker_queue) == 1:
                         print(f"  Получен первый маркер (плитка {tile_id}), ждём накопления данных...")
         
@@ -723,12 +676,6 @@ def main():
             print(f"     Продолжаем, но некоторые маркеры могут быть пропущены")
             buffer_ready = True
     
-    # Получаем время первого сэмпла ЭЭГ для синхронизации маркеров
-    eeg_first_time = buffer.get_first_sample_time()
-    if eeg_first_time is None:
-        print("ОШИБКА: Не удалось получить время первого сэмпла ЭЭГ!")
-        return
-    
     print("\n" + "=" * 70)
     print("НАЧАЛО ОБРАБОТКИ")
     print("Нажмите Ctrl+C для остановки и сохранения результатов")
@@ -741,18 +688,13 @@ def main():
     main.start_time = time.time()  # Время начала работы для статуса
     main.last_status_time = time.time()  # Время последнего статуса
     
-    # Если есть маркеры в очереди, ждём накопления данных после последнего маркера
     if marker_queue:
         print(f"\nОжидание накопления данных для обработки {len(marker_queue)} маркеров из очереди...")
-        last_marker_time = max(marker_local_time for _, marker_local_time in marker_queue)
-        last_marker_relative_time = last_marker_time - eeg_first_time
-        
-        # Нужно накопить данные до момента: последний_маркер + EPOCH_POST_STIM
-        required_buffer_end = last_marker_relative_time + EPOCH_POST_STIM + 0.1  # +0.1 сек запас
-        
+        last_marker_ts = max(ts for _, ts in marker_queue)
+        required_buffer_end = last_marker_ts + EPOCH_POST_STIM + 0.1
+
         wait_start = time.time()
         while True:
-            # Продолжаем читать данные ЭЭГ
             chunk, timestamps = eeg_inlet.pull_chunk(timeout=0.1, max_samples=100)
             if chunk and timestamps:
                 chunk_array = np.array(chunk)
@@ -762,41 +704,30 @@ def main():
                     chunk_array = chunk_array.T
                 else:
                     continue
-                
-                current_local_time = local_clock()
                 for i, ts in enumerate(timestamps):
-                    sample = chunk_array[i, :]
-                    buffer.add_sample(ts, sample, current_local_time)
-            
-            # Проверяем, достаточно ли данных
+                    buffer.add_sample(ts, chunk_array[i, :])
+
             buffer_info = buffer.get_buffer_info()
             if buffer_info['end_time'] is not None and buffer_info['end_time'] >= required_buffer_end:
-                print(f"  ✓ Данных достаточно (буфер до {buffer_info['end_time']:.2f} сек, требуется до {required_buffer_end:.2f} сек)")
+                print(f"  ✓ Данных достаточно (буфер до {buffer_info['end_time']:.2f}, требуется до {required_buffer_end:.2f})")
                 break
             elif time.time() - wait_start > 10:
-                print(f"  ⚠ Таймаут ожидания. Продолжаем с текущим буфером (до {buffer_info.get('end_time', 0):.2f} сек)")
+                print(f"  ⚠ Таймаут ожидания. Продолжаем с текущим буфером (до {buffer_info.get('end_time', 0):.2f})")
                 break
     
-    # Обрабатываем маркеры из очереди (накопленные во время инициализации)
     if marker_queue:
         print(f"\n{'='*70}")
         print(f"ОБРАБОТКА {len(marker_queue)} МАРКЕРОВ ИЗ ОЧЕРЕДИ")
         print(f"{'='*70}")
-        for idx, (tile_id, marker_local_time) in enumerate(marker_queue, 1):
-            marker_relative_time = marker_local_time - eeg_first_time
+        for idx, (tile_id, marker_ts) in enumerate(marker_queue, 1):
             is_ready, ready_message = buffer.is_ready(
-                marker_relative_time, 
-                EPOCH_PRE_STIM, 
-                EPOCH_POST_STIM
+                marker_ts, EPOCH_PRE_STIM, EPOCH_POST_STIM
             )
-            
-            print(f"\n[{idx}/{len(marker_queue)}] Маркер плитки {tile_id} (t={marker_relative_time:.3f}s)")
-            
+            print(f"\n[{idx}/{len(marker_queue)}] Маркер плитки {tile_id} (LSL ts={marker_ts:.3f})")
+
             if is_ready:
                 epoch_result = buffer.extract_epoch(
-                    marker_relative_time, 
-                    EPOCH_PRE_STIM, 
-                    EPOCH_POST_STIM
+                    marker_ts, EPOCH_PRE_STIM, EPOCH_POST_STIM
                 )
                 
                 if epoch_result is not None:
@@ -823,88 +754,56 @@ def main():
     
     try:
         while True:
-            # Читаем новые маркеры
             marker_sample, marker_timestamp = marker_inlet.pull_sample(timeout=0.0)
             if marker_sample is not None:
-                # Парсим маркер
                 parsed = parse_marker(marker_sample[0])
                 if parsed is not None:
                     tile_id, event = parsed
-                    
-                    # Обрабатываем только события "on" (загорание плитки)
+
                     if event == "on" and 0 <= tile_id < NUM_TILES:
-                        # Конвертируем временную метку маркера в относительное время
-                        # Используем локальное время для синхронизации
-                        marker_local_time = local_clock()
-                        marker_relative_time = marker_local_time - eeg_first_time
-                        
-                        # Проверяем готовность буфера перед извлечением
                         is_ready, ready_message = buffer.is_ready(
-                            marker_relative_time, 
-                            EPOCH_PRE_STIM, 
-                            EPOCH_POST_STIM
+                            marker_timestamp, EPOCH_PRE_STIM, EPOCH_POST_STIM
                         )
-                        
+
                         if is_ready:
-                            # Извлекаем эпоху из буфера
                             epoch_result = buffer.extract_epoch(
-                                marker_relative_time, 
-                                EPOCH_PRE_STIM, 
-                                EPOCH_POST_STIM
+                                marker_timestamp, EPOCH_PRE_STIM, EPOCH_POST_STIM
                             )
-                            
+
                             if epoch_result is not None:
                                 epoch_data, time_vector = epoch_result
-                                # Добавляем эпоху в процессор
                                 processor.add_epoch(tile_id, epoch_data)
                                 processed_markers += 1
-                                
-                                # Получаем количество эпох для этой плитки
                                 epoch_counts = processor.get_epoch_counts()
                                 count_for_tile = epoch_counts[tile_id]
-                                
-                                # Подробный вывод для каждого маркера
-                                print(f"✓ [t={marker_relative_time:.3f}s] Маркер плитки {tile_id} обработана | "
+                                print(f"✓ [LSL ts={marker_timestamp:.3f}] Маркер плитки {tile_id} обработана | "
                                       f"Эпох для плитки: {count_for_tile} | "
-                                      f"Всего обработано: {processed_markers}, пропущено: {skipped_markers}")
+                                      f"Всего: {processed_markers}, пропущено: {skipped_markers}")
                             else:
                                 skipped_markers += 1
-                                print(f"✗ [t={marker_relative_time:.3f}s] Маркер плитки {tile_id} пропущен: ошибка извлечения эпохи")
+                                print(f"✗ [LSL ts={marker_timestamp:.3f}] Маркер плитки {tile_id} пропущен: ошибка извлечения эпохи")
                         else:
                             skipped_markers += 1
-                            # Показываем все пропуски с подробной информацией
                             buffer_info = buffer.get_buffer_info()
-                            print(f"✗ [t={marker_relative_time:.3f}s] Маркер плитки {tile_id} пропущен: {ready_message}")
+                            print(f"✗ [LSL ts={marker_timestamp:.3f}] Маркер плитки {tile_id} пропущен: {ready_message}")
                             if buffer_info['duration'] > 0:
                                 print(f"    Буфер: {buffer_info['duration']:.2f} сек, "
                                       f"от {buffer_info.get('start_time', 0):.3f} до {buffer_info.get('end_time', 0):.3f} сек")
             
-            # Читаем новые данные ЭЭГ и добавляем в буфер
             chunk, timestamps = eeg_inlet.pull_chunk(timeout=0.0, max_samples=100)
             if chunk and timestamps:
-                # chunk - это список списков, каждый внутренний список - один сэмпл
-                # Преобразуем в numpy массив формы (num_samples, num_channels)
                 chunk_array = np.array(chunk)
-                
-                # Если данные в формате (num_channels, num_samples), транспонируем
                 if chunk_array.shape[1] == eeg_num_channels:
-                    # Формат правильный: (num_samples, num_channels)
                     pass
                 elif chunk_array.shape[0] == eeg_num_channels:
-                    # Нужно транспонировать
                     chunk_array = chunk_array.T
                 else:
                     print(f"ОШИБКА: Неожиданная форма данных: {chunk_array.shape}")
                     continue
-                
-                # Используем локальное время для синхронизации
-                current_local_time = local_clock()
-                
-                # Добавляем каждый сэмпл в буфер
+
                 samples_added = 0
                 for i, ts in enumerate(timestamps):
-                    sample = chunk_array[i, :]  # Форма (num_channels,)
-                    buffer.add_sample(ts, sample, current_local_time)
+                    buffer.add_sample(ts, chunk_array[i, :])
                     samples_added += 1
                 
                 # Периодически выводим информацию о полученных данных

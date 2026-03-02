@@ -1,4 +1,4 @@
-"""Контроллер последовательности стимулов (мигание плиток) и отправка маркеров в LSL."""
+"""Контроллер последовательности стимулов (мигание плиток). События on/off возвращаются в GUI; отправка маркеров LSL привязана к win.flip в gui.py."""
 
 import random
 from typing import Dict, Optional
@@ -41,6 +41,11 @@ class StimulusController:
         self._running = False
         self._lsl = LslMarkerSender()
 
+    @property
+    def lsl(self) -> LslMarkerSender:
+        """LSL-отправитель маркеров (для привязки к win.callOnFlip в GUI)."""
+        return self._lsl
+
     def start(self) -> None:
         """Запустить стимуляцию."""
         self._running = True
@@ -76,7 +81,6 @@ class StimulusController:
                     "event": "on",
                     "timestamp": now,
                 }
-                self._lsl.send(self._current_tile.id, "on")
                 return event_data
 
         if self._state == "on":
@@ -87,7 +91,6 @@ class StimulusController:
                     "event": "off",
                     "timestamp": now,
                 }
-                self._lsl.send(self._current_tile.id, "off")
                 self._state = "isi"
                 self._state_start = now
                 return event_data
