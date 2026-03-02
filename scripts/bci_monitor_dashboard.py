@@ -20,29 +20,22 @@
 import sys
 import time
 import numpy as np
-from collections import defaultdict, deque
-from typing import Dict, List, Optional, Tuple
+from collections import deque
+from typing import Dict, Optional
 from datetime import datetime
-import pickle
 import os
 
 from scipy import signal
 from pylsl import StreamInlet, resolve_byprop
 
-# PyQt5 и pyqtgraph для профессионального интерфейса
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QGridLayout, QLabel, QPushButton, QCheckBox, QSlider, QGroupBox,
-    QSizePolicy
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QGridLayout, QLabel, QPushButton, QCheckBox, QGroupBox
 )
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QFont, QColor, QPalette
+from PyQt5.QtGui import QColor
 import pyqtgraph as pg
 
-# Импортируем классы обработки из существующего скрипта
-# Используем sys.path для корректного импорта
-import sys
-import os
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
@@ -54,28 +47,14 @@ from eeg_epoch_processor import (
     MARKER_STREAM_NAME, EEG_STREAM_TYPE
 )
 
-# ============================================================================
-# КОНСТАНТЫ ДЛЯ ДАШБОРДА
-# ============================================================================
+CONTINUOUS_WINDOW_SEC = 10.0
+CONTINUOUS_UPDATE_MS = 33
+P300_SEARCH_START = 0.25
+P300_SEARCH_END = 0.55
+P300_Y_MIN = -20.0
+P300_Y_MAX = 20.0
+SIGNAL_QUALITY_THRESHOLD = 15.0
 
-# Параметры непрерывного сигнала
-CONTINUOUS_WINDOW_SEC = 10.0  # Показываем последние 10 секунд
-CONTINUOUS_UPDATE_MS = 33  # Обновление каждые 33 мс (~30 FPS)
-
-# Параметры P300 поиска
-P300_SEARCH_START = 0.25  # Начало окна поиска P300 (сек)
-P300_SEARCH_END = 0.55   # Конец окна поиска P300 (сек)
-
-# Единая ось Y для всех графиков P300
-P300_Y_MIN = -20.0  # мкВ
-P300_Y_MAX = 20.0   # мкВ
-
-# Порог качества сигнала (дисперсия в мкВ)
-SIGNAL_QUALITY_THRESHOLD = 15.0  # Если дисперсия > 15 мкВ - артефакты
-
-# ============================================================================
-# КЛАСС ДЛЯ НЕПРЕРЫВНОГО СИГНАЛА (ЗОНА 1)
-# ============================================================================
 
 class ContinuousSignalWidget(QWidget):
     """Виджет для отображения непрерывного ЭЭГ-сигнала (бегущая волна)."""
@@ -85,28 +64,17 @@ class ContinuousSignalWidget(QWidget):
         self.sampling_rate = sampling_rate
         self.num_channels = num_channels
         
-        # Буфер для непрерывного сигнала (последние N секунд)
         self.buffer_size = int(CONTINUOUS_WINDOW_SEC * sampling_rate)
         self.time_buffer = deque(maxlen=self.buffer_size)
-        self.raw_data_buffer = deque(maxlen=self.buffer_size)  # Сырые данные
-        self.filtered_data_buffer = deque(maxlen=self.buffer_size)  # Отфильтрованные данные
+        self.raw_data_buffer = deque(maxlen=self.buffer_size)
+        self.filtered_data_buffer = deque(maxlen=self.buffer_size)
         
-        # Состояние фильтрации
         self.show_filtered = False
-        
-        # Маркеры стимулов (время, tile_id)
-        self.markers = deque(maxlen=100)  # Храним последние 100 маркеров
-        
-        # Фильтр для непрерывного сигнала
-        self._create_filter()
-        
-        # Состояние фильтра для непрерывной фильтрации
+        self.markers = deque(maxlen=100)
         self.filter_state = None
-        
-        # Автоматический масштаб
         self.auto_scale = True
         
-        # Создаём интерфейс
+        self._create_filter()
         self._setup_ui()
     
     def _create_filter(self):
@@ -115,40 +83,29 @@ class ContinuousSignalWidget(QWidget):
         low = FILTER_LOW / nyquist
         high = FILTER_HIGH / nyquist
         self.b, self.a = signal.butter(4, [low, high], btype='band')
-        # Начальное состояние фильтра (для одного канала)
-        # Используем lfilter_zi для получения правильного начального состояния
         self.filter_state = signal.lfilter_zi(self.b, self.a)
     
     def _setup_ui(self):
         """Создаёт интерфейс виджета."""
         layout = QVBoxLayout()
         
-        # Панель управления (упрощённая)
         control_panel = QHBoxLayout()
-        
-        # Чекбокс фильтра
         self.filter_checkbox = QCheckBox("Фильтр 0.5-10 Гц")
         self.filter_checkbox.setChecked(False)
         self.filter_checkbox.stateChanged.connect(self._on_filter_changed)
         self.filter_checkbox.setStyleSheet("color: white; font-size: 12px;")
         control_panel.addWidget(self.filter_checkbox)
-        
         control_panel.addStretch()
         layout.addLayout(control_panel)
         
-        # График
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setLabel('left', 'Амплитуда (мкВ)', color='white')
         self.plot_widget.setLabel('bottom', 'Время (сек)', color='white')
         self.plot_widget.setBackground('black')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        # Включаем масштабирование колесиком мыши (по умолчанию включено)
         self.plot_widget.setMouseEnabled(x=True, y=True)
         
-        # Линия для сигнала
         self.signal_line = self.plot_widget.plot([], [], pen=pg.mkPen('cyan', width=2))
-        
-        # Вертикальные линии для маркеров
         self.marker_lines = []
         self.marker_labels = []
         
@@ -158,42 +115,25 @@ class ContinuousSignalWidget(QWidget):
     def _on_filter_changed(self, state):
         """Обработчик изменения состояния фильтра."""
         self.show_filtered = (state == Qt.Checked)
-        self._update_plot()  # Обновляем график при переключении
+        self._update_plot()
     
     def add_sample(self, timestamp: float, data: np.ndarray):
         """Добавляет новый сэмпл в буфер."""
         if self.num_channels > 1:
-            # Используем средний канал
             mean_data = np.mean(data)
         else:
             mean_data = data[0] if len(data) > 0 else 0.0
         
-        # Сохраняем сырые данные
         self.raw_data_buffer.append(mean_data)
         
-        # Для отфильтрованных данных используем простой подход - фильтруем порциями
-        # Это работает надежно для реального времени
-        if not hasattr(self, '_filter_buffer'):
-            self._filter_buffer = deque(maxlen=50)  # Буфер для фильтрации
-        
-        self._filter_buffer.append(mean_data)
-        
-        # Фильтруем когда накопилось достаточно данных (порциями)
-        if len(self._filter_buffer) >= 10:
-            buffer_array = np.array(self._filter_buffer)
-            try:
-                # Используем lfilter для фильтрации порции
-                filtered_chunk = signal.lfilter(self.b, self.a, buffer_array)
-                # Берем последний отфильтрованный сэмпл
-                self.filtered_data_buffer.append(filtered_chunk[-1])
-            except:
-                # Если ошибка фильтрации - используем сырые данные
-                self.filtered_data_buffer.append(mean_data)
-        else:
-            # Пока недостаточно данных - просто копируем сырые
+        try:
+            filtered_val, self.filter_state = signal.lfilter(
+                self.b, self.a, [mean_data], zi=self.filter_state
+            )
+            self.filtered_data_buffer.append(filtered_val[0])
+        except Exception:
             self.filtered_data_buffer.append(mean_data)
         
-        # Добавляем время
         self.time_buffer.append(timestamp)
     
     def add_marker(self, timestamp: float, tile_id: int):
@@ -202,43 +142,42 @@ class ContinuousSignalWidget(QWidget):
     
     def _update_plot(self):
         """Обновляет график."""
-        if len(self.time_buffer) < 2:
+        if len(self.time_buffer) < 1:
             return
         
         times = np.array(self.time_buffer)
         
-        # Выбираем данные в зависимости от состояния фильтра
         if self.show_filtered:
             data = np.array(self.filtered_data_buffer)
         else:
             data = np.array(self.raw_data_buffer)
         
-        # Нормализуем время (относительно последнего сэмпла)
-        if len(times) > 0:
-            latest_time = times[-1]
-            relative_times = times - latest_time
-            
-            # Обновляем данные графика
-            self.signal_line.setData(relative_times, data)
-            
-            # Устанавливаем диапазон по X (фиксированный)
-            self.plot_widget.setXRange(-CONTINUOUS_WINDOW_SEC, 0)
-            
-            # Автоматический масштаб по Y с небольшим запасом
-            if self.auto_scale and len(data) > 0:
-                y_min, y_max = np.min(data), np.max(data)
-                if y_max != y_min:
-                    margin = (y_max - y_min) * 0.2  # 20% запас
-                    self.plot_widget.setYRange(y_min - margin, y_max + margin)
-                else:
-                    self.plot_widget.setYRange(y_min - 10, y_max + 10)
-            
-            # Обновляем маркеры
-            self._update_markers(latest_time)
+        if len(times) != len(data):
+            min_len = min(len(times), len(data))
+            times = times[:min_len]
+            data = data[:min_len]
+        
+        if len(times) == 0:
+            return
+        
+        now_lsl = times[-1]
+        relative_times = times - now_lsl
+        
+        self.signal_line.setData(relative_times, data)
+        self.plot_widget.setXRange(-CONTINUOUS_WINDOW_SEC, 0)
+        
+        if self.auto_scale and len(data) > 0:
+            y_min, y_max = np.min(data), np.max(data)
+            if y_max != y_min:
+                margin = (y_max - y_min) * 0.2
+                self.plot_widget.setYRange(y_min - margin, y_max + margin)
+            else:
+                self.plot_widget.setYRange(y_min - 10, y_max + 10)
+        
+        self._update_markers(now_lsl)
     
-    def _update_markers(self, latest_time: float):
+    def _update_markers(self, now_lsl: float):
         """Обновляет маркеры на графике."""
-        # Удаляем старые маркеры
         for line in self.marker_lines:
             self.plot_widget.removeItem(line)
         for label in self.marker_labels:
@@ -246,11 +185,9 @@ class ContinuousSignalWidget(QWidget):
         self.marker_lines.clear()
         self.marker_labels.clear()
         
-        # Добавляем новые маркеры (только те, что в окне)
         for marker_time, tile_id in self.markers:
-            relative_time = marker_time - latest_time
+            relative_time = marker_time - now_lsl
             if -CONTINUOUS_WINDOW_SEC <= relative_time <= 0:
-                # Вертикальная линия
                 line = pg.InfiniteLine(
                     pos=relative_time, angle=90,
                     pen=pg.mkPen('yellow', width=2)
@@ -258,7 +195,6 @@ class ContinuousSignalWidget(QWidget):
                 self.plot_widget.addItem(line)
                 self.marker_lines.append(line)
                 
-                # Подпись (получаем текущий диапазон Y для позиционирования)
                 y_range = self.plot_widget.viewRange()[1]
                 y_top = y_range[1]
                 label = pg.TextItem(
@@ -273,10 +209,6 @@ class ContinuousSignalWidget(QWidget):
         self._update_plot()
 
 
-# ============================================================================
-# КЛАСС ДЛЯ СЕТКИ P300 (ЗОНА 2)
-# ============================================================================
-
 class P300GridWidget(QWidget):
     """Виджет для отображения сетки 3x3 графиков P300."""
     
@@ -285,73 +217,59 @@ class P300GridWidget(QWidget):
         self.sampling_rate = sampling_rate
         self.num_channels = num_channels
         
-        # Вектор времени для эпохи
         self.time_vector = np.linspace(
             -EPOCH_PRE_STIM, EPOCH_POST_STIM,
             int(EPOCH_TOTAL * sampling_rate)
         )
         
-        # Процессор эпох (будет установлен позже)
         self.processor: Optional[EpochProcessor] = None
-        
-        # Состояние butterfly plot
         self.show_butterfly = False
         
-        # Создаём интерфейс
         self._setup_ui()
     
     def _setup_ui(self):
         """Создаёт интерфейс виджета."""
         layout = QVBoxLayout()
         
-        # Кнопка butterfly plot
         self.butterfly_checkbox = QCheckBox("Butterfly Plot (показать все эпохи)")
         self.butterfly_checkbox.setChecked(False)
         self.butterfly_checkbox.stateChanged.connect(self._on_butterfly_changed)
         layout.addWidget(self.butterfly_checkbox)
         
-        # Сетка графиков 3x3
         grid_layout = QGridLayout()
         self.plots = {}
-        self.avg_lines = {}  # Усреднённые линии
-        self.butterfly_lines = {}  # Линии для butterfly plot
+        self.avg_lines = {}
+        self.butterfly_lines = {}
         
         for tile_id in range(NUM_TILES):
             row = tile_id // 3
             col = tile_id % 3
             
-            # Создаём PlotWidget
             plot_widget = pg.PlotWidget(title=f'Плитка {tile_id}')
             plot_widget.setLabel('left', 'Амплитуда (мкВ)')
             plot_widget.setLabel('bottom', 'Время (сек)')
             plot_widget.setBackground('black')
             plot_widget.showGrid(x=True, y=True, alpha=0.3)
-            
-            # ЕДИНАЯ ОСЬ Y ДЛЯ ВСЕХ ГРАФИКОВ (критически важно!)
             plot_widget.setYRange(P300_Y_MIN, P300_Y_MAX)
             plot_widget.setXRange(-EPOCH_PRE_STIM, EPOCH_POST_STIM)
             
-            # Маркер нуля (вертикальная красная линия)
             zero_line = pg.InfiniteLine(
                 pos=0.0, angle=90,
                 pen=pg.mkPen('red', width=2, style=Qt.SolidLine)
             )
             plot_widget.addItem(zero_line)
             
-            # Окно поиска P300 (светло-зелёная полупрозрачная заливка)
             p300_region = pg.LinearRegionItem(
                 [P300_SEARCH_START, P300_SEARCH_END],
-                brush=pg.mkBrush(QColor(0, 255, 0, 50)),  # Зелёный, полупрозрачный
+                brush=pg.mkBrush(QColor(0, 255, 0, 50)),
                 pen=pg.mkPen(QColor(0, 255, 0, 100))
             )
             plot_widget.addItem(p300_region)
             
-            # Линия для усреднённого сигнала
             avg_line = plot_widget.plot(
                 [], [], pen=pg.mkPen('white', width=2.5)
             )
             
-            # Текст с количеством эпох
             text_item = pg.TextItem('Эпох: 0', color='white', anchor=(0, 1))
             text_item.setPos(-EPOCH_PRE_STIM + 0.05, P300_Y_MAX * 0.9)
             plot_widget.addItem(text_item)
@@ -387,7 +305,6 @@ class P300GridWidget(QWidget):
             plot_widget = self.plots[tile_id]
             avg_line = self.avg_lines[tile_id]
             
-            # Удаляем старые butterfly линии
             for line in self.butterfly_lines[tile_id]:
                 plot_widget.removeItem(line)
             self.butterfly_lines[tile_id].clear()
@@ -395,16 +312,13 @@ class P300GridWidget(QWidget):
             if averaged[tile_id] is not None:
                 epoch_data = averaged[tile_id]
                 
-                # Вычисляем средний сигнал по каналам
                 if self.num_channels > 1:
                     mean_signal = np.mean(epoch_data, axis=0)
                 else:
                     mean_signal = epoch_data[0, :]
                 
-                # Обновляем усреднённую линию
                 avg_line.setData(self.time_vector, mean_signal)
                 
-                # Butterfly plot: показываем все сырые эпохи
                 if self.show_butterfly and tile_id in self.processor.epochs:
                     epochs_list = self.processor.epochs[tile_id]
                     for epoch in epochs_list:
@@ -419,22 +333,15 @@ class P300GridWidget(QWidget):
                         )
                         self.butterfly_lines[tile_id].append(butterfly_line)
             else:
-                # Нет данных - очищаем
                 avg_line.setData([], [])
             
-            # Обновляем текст с количеством эпох
             count = counts[tile_id]
             plot_widget.text_item.setText(f'Эпох: {count}')
 
 
-# ============================================================================
-# КЛАСС ДЛЯ ПАНЕЛИ УПРАВЛЕНИЯ (ЗОНА 3)
-# ============================================================================
-
 class ControlPanelWidget(QWidget):
     """Виджет для панели управления и статуса."""
     
-    # Сигналы для кнопок
     start_clicked = pyqtSignal()
     reset_clicked = pyqtSignal()
     stop_clicked = pyqtSignal()
@@ -447,21 +354,17 @@ class ControlPanelWidget(QWidget):
         """Создаёт интерфейс виджета."""
         layout = QVBoxLayout()
         
-        # Блок статуса (Метрики)
         status_group = QGroupBox("Статус")
         status_layout = QVBoxLayout()
         
-        # Всего эпох
         self.epochs_label = QLabel("Всего эпох: 0")
         self.epochs_label.setStyleSheet("font-size: 14px; color: white;")
         status_layout.addWidget(self.epochs_label)
         
-        # Качество сигнала
         self.quality_label = QLabel("Качество сигнала: Проверка...")
         self.quality_label.setStyleSheet("font-size: 14px; color: white;")
         status_layout.addWidget(self.quality_label)
         
-        # РЕЗУЛЬТАТ КЛАССИФИКАТОРА (самый большой и яркий)
         self.result_label = QLabel("РЕЗУЛЬТАТ КЛАССИФИКАТОРА:\nФокус внимания: -")
         self.result_label.setStyleSheet(
             "font-size: 24px; font-weight: bold; color: yellow;"
@@ -472,7 +375,6 @@ class ControlPanelWidget(QWidget):
         status_group.setLayout(status_layout)
         layout.addWidget(status_group)
         
-        # Блок кнопок (Управление)
         control_group = QGroupBox("Управление")
         control_layout = QVBoxLayout()
         
@@ -536,16 +438,11 @@ class ControlPanelWidget(QWidget):
             )
 
 
-# ============================================================================
-# КЛАССИФИКАТОР P300
-# ============================================================================
-
 class P300Classifier:
     """Простой классификатор для определения плитки с максимальным P300."""
     
     def __init__(self, sampling_rate: float):
         self.sampling_rate = sampling_rate
-        # Индексы для окна поиска P300
         self.search_start_idx = int((P300_SEARCH_START + EPOCH_PRE_STIM) * sampling_rate)
         self.search_end_idx = int((P300_SEARCH_END + EPOCH_PRE_STIM) * sampling_rate)
     
@@ -566,31 +463,27 @@ class P300Classifier:
             if epoch_data is None:
                 continue
             
-            # Вычисляем средний сигнал по каналам
             if epoch_data.ndim > 1 and epoch_data.shape[0] > 1:
                 mean_signal = np.mean(epoch_data, axis=0)
             else:
                 mean_signal = epoch_data[0, :] if epoch_data.ndim > 1 else epoch_data
             
-            # Ищем максимальную амплитуду в окне поиска P300
             if len(mean_signal) > self.search_end_idx:
                 p300_window = mean_signal[self.search_start_idx:self.search_end_idx]
                 max_amp = np.max(p300_window)
+                
+                if max_amp > 20.0:
+                    continue
                 
                 if max_amp > max_amplitude:
                     max_amplitude = max_amp
                     best_tile = tile_id
         
-        # Возвращаем результат только если есть достаточно данных
-        if best_tile is not None and max_amplitude > 2.0:  # Порог 2 мкВ
+        if best_tile is not None and max_amplitude > 2.0:
             return best_tile
         
         return None
 
-
-# ============================================================================
-# ГЛАВНОЕ ОКНО ДАШБОРДА
-# ============================================================================
 
 class BCIMonitorDashboard(QMainWindow):
     """Главное окно BCI-монитора с тремя зонами."""
@@ -598,28 +491,20 @@ class BCIMonitorDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        # Компоненты обработки
         self.buffer: Optional[EEGBuffer] = None
         self.processor: Optional[EpochProcessor] = None
         self.classifier: Optional[P300Classifier] = None
         self.marker_inlet: Optional[StreamInlet] = None
         self.eeg_inlet: Optional[StreamInlet] = None
         
-        # Состояние
         self.is_processing = False
         self.eeg_first_time: Optional[float] = None
-        
-        # Статистика
         self.processed_markers = 0
         self.skipped_markers = 0
+        self.raw_signal_buffer = deque(maxlen=1000)
         
-        # Буфер для вычисления качества сигнала
-        self.raw_signal_buffer = deque(maxlen=1000)  # Последние 1000 сэмплов
-        
-        # Настройка интерфейса
         self._setup_ui()
         
-        # Таймеры
         self.data_timer = QTimer()
         self.data_timer.timeout.connect(self.read_lsl_data)
         
@@ -634,35 +519,21 @@ class BCIMonitorDashboard(QMainWindow):
         self.setWindowTitle("BCI Monitor Dashboard - P300")
         self.setGeometry(100, 100, 1600, 1000)
         
-        # Центральный виджет
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Главный layout: вертикальный (верхняя и нижняя части)
         main_layout = QVBoxLayout()
-        
-        # ЗОНА 1: Непрерывный сигнал (верхняя половина)
-        # Будет создана после подключения к LSL
-        
-        # Нижняя часть: горизонтальный layout (левая и правая)
         bottom_layout = QHBoxLayout()
         
-        # ЗОНА 2: Сетка P300 (нижняя левая часть) - 70% ширины
-        # Будет создана после подключения к LSL
-        
-        # ЗОНА 3: Панель управления (нижняя правая часть) - 30% ширины
         self.control_panel = ControlPanelWidget()
         self.control_panel.start_clicked.connect(self.start_processing)
         self.control_panel.reset_clicked.connect(self.reset_buffers)
         self.control_panel.stop_clicked.connect(self.stop_processing)
         
-        bottom_layout.addWidget(self.control_panel, 3)  # 30% ширины
-        
-        main_layout.addLayout(bottom_layout, 1)  # Нижняя часть занимает 1 часть
+        bottom_layout.addWidget(self.control_panel, 3)
+        main_layout.addLayout(bottom_layout, 1)
         
         central_widget.setLayout(main_layout)
-        
-        # Стиль окна
         self.setStyleSheet("background-color: #1e1e1e; color: white;")
     
     def initialize_streams(self):
@@ -671,18 +542,15 @@ class BCIMonitorDashboard(QMainWindow):
         print("ИНИЦИАЛИЗАЦИЯ BCI MONITOR DASHBOARD")
         print("=" * 70)
         
-        # Находим потоки
         marker_info, eeg_info = find_streams()
         if marker_info is None or eeg_info is None:
             print("\nНе удалось найти необходимые потоки.")
             return False
         
-        # Создаём inlets
         print("\nПодключение к потокам...")
         self.marker_inlet = StreamInlet(marker_info)
         self.eeg_inlet = StreamInlet(eeg_info)
         
-        # Получаем параметры потока ЭЭГ
         eeg_sampling_rate = eeg_info.nominal_srate()
         eeg_num_channels = eeg_info.channel_count()
         
@@ -693,27 +561,22 @@ class BCIMonitorDashboard(QMainWindow):
         print(f"  ✓ Подключено к потоку маркеров")
         print(f"  ✓ Подключено к потоку ЭЭГ ({eeg_num_channels} каналов, {eeg_sampling_rate} Гц)")
         
-        # Инициализируем компоненты обработки
         print("\nИнициализация компонентов обработки...")
         self.buffer = EEGBuffer(eeg_sampling_rate, eeg_num_channels)
         self.processor = EpochProcessor(eeg_sampling_rate, eeg_num_channels)
         self.classifier = P300Classifier(eeg_sampling_rate)
         
-        # Создаём виджеты интерфейса
         central_widget = self.centralWidget()
         main_layout = central_widget.layout()
         
-        # ЗОНА 1: Непрерывный сигнал (верхняя половина)
         self.continuous_widget = ContinuousSignalWidget(eeg_sampling_rate, eeg_num_channels)
-        main_layout.insertWidget(0, self.continuous_widget, 1)  # Верхняя часть занимает 1 часть
+        main_layout.insertWidget(0, self.continuous_widget, 1)
         
-        # ЗОНА 2: Сетка P300 (нижняя левая часть)
         self.p300_widget = P300GridWidget(eeg_sampling_rate, eeg_num_channels)
         self.p300_widget.set_processor(self.processor)
         
-        # Вставляем в нижний layout перед control_panel
-        bottom_layout = main_layout.itemAt(1).layout()  # Получаем bottom_layout
-        bottom_layout.insertWidget(0, self.p300_widget, 7)  # 70% ширины
+        bottom_layout = main_layout.itemAt(1).layout()
+        bottom_layout.insertWidget(0, self.p300_widget, 7)
         
         print("  ✓ Все компоненты инициализированы")
         print("\n" + "=" * 70)
@@ -736,7 +599,6 @@ class BCIMonitorDashboard(QMainWindow):
         print("НАЧАЛО ОБРАБОТКИ")
         print("=" * 70 + "\n")
         
-        # Накапливаем данные в буфере перед началом обработки
         print("Накопление данных в буфере...")
         min_buffer_duration = EPOCH_POST_STIM + 0.5
         buffer_ready = False
@@ -744,7 +606,7 @@ class BCIMonitorDashboard(QMainWindow):
         samples_count = 0
         
         while not buffer_ready:
-            QApplication.processEvents()  # Обрабатываем события Qt
+            QApplication.processEvents()
             chunk, timestamps = self.eeg_inlet.pull_chunk(timeout=0.1, max_samples=200)
             if chunk and timestamps:
                 chunk_array = np.array(chunk)
@@ -779,10 +641,9 @@ class BCIMonitorDashboard(QMainWindow):
         self.control_panel.start_button.setEnabled(False)
         self.control_panel.start_button.setText("Обработка...")
         
-        # Запускаем таймеры
-        self.data_timer.start(10)  # Чтение данных каждые 10 мс
-        self.update_timer.start(CONTINUOUS_UPDATE_MS)  # Обновление графиков
-        self.quality_timer.start(500)  # Обновление качества каждые 500 мс
+        self.data_timer.start(10)
+        self.update_timer.start(CONTINUOUS_UPDATE_MS)
+        self.quality_timer.start(500)
         
         print("Обработка запущена! Графики должны обновляться в реальном времени.")
     
@@ -792,13 +653,8 @@ class BCIMonitorDashboard(QMainWindow):
             return
         
         print("\nСброс буферов...")
-        
-        # Очищаем эпохи
         self.processor.epochs.clear()
-        
-        # Обновляем отображение
         self.update_displays()
-        
         print("  ✓ Буферы сброшены")
     
     def stop_processing(self):
@@ -812,7 +668,6 @@ class BCIMonitorDashboard(QMainWindow):
         
         self.is_processing = False
         
-        # Останавливаем таймеры
         self.data_timer.stop()
         self.update_timer.stop()
         self.quality_timer.stop()
@@ -820,7 +675,6 @@ class BCIMonitorDashboard(QMainWindow):
         self.control_panel.start_button.setEnabled(True)
         self.control_panel.start_button.setText("Start Processing")
         
-        # Сохраняем результаты
         if self.processor is not None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             results_dir = "results"
@@ -834,27 +688,24 @@ class BCIMonitorDashboard(QMainWindow):
         print("\nОбработка остановлена.")
     
     def read_lsl_data(self):
-        """Читает данные из LSL потоков (использует логику из рабочего кода)."""
+        """Читает данные из LSL потоков."""
         if not self.is_processing:
             return
         
         if self.marker_inlet is None or self.eeg_inlet is None:
             return
         
-        # Получаем время первого сэмпла ЭЭГ для синхронизации
         eeg_first_time = self.buffer.get_first_sample_time()
         if eeg_first_time is None:
-            return  # Ещё нет данных ЭЭГ
+            return
         
-        # Сохраняем для использования в других методах
         if self.eeg_first_time is None:
             self.eeg_first_time = eeg_first_time
         
-        # Читаем маркеры (может быть несколько в очереди) - как в рабочем коде
         while True:
             marker_sample, marker_timestamp = self.marker_inlet.pull_sample(timeout=0.0)
             if marker_sample is None:
-                break  # Больше нет маркеров
+                break
             
             raw_marker = marker_sample[0] if isinstance(marker_sample, (list, tuple)) else marker_sample
             
@@ -869,28 +720,21 @@ class BCIMonitorDashboard(QMainWindow):
             if not (0 <= tile_id < NUM_TILES):
                 continue
             
-            # Вычисляем коррекцию времени для синхронизации маркеров с ЭЭГ (как в рабочем коде)
             if not hasattr(self, '_marker_time_correction'):
                 if marker_timestamp < eeg_first_time:
-                    # Маркер использует локальное время LSL, а ЭЭГ - абсолютное
-                    # Вычисляем смещение для синхронизации
                     self._marker_time_correction = eeg_first_time - marker_timestamp
                 else:
                     self._marker_time_correction = 0.0
             
-            # Применяем коррекцию времени к маркеру
             corrected_marker_time = marker_timestamp + self._marker_time_correction
             marker_relative_time = corrected_marker_time - eeg_first_time
             
             if marker_relative_time < 0:
-                # Маркер пришёл до начала записи ЭЭГ - пропускаем
                 self.skipped_markers += 1
                 continue
             
-            # Добавляем маркер в непрерывный виджет
             self.continuous_widget.add_marker(corrected_marker_time, tile_id)
             
-            # Используем скорректированное время для проверки готовности
             is_ready, _ = self.buffer.is_ready(
                 corrected_marker_time, EPOCH_PRE_STIM, EPOCH_POST_STIM, eeg_first_time
             )
@@ -899,7 +743,6 @@ class BCIMonitorDashboard(QMainWindow):
                 self.skipped_markers += 1
                 continue
             
-            # Пытаемся извлечь эпоху (используем скорректированное время)
             epoch_result = self.buffer.extract_epoch(
                 corrected_marker_time, EPOCH_PRE_STIM, EPOCH_POST_STIM, eeg_first_time
             )
@@ -912,7 +755,6 @@ class BCIMonitorDashboard(QMainWindow):
             self.processor.add_epoch(tile_id, epoch_data)
             self.processed_markers += 1
         
-        # Читаем данные ЭЭГ (как в рабочем коде)
         chunk, timestamps = self.eeg_inlet.pull_chunk(timeout=0.0, max_samples=100)
         if chunk and timestamps:
             chunk_array = np.array(chunk)
@@ -925,11 +767,8 @@ class BCIMonitorDashboard(QMainWindow):
             
             for i, ts in enumerate(timestamps):
                 self.buffer.add_sample(ts, chunk_array[i, :])
-                
-                # Добавляем в непрерывный виджет (без фильтрации для простоты)
                 self.continuous_widget.add_sample(ts, chunk_array[i, :])
                 
-                # Добавляем в буфер для вычисления качества
                 if self.buffer.num_channels > 1:
                     mean_sample = np.mean(chunk_array[i, :])
                 else:
@@ -941,19 +780,14 @@ class BCIMonitorDashboard(QMainWindow):
         if not self.is_processing:
             return
         
-        # Обновляем непрерывный сигнал
         self.continuous_widget.update_display()
-        
-        # Обновляем сетку P300
         self.p300_widget.update_display()
         
-        # Обновляем метрики
         if self.processor is not None:
             counts = self.processor.get_epoch_counts()
             total_epochs = sum(counts.values())
             self.control_panel.update_epochs(total_epochs)
             
-            # Классификация
             averaged = self.processor.get_averaged_epochs()
             predicted_tile = self.classifier.classify(averaged)
             self.control_panel.update_result(predicted_tile)
@@ -963,10 +797,8 @@ class BCIMonitorDashboard(QMainWindow):
         if len(self.raw_signal_buffer) < 100:
             return
         
-        # Вычисляем дисперсию
         signal_array = np.array(self.raw_signal_buffer)
         variance = np.std(signal_array)
-        
         has_artifacts = variance > SIGNAL_QUALITY_THRESHOLD
         
         self.control_panel.update_quality(variance, has_artifacts)
@@ -977,26 +809,17 @@ class BCIMonitorDashboard(QMainWindow):
         event.accept()
 
 
-# ============================================================================
-# ГЛАВНАЯ ФУНКЦИЯ
-# ============================================================================
-
 def main():
     """Главная функция: запускает BCI Monitor Dashboard."""
     app = QApplication(sys.argv)
     
-    # Создаём главное окно
     dashboard = BCIMonitorDashboard()
     
-    # Инициализируем подключение к потокам
     if not dashboard.initialize_streams():
         print("\nНе удалось инициализировать потоки. Выход.")
         return 1
     
-    # Показываем окно
     dashboard.show()
-    
-    # Запускаем главный цикл событий
     exit_code = app.exec_()
     
     return exit_code
