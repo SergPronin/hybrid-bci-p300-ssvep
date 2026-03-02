@@ -47,3 +47,6 @@ lsl_report_*.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Results data files
+results/*.pkl

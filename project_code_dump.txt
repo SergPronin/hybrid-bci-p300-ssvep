@@ -1,0 +1,2806 @@
+================================================================================
+ДАМП ВСЕГО КОДА ПРОЕКТА HYBRID-BCI-P300-SSVEP
+================================================================================
+
+
+================================================================================
+ФАЙЛ: README.md
+================================================================================
+
+# Hybrid BCI P300-SSVEP Stimulus System
+
+Система визуальной стимуляции для гибридного BCI-интерфейса с поддержкой протокола LSL (Lab Streaming Layer) для передачи маркеров событий.
+
+## Требования
+
+- Python 3.10 (PsychoPy не поддерживает Python 3.11+)
+- macOS / Linux / Windows
+
+## Установка
+
+### 1. Клонирование репозитория
+
+```bash
+git clone <repository-url>
+cd hybrid-bci-p300-ssvep
+```
+
+### 2. Создание виртуального окружения с Python 3.10
+
+**macOS/Linux:**
+```bash
+python3.10 -m venv .venv
+source .venv/bin/activate
+```
+
+**Windows:**
+```bash
+python3.10 -m venv .venv
+.venv\Scripts\activate
+```
+
+### 3. Установка зависимостей
+
+```bash
+pip install -r requirements.txt
+```
+
+## Запуск приложения
+
+### Базовый запуск
+
+```bash
+source .venv/bin/activate  # macOS/Linux
+# или
+.venv\Scripts\activate     # Windows
+
+python -m app.main
+```
+
+### Управление
+
+- **START** — начать стимуляцию (мигание плиток)
+- **STOP** — остановить стимуляцию
+- **Слайдер "Интервал"** — настройка времени между вспышками (ISI, 0.02–5.0 сек)
+- **Слайдер "Длительность горения"** — настройка длительности вспышки (0.05–2.0 сек)
+- **Escape** — выход из приложения
+
+## Протокол LSL
+
+Приложение автоматически создаёт LSL-стрим для отправки маркеров событий:
+
+- **Имя стрима:** `BCI_StimMarkers`
+- **Тип:** `Markers`
+- **Формат маркера:** `<tile_id>|<event>`, где:
+  - `tile_id` — ID плитки (0–8 для сетки 3×3)
+  - `event` — тип события: `on` (загорание) или `off` (затухание)
+
+### Примеры маркеров
+
+```
+0|on   — плитка 0 загорелась
+0|off  — плитка 0 погасла
+5|on   — плитка 5 загорелась
+5|off  — плитка 5 погасла
+```
+
+### Проверка LSL-стрима
+
+Сначала запустите приложение и нажмите START. Затем в **другом терминале** (с активированным venv):
+
+```bash
+python scripts/lsl_listen.py
+```
+
+Скрипт выведет в консоль маркеры вида `0|on`, `0|off` и т.д.
+
+## Структура проекта
+
+```
+hybrid-bci-p300-ssvep/
+├── app/
+│   └── main.py                 # Точка входа
+├── config.py                   # Константы (окно, сетка, слайдеры)
+├── core/
+│   ├── tile.py                 # Модель плитки
+│   ├── grid.py                 # Модель сетки плиток
+│   ├── lsl.py                  # Отправка маркеров в LSL
+│   └── stimulus_controller.py   # Контроллер стимуляции
+├── gui/
+│   └── gui.py                  # Интерфейс PsychoPy
+├── scripts/
+│   └── lsl_listen.py           # Скрипт проверки приёма маркеров LSL
+├── test/
+│   └── test_lsl_streams.py     # Проверка обнаружения LSL-стримов
+├── requirements.txt
+└── README.md
+```
+
+## Архитектура
+
+- **core/tile.py** — модель одной плитки (id, row, col, active).
+- **core/grid.py** — модель сетки плиток, создаёт и хранит список Tile.
+- **core/lsl.py** — отправка маркеров в LSL-стрим (класс LslMarkerSender).
+- **core/stimulus_controller.py** — логика стимуляции: таймер, выбор случайной плитки, смена состояний isi/on, вызов LSL.
+- **gui/gui.py** — отрисовка (PsychoPy): окно, сетка прямоугольников, кнопки, слайдеры; использует config и core.
+- **config.py** — константы приложения (размеры, цвета, диапазоны слайдеров).
+
+## Зависимости
+
+- **psychopy** — визуализация и управление стимулами
+- **pylsl** — отправка маркеров через Lab Streaming Layer
+
+## Разработка
+
+### Переключение между версиями
+
+Проект использует Git. Коммиты:
+- `dafc3c8` — текущая версия с LSL
+- `645dca9` — версия без LSL (слайдеры)
+
+Для временного отката к версии без LSL:
+```bash
+git checkout 645dca9
+```
+
+Возврат к версии с LSL:
+```bash
+git checkout develop
+```
+
+### Работа с .gitignore
+
+Проект игнорирует:
+- `__pycache__/` и `*.pyc`
+- `.venv/`, `venv/`
+- `.idea/`, `.vscode/`
+- `.psychopy3/`
+- `.DS_Store`, `Thumbs.db`
+
+## Устранение проблем
+
+### Ошибка при импорте psychopy
+
+**Проблема:** `PermissionError: [Errno 1] Operation not permitted: '/Users/.../.psychopy3/themes/ClassicDark.json'`
+
+**Решение:** Запустите с правами доступа к `~/.psychopy3/` или удалите эту папку:
+```bash
+rm -rf ~/.psychopy3
+```
+
+### Python 3.13 не поддерживается
+
+PsychoPy требует Python 3.8–3.10. Используйте Python 3.10.
+
+### LSL-стрим не найден
+
+Убедитесь, что:
+1. Приложение запущено
+2. Нажата кнопка START
+3. В консоли при запуске нет ошибок LSL (проверьте вывод)
+
+## Лицензия
+
+[Укажите лицензию]
+
+## Контакты
+
+[Укажите контакты]
+
+
+
+================================================================================
+ФАЙЛ: app\__init__.py
+================================================================================
+
+"""Точка входа приложения."""
+
+
+
+================================================================================
+ФАЙЛ: app\main.py
+================================================================================
+
+"""Точка входа: запуск приложения стимуляции."""
+
+from gui.gui import StimulusApp
+
+
+def main() -> None:
+    """Запуск окна стимуляции и главного цикла."""
+    app = StimulusApp()
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================================================
+ФАЙЛ: config.py
+================================================================================
+
+"""Конфигурация приложения (размеры, цвета, диапазоны параметров)."""
+
+# Окно
+WINDOW_SIZE = (1200, 800)
+WINDOW_COLOR = "black"
+
+# Сетка плиток
+GRID_SIZE = 3
+TILE_SIZE_PX = 120
+TILE_SPACING_PX = 20
+TILE_DEFAULT_COLOR = "gray"
+TILE_LINE_COLOR = "white"
+
+# Цвета мигания (случайный выбор при подсветке)
+FLASH_COLORS = ["yellow", "green", "red", "white"]
+
+# Слайдеры
+ISI_RANGE = (0.001, 5.0)  # Уменьшено минимальное значение для более быстрого мигания (до 0.01 сек = 100 Гц)
+FLASH_DURATION_RANGE = (0.01, 2.0)
+SLIDER_GRANULARITY = 0.01
+
+# Кнопки
+BUTTON_WIDTH = 150
+BUTTON_HEIGHT = 50
+START_BUTTON_POS = (-100, -250)
+STOP_BUTTON_POS = (100, -250)
+
+# Расположение панели настроек (позиции слайдеров и подписей)
+PANEL_FREQ_LABEL_POS = (550, 260)
+PANEL_FREQ_SLIDER_POS = (500, 200)
+PANEL_FREQ_VALUE_POS = (500, 180)
+PANEL_FLASH_LABEL_POS = (550, 140)
+PANEL_FLASH_SLIDER_POS = (500, 100)
+PANEL_FLASH_VALUE_POS = (500, 80)
+SLIDER_SIZE = (200, 20)
+TEXT_HEIGHT = 20
+
+
+
+================================================================================
+ФАЙЛ: core\__init__.py
+================================================================================
+
+"""Ядро приложения: модели сетки, контроллер стимулов, LSL."""
+
+from .grid import Grid
+from .lsl import LslMarkerSender
+from .stimulus_controller import StimulusController
+from .tile import Tile
+
+__all__ = ["Grid", "LslMarkerSender", "StimulusController", "Tile"]
+
+
+
+================================================================================
+ФАЙЛ: core\grid.py
+================================================================================
+
+"""Модель сетки плиток для P300/SSVEP стимуляции."""
+
+from typing import List
+
+from .tile import Tile
+
+
+class Grid:
+    """
+    Сетка плиток (ячеек) для визуальной стимуляции.
+
+    Плитки нумеруются по строкам: id = row * size + col.
+    """
+
+    def __init__(self, size: int = 3):
+        """
+        Args:
+            size: Размер сетки (size×size плиток).
+        """
+        self.size = size
+        self.tiles: List[Tile] = []
+        self._build()
+
+    def _build(self) -> None:
+        """Создаёт плитки сетки."""
+        tile_id = 0
+        for row in range(self.size):
+            for col in range(self.size):
+                self.tiles.append(Tile(tile_id, row, col))
+                tile_id += 1
+
+    def reset(self) -> None:
+        """Сбрасывает состояние всех плиток (все неактивны)."""
+        for tile in self.tiles:
+            tile.active = False
+
+
+
+================================================================================
+ФАЙЛ: core\lsl.py
+================================================================================
+
+"""Отправка маркеров событий стимуляции через Lab Streaming Layer (LSL)."""
+
+from typing import Optional
+
+from pylsl import StreamInfo, StreamOutlet
+
+
+class LslMarkerSender:
+    """
+    Отправитель маркеров мигания в LSL-стрим.
+
+    Стрим создаётся при инициализации. Маркеры в формате "tile_id|event"
+    (например "3|on", "3|off").
+    """
+
+    STREAM_NAME = "BCI_StimMarkers"
+    STREAM_TYPE = "Markers"
+    SOURCE_ID = "stimulus-controller-001"
+
+    def __init__(self) -> None:
+        self._outlet: Optional[StreamOutlet] = None
+        self._init_stream()
+
+    def _init_stream(self) -> None:
+        """Создаёт и объявляет LSL-стрим маркеров."""
+        try:
+            info = StreamInfo(
+                name=self.STREAM_NAME,
+                type=self.STREAM_TYPE,
+                channel_count=1,
+                nominal_srate=0,
+                channel_format="string",
+                source_id=self.SOURCE_ID,
+            )
+            self._outlet = StreamOutlet(info)
+        except Exception as e:
+            print(f"LSL: не удалось создать стрим: {e}")
+            self._outlet = None
+
+    def send(self, tile_id: int, event: str) -> None:
+        """
+        Отправить маркер в LSL.
+
+        Args:
+            tile_id: ID плитки (0 .. N-1).
+            event: Событие — "on" (загорание) или "off" (затухание).
+        """
+        if self._outlet is None:
+            return
+        marker = f"{tile_id}|{event}"
+        try:
+            self._outlet.push_sample([marker])
+        except Exception as e:
+            print(f"LSL: ошибка отправки маркера: {e}")
+
+
+
+================================================================================
+ФАЙЛ: core\stimulus_controller.py
+================================================================================
+
+"""Контроллер последовательности стимулов (мигание плиток). События on/off возвращаются в GUI; отправка маркеров LSL привязана к win.flip в gui.py."""
+
+import random
+from typing import Dict, Optional
+
+from psychopy import core
+
+from .grid import Grid
+from .lsl import LslMarkerSender
+from .tile import Tile
+
+
+class StimulusController:
+    """
+    Управляет поочерёдным миганием плиток сетки и отправкой маркеров в LSL.
+
+    Состояния: idle → isi → on → isi → on → ...
+    - isi: пауза между вспышками.
+    - on: плитка подсвечена на время flash_duration.
+    """
+
+    def __init__(
+        self,
+        grid: Grid,
+        flash_duration: float = 0.1,
+        isi: float = 0.05,
+    ) -> None:
+        """
+        Args:
+            grid: Сетка плиток (модель).
+            flash_duration: Длительность одной вспышки, сек.
+            isi: Интервал между вспышками (Inter-Stimulus Interval), сек.
+        """
+        self.grid = grid
+        self.flash_duration = flash_duration
+        self.isi = isi
+        self._clock = core.Clock()
+        self._state = "idle"
+        self._state_start = 0.0
+        self._current_tile: Optional[Tile] = None
+        self._running = False
+        self._lsl = LslMarkerSender()
+
+    @property
+    def lsl(self) -> LslMarkerSender:
+        """LSL-отправитель маркеров (для привязки к win.callOnFlip в GUI)."""
+        return self._lsl
+
+    def start(self) -> None:
+        """Запустить стимуляцию."""
+        self._running = True
+        self._state = "isi"
+        self._state_start = self._clock.getTime()
+
+    def stop(self) -> None:
+        """Остановить стимуляцию и сбросить сетку."""
+        self._running = False
+        self.grid.reset()
+        self._state = "idle"
+
+    def update(self) -> Optional[Dict[str, object]]:
+        """
+        Обновить состояние по таймеру. Вызывать каждый кадр.
+
+        Returns:
+            Словарь с полями tile_id, event, timestamp при смене события, иначе None.
+        """
+        if not self._running:
+            return None
+
+        now = self._clock.getTime()
+
+        if self._state == "isi":
+            if now - self._state_start >= self.isi:
+                self._current_tile = random.choice(self.grid.tiles)
+                self._current_tile.active = True
+                self._state = "on"
+                self._state_start = now
+                event_data = {
+                    "tile_id": self._current_tile.id,
+                    "event": "on",
+                    "timestamp": now,
+                }
+                return event_data
+
+        if self._state == "on":
+            if now - self._state_start >= self.flash_duration:
+                self._current_tile.active = False
+                event_data = {
+                    "tile_id": self._current_tile.id,
+                    "event": "off",
+                    "timestamp": now,
+                }
+                self._state = "isi"
+                self._state_start = now
+                return event_data
+
+        return None
+
+
+
+================================================================================
+ФАЙЛ: core\tile.py
+================================================================================
+
+"""Модель плитки стимульной сетки."""
+
+from dataclasses import dataclass
+
+
+@dataclass
+class Tile:
+    """
+    Одна ячейка (плитка) в сетке стимулов.
+
+    Attributes:
+        id: Уникальный идентификатор плитки (0 .. size²-1).
+        row: Номер строки в сетке (0 — верх).
+        col: Номер столбца в сетке (0 — левый).
+        active: Признак активной подсветки (мигания).
+    """
+
+    id: int
+    row: int
+    col: int
+    active: bool = False
+
+
+
+================================================================================
+ФАЙЛ: create_project_dump.py
+================================================================================
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Скрипт для создания дампа всего кода проекта в один txt файл."""
+
+import os
+from pathlib import Path
+
+def should_include_file(filepath):
+    """Проверяет, нужно ли включать файл в дамп."""
+    # Исключаем служебные директории и файлы
+    exclude_dirs = {'__pycache__', 'venv', '.venv', '.git', 'results', 'test'}
+    exclude_extensions = {'.pkl', '.pyc', '.pyo'}
+    
+    parts = Path(filepath).parts
+    if any(exclude_dir in parts for exclude_dir in exclude_dirs):
+        return False
+    
+    if Path(filepath).suffix in exclude_extensions:
+        return False
+    
+    # Включаем только Python, Markdown и текстовые файлы конфигурации
+    include_extensions = {'.py', '.md', '.txt'}
+    if Path(filepath).suffix in include_extensions:
+        return True
+    
+    return False
+
+def create_project_dump(output_file='project_code_dump.txt'):
+    """Создаёт дамп всего кода проекта."""
+    project_root = Path(__file__).parent
+    output_path = project_root / output_file
+    
+    with open(output_path, 'w', encoding='utf-8') as outfile:
+        outfile.write("=" * 80 + "\n")
+        outfile.write("ДАМП ВСЕГО КОДА ПРОЕКТА HYBRID-BCI-P300-SSVEP\n")
+        outfile.write("=" * 80 + "\n\n")
+        
+        # Собираем все файлы
+        files_to_include = []
+        for root, dirs, files in os.walk(project_root):
+            # Исключаем служебные директории из обхода
+            dirs[:] = [d for d in dirs if d not in {'__pycache__', 'venv', '.venv', '.git', 'results'}]
+            
+            for file in files:
+                filepath = Path(root) / file
+                rel_path = filepath.relative_to(project_root)
+                
+                if should_include_file(filepath):
+                    files_to_include.append((rel_path, filepath))
+        
+        # Сортируем файлы по пути
+        files_to_include.sort(key=lambda x: str(x[0]))
+        
+        # Записываем каждый файл
+        for rel_path, full_path in files_to_include:
+            try:
+                with open(full_path, 'r', encoding='utf-8') as infile:
+                    content = infile.read()
+                
+                outfile.write("\n" + "=" * 80 + "\n")
+                outfile.write(f"ФАЙЛ: {rel_path}\n")
+                outfile.write("=" * 80 + "\n\n")
+                outfile.write(content)
+                outfile.write("\n\n")
+            except Exception as e:
+                outfile.write(f"\n[ОШИБКА ЧТЕНИЯ ФАЙЛА {rel_path}: {e}]\n\n")
+    
+    print(f"Дамп проекта создан: {output_path}")
+    print(f"Включено файлов: {len(files_to_include)}")
+
+if __name__ == "__main__":
+    create_project_dump()
+
+
+
+================================================================================
+ФАЙЛ: gui\__init__.py
+================================================================================
+
+"""Графический интерфейс."""
+
+from .gui import StimulusApp
+
+__all__ = ["StimulusApp"]
+
+
+
+================================================================================
+ФАЙЛ: gui\gui.py
+================================================================================
+
+"""Графический интерфейс приложения стимуляции (PsychoPy)."""
+
+import random
+from typing import Dict
+
+from psychopy import visual, core, event
+
+import config
+from core.grid import Grid
+from core.stimulus_controller import StimulusController
+
+
+class StimulusApp:
+    """
+    Окно приложения: сетка плиток, кнопки START/STOP, слайдеры параметров.
+    """
+
+    def __init__(self) -> None:
+        self.win = visual.Window(
+            size=config.WINDOW_SIZE,
+            color=config.WINDOW_COLOR,
+            units="pix",
+        )
+        self.grid = Grid(size=config.GRID_SIZE)
+        self.controller = StimulusController(self.grid)
+
+        self._tiles_visual: list = []
+        self._active_colors: Dict[int, str] = {}
+        self._build_visual_grid()
+
+        self.start_button = visual.Rect(
+            self.win,
+            width=config.BUTTON_WIDTH,
+            height=config.BUTTON_HEIGHT,
+            pos=config.START_BUTTON_POS,
+            fillColor="green",
+        )
+        self.stop_button = visual.Rect(
+            self.win,
+            width=config.BUTTON_WIDTH,
+            height=config.BUTTON_HEIGHT,
+            pos=config.STOP_BUTTON_POS,
+            fillColor="red",
+        )
+        self.start_text = visual.TextStim(
+            self.win, text="START", pos=config.START_BUTTON_POS, color="black"
+        )
+        self.stop_text = visual.TextStim(
+            self.win, text="STOP", pos=config.STOP_BUTTON_POS, color="black"
+        )
+
+        self.mouse = event.Mouse(win=self.win)
+
+        self.freq_label = visual.TextStim(
+            self.win,
+            text="Интервал",
+            pos=config.PANEL_FREQ_LABEL_POS,
+            color="white",
+            height=config.TEXT_HEIGHT,
+        )
+        self.freq_slider = visual.Slider(
+            self.win,
+            ticks=config.ISI_RANGE,
+            labels=["Быстро", "Медленно"],
+            pos=config.PANEL_FREQ_SLIDER_POS,
+            size=config.SLIDER_SIZE,
+            granularity=config.SLIDER_GRANULARITY,
+            style="slider",
+            color="white",
+        )
+        self.freq_slider.markerPos = self.controller.isi
+        self.freq_value = visual.TextStim(
+            self.win,
+            text=f"{self.controller.isi:.2f}",
+            pos=config.PANEL_FREQ_VALUE_POS,
+            color="white",
+            height=config.TEXT_HEIGHT,
+        )
+
+        self.flash_label = visual.TextStim(
+            self.win,
+            text="Длительность горения",
+            pos=config.PANEL_FLASH_LABEL_POS,
+            color="white",
+            height=config.TEXT_HEIGHT,
+        )
+        self.flash_slider = visual.Slider(
+            self.win,
+            ticks=config.FLASH_DURATION_RANGE,
+            labels=["Быстро", "Долго"],
+            pos=config.PANEL_FLASH_SLIDER_POS,
+            size=config.SLIDER_SIZE,
+            granularity=config.SLIDER_GRANULARITY,
+            style="slider",
+            color="white",
+        )
+        self.flash_slider.markerPos = self.controller.flash_duration
+        self.flash_value = visual.TextStim(
+            self.win,
+            text=f"{self.controller.flash_duration:.2f}",
+            pos=config.PANEL_FLASH_VALUE_POS,
+            color="white",
+            height=config.TEXT_HEIGHT,
+        )
+
+    def _build_visual_grid(self) -> None:
+        """Создаёт визуальные прямоугольники под каждую плитку сетки."""
+        offset = (self.grid.size - 1) / 2
+        for tile in self.grid.tiles:
+            x = (tile.col - offset) * (config.TILE_SIZE_PX + config.TILE_SPACING_PX)
+            y = (offset - tile.row) * (config.TILE_SIZE_PX + config.TILE_SPACING_PX)
+            rect = visual.Rect(
+                self.win,
+                width=config.TILE_SIZE_PX,
+                height=config.TILE_SIZE_PX,
+                pos=(x, y),
+                fillColor=config.TILE_DEFAULT_COLOR,
+                lineColor=config.TILE_LINE_COLOR,
+            )
+            self._tiles_visual.append(rect)
+
+    def _draw(self) -> None:
+        """Отрисовка кадра: сетка, кнопки, слайдеры."""
+        for tile, rect in zip(self.grid.tiles, self._tiles_visual):
+            if tile.active:
+                if tile.id not in self._active_colors:
+                    self._active_colors[tile.id] = random.choice(config.FLASH_COLORS)
+                rect.fillColor = self._active_colors[tile.id]
+            else:
+                rect.fillColor = config.TILE_DEFAULT_COLOR
+                if tile.id in self._active_colors:
+                    del self._active_colors[tile.id]
+            rect.draw()
+
+        self.start_button.draw()
+        self.stop_button.draw()
+        self.start_text.draw()
+        self.stop_text.draw()
+
+        self.freq_label.draw()
+        self.freq_slider.draw()
+        self.freq_value.text = f"{self.controller.isi:.2f}"
+        self.freq_value.draw()
+
+        self.flash_label.draw()
+        self.flash_slider.draw()
+        self.flash_value.text = f"{self.controller.flash_duration:.2f}"
+        self.flash_value.draw()
+
+    def _handle_buttons(self) -> None:
+        """Обработка кликов по кнопкам START/STOP."""
+        if self.mouse.getPressed()[0]:
+            if self.mouse.isPressedIn(self.start_button):
+                self.controller.start()
+                core.wait(0.2)
+            if self.mouse.isPressedIn(self.stop_button):
+                self.controller.stop()
+                core.wait(0.2)
+
+    def run(self) -> None:
+        """Главный цикл приложения."""
+        while True:
+            self._handle_buttons()
+
+            new_isi = self.freq_slider.getRating()
+            if new_isi is not None:
+                self.controller.isi = new_isi
+
+            new_flash = self.flash_slider.getRating()
+            if new_flash is not None:
+                self.controller.flash_duration = new_flash
+
+            event_data = self.controller.update()
+            if event_data:
+                # Отправка маркера привязана к аппаратному flip — минимизирует джиттер для SSVEP
+                self.win.callOnFlip(
+                    self.controller.lsl.send,
+                    event_data["tile_id"],
+                    event_data["event"],
+                )
+                print(event_data)
+
+            self._draw()
+            self.win.flip()
+
+            if "escape" in event.getKeys():
+                break
+
+        self.controller.stop()
+        self.win.close()
+        core.quit()
+
+
+
+================================================================================
+ФАЙЛ: project_code_dump.txt
+================================================================================
+
+================================================================================
+ДАМП ВСЕГО КОДА ПРОЕКТА HYBRID-BCI-P300-SSVEP
+================================================================================
+
+
+================================================================================
+ФАЙЛ: README.md
+================================================================================
+
+# Hybrid BCI P300-SSVEP Stimulus System
+
+Система визуальной стимуляции для гибридного BCI-интерфейса с поддержкой протокола LSL (Lab Streaming Layer) для передачи маркеров событий.
+
+## Требования
+
+- Python 3.10 (PsychoPy не поддерживает Python 3.11+)
+- macOS / Linux / Windows
+
+## Установка
+
+### 1. Клонирование репозитория
+
+```bash
+git clone <repository-url>
+cd hybrid-bci-p300-ssvep
+```
+
+### 2. Создание виртуального окружения с Python 3.10
+
+**macOS/Linux:**
+```bash
+python3.10 -m venv .venv
+source .venv/bin/activate
+```
+
+**Windows:**
+```bash
+python3.10 -m venv .venv
+.venv\Scripts\activate
+```
+
+### 3. Установка зависимостей
+
+```bash
+pip install -r requirements.txt
+```
+
+## Запуск приложения
+
+### Базовый запуск
+
+```bash
+source .venv/bin/activate  # macOS/Linux
+# или
+.venv\Scripts\activate     # Windows
+
+python -m app.main
+```
+
+### Управление
+
+- **START** — начать стимуляцию (мигание плиток)
+- **STOP** — остановить стимуляцию
+- **Слайдер "Интервал"** — настройка времени между вспышками (ISI, 0.02–5.0 сек)
+- **Слайдер "Длительность горения"** — настройка длительности вспышки (0.05–2.0 сек)
+- **Escape** — выход из приложения
+
+## Протокол LSL
+
+Приложение автоматически создаёт LSL-стрим для отправки маркеров событий:
+
+- **Имя стрима:** `BCI_StimMarkers`
+- **Тип:** `Markers`
+- **Формат маркера:** `<tile_id>|<event>`, где:
+  - `tile_id` — ID плитки (0–8 для сетки 3×3)
+  - `event` — тип события: `on` (загорание) или `off` (затухание)
+
+### Примеры маркеров
+
+```
+0|on   — плитка 0 загорелась
+0|off  — плитка 0 погасла
+5|on   — плитка 5 загорелась
+5|off  — плитка 5 погасла
+```
+
+### Проверка LSL-стрима
+
+Сначала запустите приложение и нажмите START. Затем в **другом терминале** (с активированным venv):
+
+```bash
+python scripts/lsl_listen.py
+```
+
+Скрипт выведет в консоль маркеры вида `0|on`, `0|off` и т.д.
+
+## Структура проекта
+
+```
+hybrid-bci-p300-ssvep/
+├── app/
+│   └── main.py                 # Точка входа
+├── config.py                   # Константы (окно, сетка, слайдеры)
+├── core/
+│   ├── tile.py                 # Модель плитки
+│   ├── grid.py                 # Модель сетки плиток
+│   ├── lsl.py                  # Отправка маркеров в LSL
+│   └── stimulus_controller.py   # Контроллер стимуляции
+├── gui/
+│   └── gui.py                  # Интерфейс PsychoPy
+├── scripts/
+│   └── lsl_listen.py           # Скрипт проверки приёма маркеров LSL
+├── test/
+│   └── test_lsl_streams.py     # Проверка обнаружения LSL-стримов
+├── requirements.txt
+└── README.md
+```
+
+## Архитектура
+
+- **core/tile.py** — модель одной плитки (id, row, col, active).
+- **core/grid.py** — модель сетки плиток, создаёт и хранит список Tile.
+- **core/lsl.py** — отправка маркеров в LSL-стрим (класс LslMarkerSender).
+- **core/stimulus_controller.py** — логика стимуляции: таймер, выбор случайной плитки, смена состояний isi/on, вызов LSL.
+- **gui/gui.py** — отрисовка (PsychoPy): окно, сетка прямоугольников, кнопки, слайдеры; использует config и core.
+- **config.py** — константы приложения (размеры, цвета, диапазоны слайдеров).
+
+## Зависимости
+
+- **psychopy** — визуализация и управление стимулами
+- **pylsl** — отправка маркеров через Lab Streaming Layer
+
+## Разработка
+
+### Переключение между версиями
+
+Проект использует Git. Коммиты:
+- `dafc3c8` — текущая версия с LSL
+- `645dca9` — версия без LSL (слайдеры)
+
+Для временного отката к версии без LSL:
+```bash
+git checkout 645dca9
+```
+
+Возврат к версии с LSL:
+```bash
+git checkout develop
+```
+
+### Работа с .gitignore
+
+Проект игнорирует:
+- `__pycache__/` и `*.pyc`
+- `.venv/`, `venv/`
+- `.idea/`, `.vscode/`
+- `.psychopy3/`
+- `.DS_Store`, `Thumbs.db`
+
+## Устранение проблем
+
+### Ошибка при импорте psychopy
+
+**Проблема:** `PermissionError: [Errno 1] Operation not permitted: '/Users/.../.psychopy3/themes/ClassicDark.json'`
+
+**Решение:** Запустите с правами доступа к `~/.psychopy3/` или удалите эту папку:
+```bash
+rm -rf ~/.psychopy3
+```
+
+### Python 3.13 не поддерживается
+
+PsychoPy требует Python 3.8–3.10. Используйте Python 3.10.
+
+### LSL-стрим не найден
+
+Убедитесь, что:
+1. Приложение запущено
+2. Нажата кнопка START
+3. В консоли при запуске нет ошибок LSL (проверьте вывод)
+
+## Лицензия
+
+[Укажите лицензию]
+
+## Контакты
+
+[Укажите контакты]
+
+
+
+================================================================================
+ФАЙЛ: app\__init__.py
+================================================================================
+
+"""Точка входа приложения."""
+
+
+
+================================================================================
+ФАЙЛ: app\main.py
+================================================================================
+
+"""Точка входа: запуск приложения стимуляции."""
+
+from gui.gui import StimulusApp
+
+
+def main() -> None:
+    """Запуск окна стимуляции и главного цикла."""
+    app = StimulusApp()
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================================================
+ФАЙЛ: config.py
+================================================================================
+
+"""Конфигурация приложения (размеры, цвета, диапазоны параметров)."""
+
+# Окно
+WINDOW_SIZE = (1200, 800)
+WINDOW_COLOR = "black"
+
+# Сетка плиток
+GRID_SIZE = 3
+TILE_SIZE_PX = 120
+TILE_SPACING_PX = 20
+TILE_DEFAULT_COLOR = "gray"
+TILE_LINE_COLOR = "white"
+
+# Цвета мигания (случайный выбор при подсветке)
+FLASH_COLORS = ["yellow", "green", "red", "white"]
+
+# Слайдеры
+ISI_RANGE = (0.001, 5.0)  # Уменьшено минимальное значение для более быстрого мигания (до 0.01 сек = 100 Гц)
+FLASH_DURATION_RANGE = (0.01, 2.0)
+SLIDER_GRANULARITY = 0.01
+
+# Кнопки
+BUTTON_WIDTH = 150
+BUTTON_HEIGHT = 50
+START_BUTTON_POS = (-100, -250)
+STOP_BUTTON_POS = (100, -250)
+
+# Расположение панели настроек (позиции слайдеров и подписей)
+PANEL_FREQ_LABEL_POS = (550, 260)
+PANEL_FREQ_SLIDER_POS = (500, 200)
+PANEL_FREQ_VALUE_POS = (500, 180)
+PANEL_FLASH_LABEL_POS = (550, 140)
+PANEL_FLASH_SLIDER_POS = (500, 100)
+PANEL_FLASH_VALUE_POS = (500, 80)
+SLIDER_SIZE = (200, 20)
+TEXT_HEIGHT = 20
+
+
+
+================================================================================
+ФАЙЛ: core\__init__.py
+================================================================================
+
+"""Ядро приложения: модели сетки, контроллер стимулов, LSL."""
+
+from .grid import Grid
+from .lsl import LslMarkerSender
+from .stimulus_controller import StimulusController
+from .tile import Tile
+
+__all__ = ["Grid", "LslMarkerSender", "StimulusController", "Tile"]
+
+
+
+================================================================================
+ФАЙЛ: core\grid.py
+================================================================================
+
+"""Модель сетки плиток для P300/SSVEP стимуляции."""
+
+from typing import List
+
+from .tile import Tile
+
+
+class Grid:
+    """
+    Сетка плиток (ячеек) для визуальной стимуляции.
+
+    Плитки нумеруются по строкам: id = row * size + col.
+    """
+
+    def __init__(self, size: int = 3):
+        """
+        Args:
+            size: Размер сетки (size×size плиток).
+        """
+        self.size = size
+        self.tiles: List[Tile] = []
+        self._build()
+
+    def _build(self) -> None:
+        """Создаёт плитки сетки."""
+        tile_id = 0
+        for row in range(self.size):
+            for col in range(self.size):
+                self.tiles.append(Tile(tile_id, row, col))
+                tile_id += 1
+
+    def reset(self) -> None:
+        """Сбрасывает состояние всех плиток (все неактивны)."""
+        for tile in self.tiles:
+            tile.active = False
+
+
+
+================================================================================
+ФАЙЛ: core\lsl.py
+================================================================================
+
+"""Отправка маркеров событий стимуляции через Lab Streaming Layer (LSL)."""
+
+from typing import Optional
+
+from pylsl import StreamInfo, StreamOutlet
+
+
+class LslMarkerSender:
+    """
+    Отправитель маркеров мигания в LSL-стрим.
+
+    Стрим создаётся при инициализации. Маркеры в формате "tile_id|event"
+    (например "3|on", "3|off").
+    """
+
+    STREAM_NAME = "BCI_StimMarkers"
+    STREAM_TYPE = "Markers"
+    SOURCE_ID = "stimulus-controller-001"
+
+    def __init__(self) -> None:
+        self._outlet: Optional[StreamOutlet] = None
+        self._init_stream()
+
+    def _init_stream(self) -> None:
+        """Создаёт и объявляет LSL-стрим маркеров."""
+        try:
+            info = StreamInfo(
+                name=self.STREAM_NAME,
+                type=self.STREAM_TYPE,
+                channel_count=1,
+                nominal_srate=0,
+                channel_format="string",
+                source_id=self.SOURCE_ID,
+            )
+            self._outlet = StreamOutlet(info)
+        except Exception as e:
+            print(f"LSL: не удалось создать стрим: {e}")
+            self._outlet = None
+
+    def send(self, tile_id: int, event: str) -> None:
+        """
+        Отправить маркер в LSL.
+
+        Args:
+            tile_id: ID плитки (0 .. N-1).
+            event: Событие — "on" (загорание) или "off" (затухание).
+        """
+        if self._outlet is None:
+            return
+        marker = f"{tile_id}|{event}"
+        try:
+            self._outlet.push_sample([marker])
+        except Exception as e:
+            print(f"LSL: ошибка отправки маркера: {e}")
+
+
+
+================================================================================
+ФАЙЛ: core\stimulus_controller.py
+================================================================================
+
+
+
+
+[ОШИБКА ЧТЕНИЯ ФАЙЛА project_files.txt: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte]
+
+
+================================================================================
+ФАЙЛ: requirements.txt
+================================================================================
+
+psychopy==2026.1.0
+pylsl
+numpy
+scipy
+matplotlib
+
+
+================================================================================
+ФАЙЛ: scripts\README_EEG_PROCESSOR.md
+================================================================================
+
+# Скрипт обработки ЭЭГ данных в реальном времени
+
+## Описание
+
+Скрипт `eeg_epoch_processor.py` предназначен для обработки ЭЭГ данных в реальном времени при проведении экспериментов с P300-SSVEP стимуляцией.
+
+## Установка зависимостей
+
+Перед запуском убедитесь, что установлены все необходимые библиотеки:
+
+```bash
+pip install numpy scipy matplotlib
+```
+
+Эти библиотеки уже должны быть в `requirements.txt`, но если их нет, установите вручную.
+
+## Как использовать
+
+### 1. Подготовка
+
+Перед запуском скрипта убедитесь, что:
+
+- **Запущено приложение стимуляции** (`python -m app.main`)
+- **Нажата кнопка START** в приложении стимуляции (чтобы началась отправка маркеров)
+- **Запущен поток ЭЭГ** через LSL (например, Нейроспектр или другое ЭЭГ оборудование)
+
+### 2. Запуск скрипта
+
+```bash
+python scripts/eeg_epoch_processor.py
+```
+
+### 3. Что происходит
+
+1. **Поиск потоков**: Скрипт автоматически находит потоки маркеров (`BCI_StimMarkers`) и ЭЭГ в сети LSL.
+
+2. **Буферизация данных**: Все входящие данные ЭЭГ сохраняются в буфер на последние 30 секунд.
+
+3. **Извлечение эпох**: При каждом маркере "on" (загорание плитки) извлекается эпоха от -200 мс до +800 мс относительно стимула.
+
+4. **Обработка**:
+   - **Фильтрация**: Bandpass фильтр 0.5-10 Гц (убирает шумы и фокусируется на P300)
+   - **Baseline correction**: Вычитается среднее значение периода до стимула (-200 до 0 мс)
+
+5. **Накопление**: Эпохи накапливаются отдельно для каждой из 9 плиток.
+
+6. **Визуализация**: Графики обновляются в реальном времени, показывая усреднённые сигналы для каждой плитки.
+
+### 4. Остановка и сохранение
+
+Нажмите **Ctrl+C** для остановки. Скрипт автоматически:
+- Сохранит все накопленные эпохи в файл `results/eeg_epochs_YYYYMMDD_HHMMSS.pkl`
+- Закроет графики
+
+## Параметры (можно изменить в коде)
+
+- `EPOCH_PRE_STIM = 0.2` - время до стимула (200 мс)
+- `EPOCH_POST_STIM = 0.8` - время после стимула (800 мс)
+- `FILTER_LOW = 0.5` - нижняя частота фильтра (Гц)
+- `FILTER_HIGH = 10.0` - верхняя частота фильтра (Гц)
+- `BASELINE_START = -0.2` - начало baseline периода
+- `BASELINE_END = 0.0` - конец baseline периода
+
+## Загрузка сохранённых результатов
+
+```python
+import pickle
+import numpy as np
+
+# Загружаем результаты
+with open('results/eeg_epochs_20260301_201530.pkl', 'rb') as f:
+    results = pickle.load(f)
+
+# Структура данных:
+# results['epochs'] - словарь: tile_id -> список всех эпох
+# results['averaged_epochs'] - словарь: tile_id -> усреднённая эпоха
+# results['sampling_rate'] - частота дискретизации
+# results['num_channels'] - количество каналов
+# results['epoch_counts'] - количество эпох по плиткам
+
+# Пример: получить усреднённую эпоху для плитки 0
+if 0 in results['averaged_epochs'] and results['averaged_epochs'][0] is not None:
+    averaged_epoch = results['averaged_epochs'][0]
+    print(f"Форма усреднённой эпохи: {averaged_epoch.shape}")
+    # Форма: (num_channels, num_samples)
+```
+
+## Понимание результатов
+
+### Что такое эпоха?
+
+Эпоха - это отрезок ЭЭГ сигнала вокруг события (в данном случае - загорание плитки). Мы извлекаем сигнал от -200 мс до +800 мс относительно момента стимула.
+
+### Зачем фильтрация?
+
+Фильтр 0.5-10 Гц:
+- **Убирает медленные дрейфы** (< 0.5 Гц) - артефакты от движения, пота и т.д.
+- **Убирает высокочастотные шумы** (> 10 Гц) - мышечные артефакты, сеть 50/60 Гц
+- **Фокусируется на P300** - компонент P300 находится примерно в диапазоне 0.5-10 Гц
+
+### Что такое baseline correction?
+
+Baseline correction вычитает среднее значение периода ДО стимула из всей эпохи. Это нужно, чтобы:
+- Убрать постоянную составляющую сигнала
+- Убрать медленные дрейфы
+- Сделать сигналы разных эпох сравнимыми
+
+### Почему усреднение?
+
+При усреднении многих эпох:
+- **Уменьшается шум** - случайные колебания усредняются
+- **Выделяется сигнал** - повторяющиеся паттерны (например, P300) становятся видны
+- **Чем больше эпох, тем чище сигнал** - поэтому графики обновляются по мере накопления данных
+
+## Устранение проблем
+
+### Потоки не найдены
+
+- Убедитесь, что приложение стимуляции запущено и нажата кнопка START
+- Убедитесь, что ЭЭГ оборудование транслирует данные через LSL
+- Проверьте, что потоки доступны в сети (можно использовать `python scripts/lsl_listen.py`)
+
+### Недостаточно данных в буфере
+
+Это нормально в начале работы. Скрипт должен накопить данные в буфере перед первыми маркерами.
+
+### Графики не обновляются
+
+- Убедитесь, что маркеры приходят (проверьте консоль)
+- Убедитесь, что данные ЭЭГ поступают
+- Попробуйте увеличить `UPDATE_INTERVAL` в коде
+
+### Ошибки фильтрации
+
+Если возникают ошибки при фильтрации, возможно:
+- Частота дискретизации слишком низкая (< 20 Гц)
+- Параметры фильтра некорректны для данной частоты дискретизации
+
+
+
+================================================================================
+ФАЙЛ: scripts\SYNC_TROUBLESHOOTING.md
+================================================================================
+
+# Устранение проблем синхронизации времени LSL
+
+## Проблема
+
+Если вы видите сообщения типа:
+```
+✗ Маркер плитки 6 пропущен: Недостаточно данных ДО маркера (нужно 0.200 сек до, буфер начинается на -1772374202.741 сек позже)
+```
+
+Это означает, что **временные метки маркеров и ЭЭГ данных находятся в разных системах отсчёта времени**.
+
+## Причина
+
+LSL (Lab Streaming Layer) использует единую временную систему для синхронизации всех потоков. Однако некоторые программы (включая некоторые версии Нейроспектра) могут использовать свою собственную временную систему, которая не синхронизирована с LSL.
+
+## Решения
+
+### Решение 1: Настройка Нейроспектра (РЕКОМЕНДУЕТСЯ)
+
+1. **Откройте настройки LSL в Нейроспектре**
+   - Найдите раздел "LSL" или "Lab Streaming Layer"
+   - Убедитесь, что включена опция **"Использовать LSL время"** или **"Synchronize with LSL clock"**
+   - Некоторые версии могут называть это **"Network time synchronization"**
+
+2. **Проверьте настройки времени**
+   - Убедитесь, что Нейроспектр использует **LSL clock**, а не системное время
+   - Если есть опция "Time source", выберите "LSL" или "Network"
+
+3. **Перезапустите Нейроспектр**
+   - После изменения настроек перезапустите программу
+   - Убедитесь, что поток ЭЭГ запущен ДО запуска скрипта обработки
+
+### Решение 2: Использование правильного порядка запуска
+
+**Правильный порядок:**
+1. Запустите Нейроспектр и начните запись/трансляцию ЭЭГ
+2. Подождите 2-3 секунды, чтобы поток стабилизировался
+3. Запустите приложение стимуляции (`python -m app.main`)
+4. Нажмите START в приложении стимуляции
+5. Запустите скрипт обработки (`python scripts/eeg_epoch_processor.py`)
+
+### Решение 3: Проверка синхронизации
+
+Скрипт теперь автоматически проверяет синхронизацию при запуске. Вы должны увидеть:
+
+```
+Синхронизация временных меток...
+  Ожидание синхронизации маркеров... ✓ (коррекция: 0.000123 сек)
+  Ожидание синхронизации ЭЭГ... ✓ (коррекция: 0.000456 сек)
+  Разница между потоками: -0.000333 сек
+```
+
+**Если разница больше 1 секунды** - это проблема синхронизации!
+
+### Решение 4: Альтернативный подход (если ничего не помогает)
+
+Если синхронизация не работает, можно использовать относительное время:
+
+1. Запустите скрипт обработки ПЕРВЫМ
+2. Дождитесь, пока он подключится к потокам
+3. ТОЛЬКО ПОТОМ запустите приложение стимуляции
+4. Это позволит использовать относительное время от момента подключения
+
+## Диагностика
+
+### Проверка временных меток вручную
+
+Запустите скрипт `lsl_listen.py` и посмотрите на временные метки:
+
+```bash
+python scripts/lsl_listen.py
+```
+
+Вы должны увидеть что-то вроде:
+```
+[BCI_StimMarkers] 1234567.890  маркер: 3|on
+[EEG_Stream] 1234567.891  получено 10 сэмплов (ЭЭГ)
+```
+
+**Временные метки должны быть близки друг к другу** (разница в миллисекундах, а не в часах/годах).
+
+Если вы видите:
+```
+[BCI_StimMarkers] 1234567.890  маркер: 3|on
+[EEG_Stream] 1772374202.741  получено 10 сэмплов (ЭЭГ)
+```
+
+Это означает проблему синхронизации - временные метки в разных системах отсчёта.
+
+## Что делать в Нейроспектре
+
+### Для Нейроспектр 4.x / 5.x:
+
+1. Откройте **Настройки** → **LSL** или **Сеть**
+2. Найдите опцию **"Синхронизация времени"** или **"Time synchronization"**
+3. Убедитесь, что выбрано **"LSL Clock"** или **"Network Time"**
+4. НЕ используйте **"System Time"** или **"Local Time"**
+
+### Для других версий:
+
+1. Найдите настройки экспорта/трансляции данных
+2. Ищите опции, связанные с временными метками
+3. Убедитесь, что используется LSL время, а не системное
+
+## Дополнительная информация
+
+LSL использует единую временную систему для всех потоков в сети. Это позволяет синхронизировать данные от разных источников (ЭЭГ, маркеры, видео и т.д.) с точностью до миллисекунд.
+
+Если ваше оборудование не поддерживает LSL синхронизацию времени, возможно, потребуется:
+- Обновить драйверы или программное обеспечение
+- Использовать другой способ экспорта данных
+- Написать промежуточный скрипт для синхронизации времени
+
+## Контакты
+
+Если проблема не решается, проверьте:
+1. Версию Нейроспектра (возможно, нужна более новая версия)
+2. Документацию Нейроспектра по настройке LSL
+3. Форум поддержки Нейроспектра
+
+
+
+================================================================================
+ФАЙЛ: scripts\eeg_epoch_processor.py
+================================================================================
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Скрипт для обработки ЭЭГ данных в реальном времени.
+
+Этот скрипт:
+1. Подключается к LSL потокам маркеров и ЭЭГ
+2. Извлекает эпохи ЭЭГ при каждом событии "on" (загорание плитки)
+3. Фильтрует сигнал (0.5-10 Гц) и вычитает baseline
+4. Накопляет эпохи для каждой из 9 плиток отдельно
+5. Показывает усреднённые сигналы в реальном времени
+6. Сохраняет результаты после остановки
+
+Запуск:
+    python scripts/eeg_epoch_processor.py
+
+Перед запуском убедитесь, что:
+    - Запущено приложение стимуляции (app.main)
+    - Запущен поток ЭЭГ (например, Нейроспектр)
+    - Оба потока транслируются через LSL
+"""
+
+import time
+import numpy as np
+from collections import defaultdict, deque
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+import pickle
+import os
+
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from scipy import signal
+from pylsl import StreamInlet, resolve_byprop
+
+# ============================================================================
+# КОНСТАНТЫ И ПАРАМЕТРЫ
+# ============================================================================
+
+# Параметры эпохи (в секундах)
+EPOCH_PRE_STIM = 0.2   # Время до стимула: -200 мс
+EPOCH_POST_STIM = 0.8  # Время после стимула: +800 мс
+EPOCH_TOTAL = EPOCH_PRE_STIM + EPOCH_POST_STIM  # Общая длина эпохи: 1.0 сек
+
+# Параметры фильтрации
+FILTER_LOW = 0.5   # Нижняя частота среза: 0.5 Гц (убирает медленные дрейфы)
+FILTER_HIGH = 10.0  # Верхняя частота среза: 10 Гц (фокус на P300, который ~3 Гц)
+
+# Параметры baseline correction
+BASELINE_START = -0.2  # Начало baseline периода (относительно стимула)
+BASELINE_END = 0.0     # Конец baseline периода (момент стимула)
+
+# Количество плиток в сетке
+NUM_TILES = 9  # Сетка 3x3, плитки с ID от 0 до 8
+
+# Параметры буфера данных
+BUFFER_DURATION = 30.0  # Храним последние 30 секунд ЭЭГ данных
+UPDATE_INTERVAL = 0.02  # Обновление графика каждые 20 мс (50 FPS для плавности)
+STATUS_UPDATE_INTERVAL = 1.0  # Обновление статуса в консоли каждую секунду
+
+# Имена потоков LSL
+MARKER_STREAM_NAME = "BCI_StimMarkers"
+EEG_STREAM_TYPE = "EEG"  # Или "Signal" в зависимости от вашего оборудования
+
+
+# ============================================================================
+# КЛАСС ДЛЯ ХРАНЕНИЯ И ОБРАБОТКИ ЭПОХ
+# ============================================================================
+
+class EpochProcessor:
+    """
+    Класс для накопления и обработки эпох ЭЭГ.
+    
+    Хранит эпохи для каждой плитки отдельно и вычисляет усреднённые сигналы.
+    """
+    
+    def __init__(self, sampling_rate: float, num_channels: int):
+        """
+        Инициализация процессора эпох.
+        
+        Args:
+            sampling_rate: Частота дискретизации ЭЭГ (например, 250 Гц)
+            num_channels: Количество каналов ЭЭГ
+        """
+        self.sampling_rate = sampling_rate
+        self.num_channels = num_channels
+        
+        # Вычисляем количество точек в эпохе
+        self.epoch_samples_pre = int(EPOCH_PRE_STIM * sampling_rate)
+        self.epoch_samples_post = int(EPOCH_POST_STIM * sampling_rate)
+        self.epoch_samples_total = self.epoch_samples_pre + self.epoch_samples_post
+        
+        # Вычисляем индексы для baseline correction
+        self.baseline_start_idx = int((BASELINE_START - EPOCH_PRE_STIM) * sampling_rate)
+        self.baseline_end_idx = int((BASELINE_END - EPOCH_PRE_STIM) * sampling_rate)
+        
+        # Хранилище эпох: для каждой плитки (0-8) список эпох
+        # Каждая эпоха - это массив формы (num_channels, epoch_samples_total)
+        self.epochs: Dict[int, List[np.ndarray]] = defaultdict(list)
+        
+        # Создаём фильтр для обработки сигнала
+        # Используем Butterworth фильтр - стандартный для ЭЭГ
+        self._create_filter()
+        
+        print(f"Инициализирован процессор эпох:")
+        print(f"  Частота дискретизации: {sampling_rate} Гц")
+        print(f"  Каналов: {num_channels}")
+        print(f"  Длина эпохи: {self.epoch_samples_total} точек ({EPOCH_TOTAL} сек)")
+        print(f"  Baseline: от {BASELINE_START} до {BASELINE_END} сек")
+    
+    def _create_filter(self):
+        """
+        Создаёт bandpass фильтр для частот 0.5-10 Гц.
+        
+        Butterworth фильтр - это стандартный тип фильтра для ЭЭГ,
+        который имеет плоскую частотную характеристику в полосе пропускания.
+        """
+        # Нормализуем частоты относительно частоты Найквиста (половина sampling_rate)
+        nyquist = self.sampling_rate / 2.0
+        low = FILTER_LOW / nyquist
+        high = FILTER_HIGH / nyquist
+        
+        # Создаём фильтр 4-го порядка (более крутой срез, меньше артефактов)
+        self.b, self.a = signal.butter(4, [low, high], btype='band')
+        
+        # Создаём начальные условия для фильтра (чтобы избежать переходных процессов)
+        # Используем нулевые начальные условия
+        self.zi = signal.lfilter_zi(self.b, self.a)
+        # Расширяем для всех каналов
+        self.zi = np.tile(self.zi[:, np.newaxis], (1, self.num_channels)).T
+    
+    def add_epoch(self, tile_id: int, epoch_data: np.ndarray):
+        """
+        Добавляет новую эпоху для указанной плитки.
+        
+        Args:
+            tile_id: ID плитки (0-8)
+            epoch_data: Массив формы (num_channels, epoch_samples_total)
+        """
+        # Проверяем размерность данных
+        if epoch_data.shape != (self.num_channels, self.epoch_samples_total):
+            print(f"ОШИБКА: Неверный размер эпохи. Ожидается "
+                  f"({self.num_channels}, {self.epoch_samples_total}), "
+                  f"получено {epoch_data.shape}")
+            return
+        
+        # Применяем фильтрацию
+        filtered_epoch = self._filter_epoch(epoch_data)
+        
+        # Вычитаем baseline (среднее значение в период до стимула)
+        baseline_corrected = self._baseline_correction(filtered_epoch)
+        
+        # Добавляем обработанную эпоху в хранилище
+        self.epochs[tile_id].append(baseline_corrected)
+        
+        # Выводим информацию о накопленных эпохах
+        num_epochs = len(self.epochs[tile_id])
+        if num_epochs % 10 == 0:  # Каждые 10 эпох
+            print(f"Плитка {tile_id}: накоплено {num_epochs} эпох")
+    
+    def _filter_epoch(self, epoch_data: np.ndarray) -> np.ndarray:
+        """
+        Применяет bandpass фильтр к эпохе.
+        
+        Args:
+            epoch_data: Массив формы (num_channels, epoch_samples_total)
+        
+        Returns:
+            Отфильтрованная эпоха той же формы
+        """
+        # Применяем фильтр к каждому каналу отдельно
+        filtered = np.zeros_like(epoch_data)
+        for ch in range(self.num_channels):
+            # Используем filtfilt для двунаправленной фильтрации
+            # (убирает фазовые искажения)
+            filtered[ch, :] = signal.filtfilt(self.b, self.a, epoch_data[ch, :])
+        
+        return filtered
+    
+    def _baseline_correction(self, epoch_data: np.ndarray) -> np.ndarray:
+        """
+        Вычитает среднее значение baseline периода из всей эпохи.
+        
+        Baseline - это период ДО стимула (обычно -200 до 0 мс).
+        Это нужно, чтобы убрать постоянную составляющую и дрейфы.
+        
+        Args:
+            epoch_data: Массив формы (num_channels, epoch_samples_total)
+        
+        Returns:
+            Эпоха с вычтенным baseline
+        """
+        corrected = epoch_data.copy()
+        
+        # Для каждого канала вычисляем среднее в baseline период
+        for ch in range(self.num_channels):
+            baseline_mean = np.mean(epoch_data[ch, self.baseline_start_idx:self.baseline_end_idx])
+            # Вычитаем это среднее из всего канала
+            corrected[ch, :] -= baseline_mean
+        
+        return corrected
+    
+    def get_averaged_epochs(self) -> Dict[int, Optional[np.ndarray]]:
+        """
+        Возвращает усреднённые эпохи для каждой плитки.
+        
+        Returns:
+            Словарь: tile_id -> усреднённая эпоха (num_channels, epoch_samples_total)
+                     или None, если для плитки нет эпох
+        """
+        averaged = {}
+        for tile_id in range(NUM_TILES):
+            if len(self.epochs[tile_id]) > 0:
+                # Усредняем все эпохи для этой плитки
+                # np.array(self.epochs[tile_id]) создаёт массив формы
+                # (num_epochs, num_channels, epoch_samples_total)
+                # np.mean(axis=0) усредняет по первой оси (по эпохам)
+                averaged[tile_id] = np.mean(self.epochs[tile_id], axis=0)
+            else:
+                averaged[tile_id] = None
+        
+        return averaged
+    
+    def get_epoch_counts(self) -> Dict[int, int]:
+        """Возвращает количество накопленных эпох для каждой плитки."""
+        return {tile_id: len(self.epochs[tile_id]) for tile_id in range(NUM_TILES)}
+    
+    def save_results(self, filename: str):
+        """
+        Сохраняет все накопленные эпохи в файл.
+        
+        Args:
+            filename: Путь к файлу для сохранения
+        """
+        results = {
+            'epochs': dict(self.epochs),  # Все эпохи
+            'averaged_epochs': self.get_averaged_epochs(),  # Усреднённые
+            'sampling_rate': self.sampling_rate,
+            'num_channels': self.num_channels,
+            'epoch_counts': self.get_epoch_counts(),
+            'filter_params': {'low': FILTER_LOW, 'high': FILTER_HIGH},
+            'baseline_params': {'start': BASELINE_START, 'end': BASELINE_END},
+        }
+        
+        with open(filename, 'wb') as f:
+            pickle.dump(results, f)
+        
+        print(f"\nРезультаты сохранены в: {filename}")
+        print(f"Всего эпох по плиткам:")
+        for tile_id, count in self.get_epoch_counts().items():
+            if count > 0:
+                print(f"  Плитка {tile_id}: {count} эпох")
+
+
+# ============================================================================
+# КЛАСС ДЛЯ БУФЕРИЗАЦИИ ЭЭГ ДАННЫХ
+# ============================================================================
+
+class EEGBuffer:
+    """
+    Класс для хранения скользящего буфера ЭЭГ данных.
+
+    Хранит последние N секунд данных по нативным LSL-таймстемпам.
+    LSL синхронизирует время между потоками (ЭЭГ, маркеры) под капотом —
+    pull_chunk и pull_sample возвращают timestamps в едином времени.
+    """
+
+    def __init__(self, sampling_rate: float, num_channels: int, duration: float = BUFFER_DURATION):
+        """
+        Args:
+            sampling_rate: Частота дискретизации
+            num_channels: Количество каналов
+            duration: Длительность буфера в секундах
+        """
+        self.sampling_rate = sampling_rate
+        self.num_channels = num_channels
+        self.buffer_size = int(duration * sampling_rate)
+
+        # Буфер: кортежи (lsl_timestamp, data) — нативные метки из pull_chunk
+        self.buffer: deque = deque(maxlen=self.buffer_size)
+
+        print(f"Инициализирован буфер ЭЭГ:")
+        print(f"  Размер буфера: {self.buffer_size} точек ({duration} сек)")
+        print(f"  Используются нативные LSL-таймстемпы (единое время для ЭЭГ и маркеров)")
+
+    def add_sample(self, timestamp: float, data: np.ndarray) -> None:
+        """
+        Добавляет сэмпл в буфер.
+
+        Args:
+            timestamp: LSL-таймстемп из pull_chunk (единое время)
+            data: Массив формы (num_channels,)
+        """
+        if data.shape != (self.num_channels,):
+            print(f"ОШИБКА: Неверный размер данных. Ожидается ({self.num_channels},), "
+                  f"получено {data.shape}")
+            return
+        self.buffer.append((timestamp, data.copy()))
+
+    def is_ready(self, marker_timestamp: float, pre_stim: float, post_stim: float) -> Tuple[bool, str]:
+        """
+        Проверяет, достаточно ли данных для извлечения эпохи.
+
+        Args:
+            marker_timestamp: LSL-таймстемп маркера из pull_sample
+            pre_stim: Время до стимула, сек
+            post_stim: Время после стимула, сек
+
+        Returns:
+            (is_ready, message)
+        """
+        if len(self.buffer) < 2:
+            return False, f"Буфер пуст (нужно минимум 2 точки, есть {len(self.buffer)})"
+
+        epoch_start = marker_timestamp - pre_stim
+        epoch_end = marker_timestamp + post_stim
+
+        buffer_times = np.array([ts for ts, _ in self.buffer])
+        buffer_start = buffer_times[0]
+        buffer_end = buffer_times[-1]
+        buffer_duration = buffer_end - buffer_start
+
+        if buffer_start > epoch_start:
+            return False, (
+                f"Недостаточно данных ДО маркера (нужно {pre_stim:.3f} сек до, "
+                f"буфер начинается на {buffer_start - epoch_start:.3f} сек позже)"
+            )
+        if buffer_end < epoch_end:
+            return False, (
+                f"Недостаточно данных ПОСЛЕ маркера (нужно {post_stim:.3f} сек после, "
+                f"буфер заканчивается на {epoch_end - buffer_end:.3f} сек раньше)"
+            )
+        return True, f"Буфер готов (длительность: {buffer_duration:.2f} сек, точек: {len(self.buffer)})"
+
+    def get_buffer_info(self) -> dict:
+        """Возвращает состояние буфера (LSL-таймстемпы)."""
+        if len(self.buffer) < 2:
+            return {'size': len(self.buffer), 'duration': 0.0, 'start_time': None, 'end_time': None}
+        buffer_times = np.array([ts for ts, _ in self.buffer])
+        return {
+            'size': len(self.buffer),
+            'duration': buffer_times[-1] - buffer_times[0],
+            'start_time': buffer_times[0],
+            'end_time': buffer_times[-1],
+        }
+
+    def extract_epoch(
+        self, marker_timestamp: float, pre_stim: float, post_stim: float
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """
+        Извлекает эпоху вокруг маркера по LSL-таймстемпам.
+
+        Args:
+            marker_timestamp: LSL-таймстемп маркера
+            pre_stim: Время до стимула, сек
+            post_stim: Время после стимула, сек
+
+        Returns:
+            (epoch_data, time_vector) или None
+        """
+        is_ready, _ = self.is_ready(marker_timestamp, pre_stim, post_stim)
+        if not is_ready:
+            return None
+
+        num_samples_pre = int(pre_stim * self.sampling_rate)
+        num_samples_post = int(post_stim * self.sampling_rate)
+        num_samples_total = num_samples_pre + num_samples_post
+
+        epoch_data = np.zeros((self.num_channels, num_samples_total))
+        time_vector = np.linspace(-pre_stim, post_stim, num_samples_total)
+
+        buffer_times = np.array([ts for ts, _ in self.buffer])
+        buffer_data = np.array([data for _, data in self.buffer])
+
+        # Абсолютные LSL-времена точек эпохи
+        target_times = time_vector + marker_timestamp
+
+        for ch in range(self.num_channels):
+            epoch_data[ch, :] = np.interp(
+                target_times,
+                buffer_times,
+                buffer_data[:, ch],
+            )
+        return epoch_data, time_vector
+
+
+# ============================================================================
+# ФУНКЦИИ ДЛЯ РАБОТЫ С LSL
+# ============================================================================
+
+def find_streams():
+    """
+    Находит потоки маркеров и ЭЭГ в сети LSL.
+    
+    Returns:
+        Кортеж (marker_stream_info, eeg_stream_info) или (None, None) если не найдены
+    """
+    print("\nПоиск LSL потоков...")
+    
+    # Ищем поток маркеров
+    print(f"  Поиск потока маркеров '{MARKER_STREAM_NAME}'...")
+    marker_streams = resolve_byprop("name", MARKER_STREAM_NAME, timeout=5)
+    if not marker_streams:
+        print(f"  ОШИБКА: Поток маркеров '{MARKER_STREAM_NAME}' не найден!")
+        print(f"  Убедитесь, что приложение стимуляции запущено и нажата кнопка START.")
+        return None, None
+    
+    marker_info = marker_streams[0]
+    print(f"  ✓ Найден поток маркеров: {marker_info.name()}")
+    
+    # Ищем поток ЭЭГ
+    print(f"  Поиск потока ЭЭГ (тип '{EEG_STREAM_TYPE}')...")
+    eeg_streams = resolve_byprop("type", EEG_STREAM_TYPE, timeout=5)
+    if not eeg_streams:
+        # Пробуем альтернативные типы
+        for alt_type in ["Signal", "EEG"]:
+            eeg_streams = resolve_byprop("type", alt_type, timeout=2)
+            if eeg_streams:
+                break
+    
+    if not eeg_streams:
+        print(f"  ОШИБКА: Поток ЭЭГ не найден!")
+        print(f"  Убедитесь, что ЭЭГ оборудование транслирует данные через LSL.")
+        return None, None
+    
+    eeg_info = eeg_streams[0]
+    try:
+        eeg_name = eeg_info.name()
+    except:
+        eeg_name = "Unknown"
+    
+    print(f"  ✓ Найден поток ЭЭГ: {eeg_name}")
+    print(f"     Каналов: {eeg_info.channel_count()}")
+    print(f"     Частота: {eeg_info.nominal_srate()} Гц")
+    
+    return marker_info, eeg_info
+
+
+def parse_marker(marker_string: str) -> Optional[Tuple[int, str]]:
+    """
+    Парсит строку маркера в формате "tile_id|event".
+    
+    Args:
+        marker_string: Строка маркера, например "3|on"
+    
+    Returns:
+        Кортеж (tile_id, event) или None при ошибке
+    """
+    try:
+        parts = marker_string.split('|')
+        if len(parts) != 2:
+            return None
+        tile_id = int(parts[0])
+        event = parts[1].strip().lower()
+        return tile_id, event
+    except (ValueError, AttributeError):
+        return None
+
+
+# ============================================================================
+# ФУНКЦИИ ДЛЯ ВИЗУАЛИЗАЦИИ
+# ============================================================================
+
+class RealtimePlotter:
+    """
+    Класс для отображения графиков в реальном времени.
+    
+    Показывает усреднённые эпохи для всех 9 плиток в виде сетки графиков.
+    """
+    
+    def __init__(self, sampling_rate: float, num_channels: int):
+        """
+        Инициализация визуализации.
+        
+        Args:
+            sampling_rate: Частота дискретизации
+            num_channels: Количество каналов ЭЭГ
+        """
+        self.sampling_rate = sampling_rate
+        self.num_channels = num_channels
+        
+        # Создаём фигуру с сеткой 3x3 для 9 плиток
+        self.fig, self.axes = plt.subplots(3, 3, figsize=(15, 12))
+        self.fig.suptitle('Усреднённые эпохи ЭЭГ по плиткам (обновление в реальном времени)', 
+                          fontsize=14, fontweight='bold')
+        
+        # Создаём вектор времени для эпохи
+        self.time_vector = np.linspace(-EPOCH_PRE_STIM, EPOCH_POST_STIM, 
+                                       int(EPOCH_TOTAL * sampling_rate))
+        
+        # Инициализируем графики для каждой плитки
+        self.lines = {}
+        self.texts = {}
+        self.highlight_rects = {}  # Прямоугольники для подсветки обновлённых графиков
+        self.highlight_times = {}  # Время последней подсветки для каждого графика
+        self.last_epoch_counts = {}  # Последнее количество эпох для каждой плитки (для определения изменений)
+        self.last_data_hash = {}  # Хеш последних данных для определения реальных изменений
+        
+        for tile_id in range(NUM_TILES):
+            row = tile_id // 3
+            col = tile_id % 3
+            ax = self.axes[row, col]
+            
+            # Создаём пустые линии для каждого канала
+            lines = []
+            for ch in range(num_channels):
+                line, = ax.plot([], [], label=f'Канал {ch+1}', alpha=0.7, linewidth=1.5)
+                lines.append(line)
+            
+            self.lines[tile_id] = lines
+            
+            # Настраиваем оси
+            ax.set_xlim(-EPOCH_PRE_STIM, EPOCH_POST_STIM)
+            ax.set_ylim(-50, 50)  # Начальные пределы, будут автоматически подстраиваться
+            ax.axvline(x=0, color='r', linestyle='--', linewidth=2, label='Стимул')
+            ax.set_xlabel('Время (сек)', fontsize=9)
+            ax.set_ylabel('Амплитуда (мкВ)', fontsize=9)
+            ax.set_title(f'Плитка {tile_id}', fontsize=10, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7, loc='upper right')
+            
+            # Создаём невидимый прямоугольник для подсветки (будет показываться при обновлении)
+            from matplotlib.patches import Rectangle
+            highlight_rect = Rectangle((0, 0), 1, 1, 
+                                       transform=ax.transAxes,
+                                       facecolor='lime',  # Яркий зелёный цвет для подсветки
+                                       alpha=0.0,  # Начально невидим
+                                       zorder=10,  # Поверх графиков
+                                       edgecolor='yellow',
+                                       linewidth=3)  # Жёлтая рамка
+            ax.add_patch(highlight_rect)
+            self.highlight_rects[tile_id] = highlight_rect
+            self.highlight_times[tile_id] = 0  # Время последней подсветки
+            self.last_epoch_counts[tile_id] = 0  # Инициализация счётчика
+            self.last_data_hash[tile_id] = None  # Хеш последних данных
+            
+            # Текст с количеством эпох
+            text = ax.text(0.02, 0.98, 'Эпох: 0', transform=ax.transAxes,
+                          fontsize=8, verticalalignment='top',
+                          bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            self.texts[tile_id] = text
+        
+        plt.tight_layout()
+        plt.ion()  # Интерактивный режим
+        
+        # Устанавливаем бэкенд для интерактивного режима
+        import matplotlib
+        if matplotlib.get_backend() == 'Agg':
+            # Если используется неинтерактивный бэкенд, переключаемся
+            matplotlib.use('TkAgg')  # или 'Qt5Agg' в зависимости от системы
+        
+        plt.show(block=False)  # Не блокируем выполнение
+        self.fig.canvas.draw()  # Первоначальная отрисовка
+        self.fig.canvas.flush_events()  # Очистка событий
+        
+        # Сохраняем состояние окна
+        self.window_open = True
+    
+    def update(self, processor: EpochProcessor):
+        """
+        Обновляет графики на основе текущих данных процессора.
+        
+        Args:
+            processor: Экземпляр EpochProcessor с накопленными данными
+        """
+        # Проверяем, что окно ещё открыто
+        if not self.window_open:
+            return
+        
+        try:
+            # Проверяем, что фигура ещё существует
+            if not plt.fignum_exists(self.fig.number):
+                self.window_open = False
+                return
+            
+            averaged = processor.get_averaged_epochs()
+            counts = processor.get_epoch_counts()
+            current_time = time.time()
+            highlight_duration = 0.15  # Длительность подсветки в секундах (короче для более отзывчивой подсветки)
+            
+            for tile_id in range(NUM_TILES):
+                row = tile_id // 3
+                col = tile_id % 3
+                ax = self.axes[row, col]
+                
+                data_changed = False  # Флаг реального изменения данных
+                count_changed = False  # Флаг изменения количества эпох
+                
+                if averaged[tile_id] is not None:
+                    # Обновляем данные для каждого канала
+                    epoch_data = averaged[tile_id]
+                    
+                    # Вычисляем хеш данных для определения реальных изменений
+                    import hashlib
+                    data_hash = hashlib.md5(epoch_data.tobytes()).hexdigest()
+                    
+                    # Проверяем, изменились ли данные
+                    if self.last_data_hash[tile_id] != data_hash:
+                        data_changed = True
+                        self.last_data_hash[tile_id] = data_hash
+                    
+                    # Если несколько каналов, показываем средний по каналам
+                    if self.num_channels > 1:
+                        mean_signal = np.mean(epoch_data, axis=0)
+                        self.lines[tile_id][0].set_data(self.time_vector, mean_signal)
+                        # Скрываем остальные линии, если они есть
+                        for i in range(1, len(self.lines[tile_id])):
+                            self.lines[tile_id][i].set_data([], [])
+                    else:
+                        # Один канал
+                        self.lines[tile_id][0].set_data(self.time_vector, epoch_data[0, :])
+                    
+                    # Автоматически подстраиваем масштаб по Y (плавно, только при изменении данных)
+                    if data_changed:
+                        y_data = epoch_data.flatten()
+                        if len(y_data) > 0:
+                            y_min, y_max = np.min(y_data), np.max(y_data)
+                            if y_max != y_min:  # Избегаем деления на ноль
+                                margin = (y_max - y_min) * 0.1
+                                ax.set_ylim(y_min - margin, y_max + margin)
+                            else:
+                                ax.set_ylim(y_min - 10, y_max + 10)
+                else:
+                    # Нет данных - очищаем график
+                    for line in self.lines[tile_id]:
+                        line.set_data([], [])
+                
+                # Обновляем текст с количеством эпох
+                count = counts[tile_id]
+                
+                # Проверяем, изменилось ли количество эпох
+                if self.last_epoch_counts[tile_id] != count:
+                    count_changed = True
+                    self.last_epoch_counts[tile_id] = count
+                    self.texts[tile_id].set_text(f'Эпох: {count}')
+                
+                # Подсвечиваем график ТОЛЬКО при реальном изменении данных или количества эпох
+                if data_changed or count_changed:
+                    self.highlight_times[tile_id] = current_time
+                    self.highlight_rects[tile_id].set_alpha(0.4)  # Яркая подсветка при обновлении
+                else:
+                    # Плавно убираем подсветку со временем
+                    time_since_highlight = current_time - self.highlight_times[tile_id]
+                    if time_since_highlight < highlight_duration:
+                        # Плавное затухание подсветки (квадратичное для более плавного эффекта)
+                        progress = time_since_highlight / highlight_duration
+                        alpha = 0.4 * (1.0 - progress * progress)  # Квадратичное затухание
+                        self.highlight_rects[tile_id].set_alpha(alpha)
+                    else:
+                        # Подсветка полностью исчезла
+                        self.highlight_rects[tile_id].set_alpha(0.0)
+            
+            # Принудительное обновление отображения
+            # Используем draw_idle() для более плавного обновления (не блокирует)
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()  # Обработка событий GUI
+            
+            # Минимальная пауза для обработки событий GUI (важно для плавности)
+            plt.pause(0.001)  # Очень короткая пауза для максимальной плавности
+            
+        except Exception as e:
+            # Игнорируем ошибки обновления графиков, чтобы не прерывать обработку
+            if not hasattr(self, '_error_shown'):
+                print(f"⚠ Предупреждение при обновлении графиков: {e}")
+                self._error_shown = True
+    
+    def update_highlights_only(self):
+        """Обновляет только подсветку без полной перерисовки данных (для плавности)."""
+        if not self.window_open:
+            return
+        
+        try:
+            if not plt.fignum_exists(self.fig.number):
+                self.window_open = False
+                return
+            
+            current_time = time.time()
+            highlight_duration = 0.15
+            
+            for tile_id in range(NUM_TILES):
+                # Плавно убираем подсветку со временем
+                time_since_highlight = current_time - self.highlight_times[tile_id]
+                if time_since_highlight < highlight_duration:
+                    # Плавное затухание подсветки
+                    progress = time_since_highlight / highlight_duration
+                    alpha = 0.4 * (1.0 - progress * progress)
+                    self.highlight_rects[tile_id].set_alpha(alpha)
+                else:
+                    self.highlight_rects[tile_id].set_alpha(0.0)
+            
+            # Обновляем только подсветку (быстрее, чем полная перерисовка)
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
+            
+        except:
+            pass
+    
+    def close(self):
+        """Закрывает окно графика."""
+        plt.close(self.fig)
+
+
+# ============================================================================
+# ГЛАВНАЯ ФУНКЦИЯ
+# ============================================================================
+
+def main():
+    """
+    Главная функция: запускает обработку ЭЭГ в реальном времени.
+    """
+    print("=" * 70)
+    print("ОБРАБОТКА ЭЭГ ДАННЫХ В РЕАЛЬНОМ ВРЕМЕНИ")
+    print("=" * 70)
+    print("\nЭтот скрипт будет:")
+    print("  1. Подключаться к потокам маркеров и ЭЭГ")
+    print("  2. Извлекать эпохи при каждом событии 'on'")
+    print("  3. Фильтровать и обрабатывать данные")
+    print("  4. Показывать усреднённые сигналы в реальном времени")
+    print("  5. Сохранять результаты при остановке (Ctrl+C)\n")
+    
+    # Шаг 1: Находим потоки
+    marker_info, eeg_info = find_streams()
+    if marker_info is None or eeg_info is None:
+        print("\nНе удалось найти необходимые потоки. Выход.")
+        return
+    
+    # Шаг 2: Создаём inlets для чтения данных
+    print("\nПодключение к потокам...")
+    marker_inlet = StreamInlet(marker_info)
+    eeg_inlet = StreamInlet(eeg_info)
+    
+    # Получаем параметры потока ЭЭГ
+    eeg_sampling_rate = eeg_info.nominal_srate()
+    eeg_num_channels = eeg_info.channel_count()
+    
+    if eeg_sampling_rate == 0:
+        print("ОШИБКА: Частота дискретизации ЭЭГ не определена!")
+        return
+    
+    print(f"  ✓ Подключено к потоку маркеров")
+    print(f"  ✓ Подключено к потоку ЭЭГ ({eeg_num_channels} каналов, {eeg_sampling_rate} Гц)")
+    print("\n  Синхронизация: нативные LSL-таймстемпы (единое время для ЭЭГ и маркеров)")
+    
+    # Шаг 3: Инициализируем компоненты обработки
+    print("\nИнициализация компонентов обработки...")
+    buffer = EEGBuffer(eeg_sampling_rate, eeg_num_channels)
+    processor = EpochProcessor(eeg_sampling_rate, eeg_num_channels)
+    plotter = RealtimePlotter(eeg_sampling_rate, eeg_num_channels)
+    
+    print("  ✓ Все компоненты инициализированы")
+    
+    # Шаг 3.5: Накапливаем данные в буфере перед началом обработки
+    # Нужно накопить достаточно данных, чтобы можно было извлечь эпоху после маркера
+    # Эпоха требует EPOCH_POST_STIM секунд после маркера, поэтому нужно накопить минимум столько
+    min_buffer_duration = EPOCH_POST_STIM + 0.5  # Добавляем запас 0.5 сек
+    print(f"\nНакопление данных в буфере (минимум {min_buffer_duration:.1f} сек для эпох)...")
+    buffer_ready = False
+    start_time = time.time()
+    
+    # Также накапливаем маркеры в очереди, чтобы обработать их позже
+    marker_queue = []
+    
+    while not buffer_ready:
+        # Читаем данные ЭЭГ
+        chunk, timestamps = eeg_inlet.pull_chunk(timeout=0.1, max_samples=100)
+        if chunk and timestamps:
+            chunk_array = np.array(chunk)
+            if chunk_array.shape[1] == eeg_num_channels:
+                pass
+            elif chunk_array.shape[0] == eeg_num_channels:
+                chunk_array = chunk_array.T
+            else:
+                continue
+
+            for i, ts in enumerate(timestamps):
+                buffer.add_sample(ts, chunk_array[i, :])
+
+        marker_sample, marker_timestamp = marker_inlet.pull_sample(timeout=0.0)
+        if marker_sample is not None:
+            parsed = parse_marker(marker_sample[0])
+            if parsed is not None:
+                tile_id, event = parsed
+                if event == "on" and 0 <= tile_id < NUM_TILES:
+                    marker_queue.append((tile_id, marker_timestamp))
+                    if len(marker_queue) == 1:
+                        print(f"  Получен первый маркер (плитка {tile_id}), ждём накопления данных...")
+        
+        # Проверяем готовность буфера
+        buffer_info = buffer.get_buffer_info()
+        if buffer_info['duration'] >= min_buffer_duration:
+            buffer_ready = True
+            print(f"  ✓ Буфер готов: {buffer_info['duration']:.2f} сек данных, {buffer_info['size']} точек")
+            if len(marker_queue) > 0:
+                print(f"  В очереди {len(marker_queue)} маркеров для обработки")
+        elif time.time() - start_time > 15:
+            # Если прошло 15 секунд, но буфер не готов, продолжаем с предупреждением
+            print(f"  ⚠ Буфер частично готов: {buffer_info['duration']:.2f} сек данных")
+            print(f"     Продолжаем, но некоторые маркеры могут быть пропущены")
+            buffer_ready = True
+    
+    print("\n" + "=" * 70)
+    print("НАЧАЛО ОБРАБОТКИ")
+    print("Нажмите Ctrl+C для остановки и сохранения результатов")
+    print("=" * 70 + "\n")
+    
+    # Шаг 4: Главный цикл обработки
+    last_update_time = time.time()
+    skipped_markers = 0  # Счётчик пропущенных маркеров
+    processed_markers = 0  # Счётчик обработанных маркеров
+    main.start_time = time.time()  # Время начала работы для статуса
+    main.last_status_time = time.time()  # Время последнего статуса
+    
+    if marker_queue:
+        print(f"\nОжидание накопления данных для обработки {len(marker_queue)} маркеров из очереди...")
+        last_marker_ts = max(ts for _, ts in marker_queue)
+        required_buffer_end = last_marker_ts + EPOCH_POST_STIM + 0.1
+
+        wait_start = time.time()
+        while True:
+            chunk, timestamps = eeg_inlet.pull_chunk(timeout=0.1, max_samples=100)
+            if chunk and timestamps:
+                chunk_array = np.array(chunk)
+                if chunk_array.shape[1] == eeg_num_channels:
+                    pass
+                elif chunk_array.shape[0] == eeg_num_channels:
+                    chunk_array = chunk_array.T
+                else:
+                    continue
+                for i, ts in enumerate(timestamps):
+                    buffer.add_sample(ts, chunk_array[i, :])
+
+            buffer_info = buffer.get_buffer_info()
+            if buffer_info['end_time'] is not None and buffer_info['end_time'] >= required_buffer_end:
+                print(f"  ✓ Данных достаточно (буфер до {buffer_info['end_time']:.2f}, требуется до {required_buffer_end:.2f})")
+                break
+            elif time.time() - wait_start > 10:
+                print(f"  ⚠ Таймаут ожидания. Продолжаем с текущим буфером (до {buffer_info.get('end_time', 0):.2f})")
+                break
+    
+    if marker_queue:
+        print(f"\n{'='*70}")
+        print(f"ОБРАБОТКА {len(marker_queue)} МАРКЕРОВ ИЗ ОЧЕРЕДИ")
+        print(f"{'='*70}")
+        for idx, (tile_id, marker_ts) in enumerate(marker_queue, 1):
+            is_ready, ready_message = buffer.is_ready(
+                marker_ts, EPOCH_PRE_STIM, EPOCH_POST_STIM
+            )
+            print(f"\n[{idx}/{len(marker_queue)}] Маркер плитки {tile_id} (LSL ts={marker_ts:.3f})")
+
+            if is_ready:
+                epoch_result = buffer.extract_epoch(
+                    marker_ts, EPOCH_PRE_STIM, EPOCH_POST_STIM
+                )
+                
+                if epoch_result is not None:
+                    epoch_data, time_vector = epoch_result
+                    processor.add_epoch(tile_id, epoch_data)
+                    processed_markers += 1
+                    epoch_counts = processor.get_epoch_counts()
+                    count_for_tile = epoch_counts[tile_id]
+                    print(f"  ✓ Обработана успешно | Эпох для плитки: {count_for_tile}")
+                    
+                    # НЕМЕДЛЕННО обновляем график при обработке маркера (синхронно с миганием)
+                    try:
+                        plotter.update(processor)
+                    except:
+                        pass
+                else:
+                    skipped_markers += 1
+                    print(f"  ✗ Пропущена: ошибка извлечения эпохи")
+            else:
+                skipped_markers += 1
+                buffer_info = buffer.get_buffer_info()
+                print(f"  ✗ Пропущена: {ready_message}")
+                if buffer_info['duration'] > 0:
+                    print(f"    Буфер: {buffer_info['duration']:.2f} сек, "
+                          f"от {buffer_info.get('start_time', 0):.3f} до {buffer_info.get('end_time', 0):.3f} сек")
+        
+        print(f"\n{'='*70}")
+        print(f"Обработано из очереди: {processed_markers}, пропущено: {skipped_markers}")
+        print(f"{'='*70}\n")
+    
+    try:
+        while True:
+            marker_sample, marker_timestamp = marker_inlet.pull_sample(timeout=0.0)
+            if marker_sample is not None:
+                parsed = parse_marker(marker_sample[0])
+                if parsed is not None:
+                    tile_id, event = parsed
+
+                    if event == "on" and 0 <= tile_id < NUM_TILES:
+                        is_ready, ready_message = buffer.is_ready(
+                            marker_timestamp, EPOCH_PRE_STIM, EPOCH_POST_STIM
+                        )
+
+                        if is_ready:
+                            epoch_result = buffer.extract_epoch(
+                                marker_timestamp, EPOCH_PRE_STIM, EPOCH_POST_STIM
+                            )
+
+                            if epoch_result is not None:
+                                epoch_data, time_vector = epoch_result
+                                processor.add_epoch(tile_id, epoch_data)
+                                processed_markers += 1
+                                epoch_counts = processor.get_epoch_counts()
+                                count_for_tile = epoch_counts[tile_id]
+                                print(f"✓ [LSL ts={marker_timestamp:.3f}] Маркер плитки {tile_id} обработана | "
+                                      f"Эпох для плитки: {count_for_tile} | "
+                                      f"Всего: {processed_markers}, пропущено: {skipped_markers}")
+                                
+                                # НЕМЕДЛЕННО обновляем график при обработке маркера (синхронно с миганием)
+                                try:
+                                    plotter.update(processor)
+                                except:
+                                    pass
+                            else:
+                                skipped_markers += 1
+                                print(f"✗ [LSL ts={marker_timestamp:.3f}] Маркер плитки {tile_id} пропущен: ошибка извлечения эпохи")
+                        else:
+                            skipped_markers += 1
+                            buffer_info = buffer.get_buffer_info()
+                            print(f"✗ [LSL ts={marker_timestamp:.3f}] Маркер плитки {tile_id} пропущен: {ready_message}")
+                            if buffer_info['duration'] > 0:
+                                print(f"    Буфер: {buffer_info['duration']:.2f} сек, "
+                                      f"от {buffer_info.get('start_time', 0):.3f} до {buffer_info.get('end_time', 0):.3f} сек")
+                            
+                            # Обновляем график даже при пропуске маркера (для визуальной обратной связи)
+                            try:
+                                plotter.update(processor)
+                            except:
+                                pass
+            
+            chunk, timestamps = eeg_inlet.pull_chunk(timeout=0.0, max_samples=100)
+            if chunk and timestamps:
+                chunk_array = np.array(chunk)
+                if chunk_array.shape[1] == eeg_num_channels:
+                    pass
+                elif chunk_array.shape[0] == eeg_num_channels:
+                    chunk_array = chunk_array.T
+                else:
+                    print(f"ОШИБКА: Неожиданная форма данных: {chunk_array.shape}")
+                    continue
+
+                samples_added = 0
+                for i, ts in enumerate(timestamps):
+                    buffer.add_sample(ts, chunk_array[i, :])
+                    samples_added += 1
+                
+                # Периодически выводим информацию о полученных данных
+                if not hasattr(main, 'last_eeg_log_time'):
+                    main.last_eeg_log_time = 0
+                
+                current_time = time.time()
+                if current_time - main.last_eeg_log_time >= 5.0:  # Каждые 5 секунд
+                    buffer_info = buffer.get_buffer_info()
+                    print(f"📊 Получено {samples_added} сэмплов ЭЭГ | "
+                          f"Буфер: {buffer_info['size']} точек, {buffer_info['duration']:.2f} сек")
+                    main.last_eeg_log_time = current_time
+            
+            # Обновляем график периодически для плавности затухания подсветки
+            # Основное обновление происходит синхронно с маркерами выше
+            current_time = time.time()
+            if current_time - last_update_time >= UPDATE_INTERVAL:
+                try:
+                    # Обновляем график (данные могут не измениться, но подсветка затухает)
+                    plotter.update(processor)
+                    last_update_time = current_time
+                except Exception as e:
+                    # Если ошибка обновления графиков, продолжаем работу
+                    if not hasattr(main, 'plot_error_shown'):
+                        print(f"⚠ Предупреждение: ошибка обновления графиков: {e}")
+                        main.plot_error_shown = True
+            
+            # Обновляем только подсветку между основными обновлениями для плавности затухания
+            elif current_time - last_update_time >= UPDATE_INTERVAL * 0.5:  # Половина интервала
+                try:
+                    # Обновляем только подсветку (без полной перерисовки данных)
+                    plotter.update_highlights_only()
+                except:
+                    pass
+            
+            # Выводим подробный статус периодически
+            if not hasattr(main, 'last_status_time'):
+                main.last_status_time = current_time
+            
+            if current_time - main.last_status_time >= STATUS_UPDATE_INTERVAL:
+                # Подробная информация о состоянии
+                buffer_info = buffer.get_buffer_info()
+                epoch_counts = processor.get_epoch_counts()
+                total_epochs = sum(epoch_counts.values())
+                
+                print(f"\n{'='*70}")
+                print(f"СТАТУС [t={current_time - start_time:.1f}s работы]")
+                print(f"  Буфер ЭЭГ: {buffer_info['size']} точек, "
+                      f"{buffer_info['duration']:.2f} сек данных")
+                if buffer_info['start_time'] is not None:
+                    print(f"    Временной диапазон: {buffer_info['start_time']:.3f} - {buffer_info['end_time']:.3f} сек")
+                print(f"  Обработано маркеров: {processed_markers} | Пропущено: {skipped_markers}")
+                if total_epochs > 0:
+                    success_rate = processed_markers / (processed_markers + skipped_markers) * 100 if (processed_markers + skipped_markers) > 0 else 0
+                    print(f"  Успешность: {success_rate:.1f}%")
+                    print(f"  Всего эпох накоплено: {total_epochs}")
+                    print(f"  Эпохи по плиткам:")
+                    for tile_id in range(NUM_TILES):
+                        count = epoch_counts[tile_id]
+                        if count > 0:
+                            print(f"    Плитка {tile_id}: {count} эпох")
+                print(f"{'='*70}\n")
+                
+                main.last_status_time = current_time
+            
+            # Небольшая задержка, чтобы не нагружать CPU
+            time.sleep(0.01)
+    
+    except KeyboardInterrupt:
+        print("\n\n" + "=" * 70)
+        print("ОСТАНОВКА ОБРАБОТКИ")
+        print("=" * 70)
+        
+        # Выводим статистику
+        print(f"\nСтатистика обработки:")
+        print(f"  Обработано маркеров: {processed_markers}")
+        print(f"  Пропущено маркеров: {skipped_markers}")
+        if processed_markers + skipped_markers > 0:
+            success_rate = processed_markers / (processed_markers + skipped_markers) * 100
+            print(f"  Процент успешной обработки: {success_rate:.1f}%")
+        
+        # Информация о буфере
+        buffer_info = buffer.get_buffer_info()
+        print(f"\nСостояние буфера:")
+        print(f"  Размер: {buffer_info['size']} точек")
+        print(f"  Длительность: {buffer_info['duration']:.2f} сек")
+        
+        # Сохраняем результаты
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_dir = "results"
+        os.makedirs(results_dir, exist_ok=True)
+        filename = os.path.join(results_dir, f"eeg_epochs_{timestamp}.pkl")
+        
+        processor.save_results(filename)
+        
+        # Закрываем график
+        plotter.close()
+        
+        print("\nОбработка завершена. Результаты сохранены.")
+        print(f"Для загрузки результатов используйте:")
+        print(f"  import pickle")
+        print(f"  with open('{filename}', 'rb') as f:")
+        print(f"      results = pickle.load(f)")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================================================
+ФАЙЛ: scripts\hardware_validation.py
+================================================================================
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Аппаратная валидация ЭЭГ: сырой сигнал и матрица ковариаций.
+
+Скрипт для проверки качества оборудования:
+1. Читает LSL-поток ЭЭГ
+2. Отрисовывает сырой сигнал бегущей волной в реальном времени (без усреднений)
+3. Выводит матрицу ковариаций (x11, x22, x12 и т.д.) для проверки отсутствия
+   аппаратных наводок между каналами
+
+Запуск:
+    python scripts/hardware_validation.py
+
+Перед запуском: включите Нейроспектр (или другой источник ЭЭГ) с LSL-трансляцией.
+Для проверки каналов: подайте синусоиду на один канал — остальные должны быть
+независимы (низкая ковариация между каналами).
+"""
+
+import time
+import numpy as np
+from collections import deque
+from typing import Optional
+
+import matplotlib.pyplot as plt
+from pylsl import StreamInlet, resolve_byprop
+
+# Параметры
+EEG_STREAM_TYPES = ("EEG", "Signal")
+DISPLAY_DURATION = 5.0   # секунд на экране
+COV_UPDATE_INTERVAL = 1.0  # вывод матрицы ковариаций каждую секунду
+COV_WINDOW = 3.0  # окно для расчёта ковариации (сек)
+
+
+def find_eeg_stream():
+    """Находит поток ЭЭГ в LSL."""
+    for stream_type in EEG_STREAM_TYPES:
+        streams = resolve_byprop("type", stream_type, timeout=3)
+        if streams:
+            return streams[0]
+    return None
+
+
+def main():
+    print("=" * 60)
+    print("АППАРАТНАЯ ВАЛИДАЦИЯ ЭЭГ")
+    print("=" * 60)
+    print("\nПоиск LSL-потока ЭЭГ...")
+
+    eeg_info = find_eeg_stream()
+    if eeg_info is None:
+        print("ОШИБКА: Поток ЭЭГ не найден. Запустите Нейроспектр с LSL.")
+        return
+
+    inlet = StreamInlet(eeg_info)
+    srate = eeg_info.nominal_srate()
+    n_channels = eeg_info.channel_count()
+    stream_name = eeg_info.name() if eeg_info.name() else "EEG"
+
+    if srate <= 0:
+        print("ОШИБКА: Частота дискретизации не определена.")
+        return
+
+    buffer_size = int(DISPLAY_DURATION * srate)
+    cov_window_samples = int(COV_WINDOW * srate)
+
+    # Буфер: (num_samples, num_channels)
+    buffer = deque(maxlen=buffer_size)
+
+    print(f"  ✓ Подключено: {stream_name}")
+    print(f"    Каналов: {n_channels}, частота: {srate} Гц")
+    print(f"\nОтрисовка: последние {DISPLAY_DURATION} сек | Ковариация: окно {COV_WINDOW} сек")
+    print("Ctrl+C — выход\n")
+
+    # График
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.set_xlim(0, DISPLAY_DURATION)
+    ax.set_xlabel("Время (сек)")
+    ax.set_ylabel("Амплитуда (мкВ)")
+    ax.set_title(f"Сырой сигнал ЭЭГ — {stream_name} (без усреднений)")
+    ax.grid(True, alpha=0.3)
+
+    # Линии для каждого канала (с вертикальным смещением для читаемости)
+    time_axis = np.linspace(0, DISPLAY_DURATION, buffer_size)
+    lines = []
+    offsets = np.linspace(0, (n_channels - 1) * 80, n_channels)
+    colors = plt.cm.tab10(np.linspace(0, 1, max(n_channels, 10)))
+    for ch in range(n_channels):
+        line, = ax.plot([], [], color=colors[ch % 10], label=f"Ch{ch+1}", linewidth=0.8)
+        lines.append(line)
+    ax.legend(loc="upper right", fontsize=8, ncol=min(n_channels, 5))
+    plt.ion()
+    plt.show()
+
+    last_cov_time = time.time()
+    try:
+        while True:
+            chunk, timestamps = inlet.pull_chunk(timeout=0.05, max_samples=256)
+            if chunk and timestamps:
+                arr = np.array(chunk)
+                if arr.shape[1] != n_channels:
+                    arr = arr.T if arr.shape[0] == n_channels else arr
+                for i in range(len(arr)):
+                    buffer.append(arr[i, :])
+
+            if len(buffer) < 2:
+                plt.pause(0.02)
+                continue
+
+            data = np.array(buffer)
+            t = np.linspace(
+                DISPLAY_DURATION - len(data) / srate,
+                DISPLAY_DURATION,
+                len(data),
+            )
+
+            # Смещение каналов для визуализации
+            for ch in range(n_channels):
+                lines[ch].set_data(t, data[:, ch] + offsets[ch])
+
+            # Автомасштаб по Y
+            y_min = data.min() + offsets.min()
+            y_max = data.max() + offsets.max()
+            margin = (y_max - y_min) * 0.1 or 1
+            ax.set_ylim(y_min - margin, y_max + margin)
+
+            # Матрица ковариаций
+            now = time.time()
+            if now - last_cov_time >= COV_UPDATE_INTERVAL:
+                last_cov_time = now
+                cov_data = data[-cov_window_samples:] if len(data) >= cov_window_samples else data
+                cov_data = cov_data - np.mean(cov_data, axis=0)
+                cov_matrix = np.cov(cov_data.T)
+
+                print("\n" + "-" * 50)
+                print("МАТРИЦА КОВАРИАЦИЙ (проверка наводок между каналами)")
+                print("-" * 50)
+                if n_channels == 1:
+                    print(f"  x11 (дисперсия Ch1): {cov_matrix[0, 0]:.2f}")
+                elif n_channels == 2:
+                    x11, x22 = cov_matrix[0, 0], cov_matrix[1, 1]
+                    x12 = cov_matrix[0, 1]
+                    print(f"  x11 (дисперсия Ch1): {x11:.2f}")
+                    print(f"  x22 (дисперсия Ch2): {x22:.2f}")
+                    print(f"  x12 (ковариация Ch1-Ch2): {x12:.2f}")
+                    if x11 > 0 and x22 > 0:
+                        corr = x12 / np.sqrt(x11 * x22)
+                        print(f"  Корреляция Ch1-Ch2: {corr:.4f}")
+                        print("  (≈0 при независимых каналах, ≈±1 при наводках)")
+                else:
+                    np.set_printoptions(precision=2, suppress=True)
+                    print(cov_matrix)
+                    print("  Диагональ — дисперсии каналов, вне диагонали — ковариации.")
+                print("-" * 50)
+
+            fig.canvas.draw()
+            fig.canvas.flush_events()
+            plt.pause(0.02)
+
+    except KeyboardInterrupt:
+        print("\nВыход.")
+    finally:
+        plt.close()
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================================================
+ФАЙЛ: scripts\lsl_listen.py
+================================================================================
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Слушает все доступные LSL-стримы в сети:
+  - маркеры из нашей программы (BCI_StimMarkers);
+  - ЭЭГ и другие потоки из Нейроспектра или иных программ.
+
+Запуск из корня проекта с активированным venv:
+  python scripts/lsl_listen.py
+
+Перед запуском включите приложение стимуляции и/или Нейроспектр с LSL-трансляцией.
+"""
+
+import time
+from typing import List, Tuple
+
+from pylsl import StreamInlet, resolve_byprop
+
+TIMEOUT = 5
+POLL_INTERVAL = 0.02
+
+
+def discover_streams() -> List:
+    """Находит все LSL-стримы в сети (Markers, EEG и др.)."""
+    seen_uid = set()
+    streams = []
+    for stream_type in ("Markers", "EEG", "Signal"):
+        found = resolve_byprop("type", stream_type, timeout=2)
+        for s in found:
+            uid = s.uid()
+            if uid not in seen_uid:
+                seen_uid.add(uid)
+                streams.append(s)
+    return streams
+
+
+def main() -> None:
+    print("Поиск LSL-стримов (маркеры, ЭЭГ и др.)...")
+    streams = discover_streams()
+    if not streams:
+        print("Стримы не найдены. Запустите приложение стимуляции и/или Нейроспектр.")
+        return
+
+    inlets: List[Tuple[str, str, StreamInlet]] = []
+    for s in streams:
+        inlet = StreamInlet(s)
+        # Безопасное получение имени стрима
+        try:
+            stream_name = s.name()
+        except (UnicodeDecodeError, UnicodeError, Exception) as e:
+            # Если не удаётся декодировать имя, используем UID как fallback
+            try:
+                uid = s.uid()
+                stream_name = f"Stream_{uid[:8] if len(uid) > 8 else uid}"
+            except:
+                stream_name = "Unknown_Stream"
+        
+        # Безопасное получение типа стрима
+        try:
+            stream_type = s.type()
+        except (UnicodeDecodeError, UnicodeError, Exception):
+            stream_type = "Unknown"
+        
+        inlets.append((stream_name, stream_type, inlet))
+        print(f"  Подключено: {stream_name} (тип: {stream_type}, каналов: {s.channel_count()})")
+
+    print("\nПриём данных (Ctrl+C — выход):\n")
+    try:
+        while True:
+            for name, stype, inlet in inlets:
+                if stype == "Markers":
+                    sample, ts = inlet.pull_sample(timeout=0.0)
+                    if sample is not None:
+                        print(f"[{name}] {ts:.3f}  маркер: {sample[0]}")
+                else:
+                    chunk, timestamps = inlet.pull_chunk(timeout=0.0, max_samples=100)
+                    if chunk and timestamps:
+                        n = len(chunk)
+                        if n == 1:
+                            print(f"[{name}] {timestamps[0]:.3f}  сэмпл: {chunk[0]}")
+                        else:
+                            print(f"[{name}] {timestamps[0]:.3f}  получено {n} сэмплов (ЭЭГ)")
+            time.sleep(POLL_INTERVAL)
+    except KeyboardInterrupt:
+        print("\nВыход.")
+
+
+if __name__ == "__main__":
+    main()
+
+
