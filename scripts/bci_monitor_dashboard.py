@@ -26,7 +26,7 @@ from datetime import datetime
 import os
 
 from scipy import signal
-from pylsl import StreamInlet, resolve_byprop
+from pylsl import StreamInlet, resolve_byprop, local_clock
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -83,7 +83,7 @@ class ContinuousSignalWidget(QWidget):
         low = FILTER_LOW / nyquist
         high = FILTER_HIGH / nyquist
         self.b, self.a = signal.butter(4, [low, high], btype='band')
-        self.filter_state = signal.lfilter_zi(self.b, self.a)
+        self.filter_state = signal.lfilter_zi(self.b, self.a) * 0.0
     
     def _setup_ui(self):
         """Создаёт интерфейс виджета."""
@@ -160,7 +160,7 @@ class ContinuousSignalWidget(QWidget):
         if len(times) == 0:
             return
         
-        now_lsl = times[-1]
+        now_lsl = local_clock()
         relative_times = times - now_lsl
         
         self.signal_line.setData(relative_times, data)
