@@ -65,10 +65,12 @@ class ContinuousSignalWidget(QWidget):
         self.num_channels = num_channels
         
         self.buffer_size = int(CONTINUOUS_WINDOW_SEC * sampling_rate)
-        self.time_buffer = deque(maxlen=self.buffer_size)
+        self.time_buffer = deque(maxlen=self.buffer_size)  # Хранит относительное время от первого сэмпла
         self.raw_data_buffer = deque(maxlen=self.buffer_size)
         self.filtered_data_buffer = deque(maxlen=self.buffer_size)
         
+        self.first_sample_time: Optional[float] = None  # Абсолютное LSL время первого сэмпла
+        self.last_sample_time: Optional[float] = None  # Абсолютное LSL время последнего сэмпла
         self.show_filtered = False
         self.markers = deque(maxlen=100)
         self.filter_state = None
@@ -119,6 +121,16 @@ class ContinuousSignalWidget(QWidget):
     
     def add_sample(self, timestamp: float, data: np.ndarray):
         """Добавляет новый сэмпл в буфер."""
+        # Запоминаем время первого сэмпла
+        if self.first_sample_time is None:
+            self.first_sample_time = timestamp
+        
+        # Запоминаем время последнего сэмпла
+        self.last_sample_time = timestamp
+        
+        # Вычисляем относительное время от первого сэмпла (в секундах)
+        relative_time = timestamp - self.first_sample_time
+        
         if self.num_channels > 1:
             mean_data = np.mean(data)
         else:
@@ -134,7 +146,7 @@ class ContinuousSignalWidget(QWidget):
         except Exception:
             self.filtered_data_buffer.append(mean_data)
         
-        self.time_buffer.append(timestamp)
+        self.time_buffer.append(relative_time)
     
     def add_marker(self, timestamp: float, tile_id: int):
         """Добавляет маркер стимула."""
@@ -142,9 +154,10 @@ class ContinuousSignalWidget(QWidget):
     
     def _update_plot(self):
         """Обновляет график."""
-        if len(self.time_buffer) < 1:
+        if len(self.time_buffer) < 1 or self.first_sample_time is None:
             return
         
+        # times содержит относительное время от первого сэмпла (в секундах)
         times = np.array(self.time_buffer)
         
         if self.show_filtered:
@@ -160,23 +173,53 @@ class ContinuousSignalWidget(QWidget):
         if len(times) == 0:
             return
         
-        now_lsl = local_clock()
-        relative_times = times - now_lsl
+        # Используем время последнего сэмпла как текущее время для синхронизации
+        # Это более надежно, чем local_clock(), так как гарантирует синхронизацию с данными
+        if self.last_sample_time is not None:
+            current_absolute_time = self.last_sample_time
+        else:
+            # Fallback на local_clock(), если еще нет данных
+            current_absolute_time = local_clock()
         
-        self.signal_line.setData(relative_times, data)
+        # Вычисляем текущее относительное время от первого сэмпла
+        current_relative_time = current_absolute_time - self.first_sample_time
+        
+        # Преобразуем времена в систему координат графика: отрицательные значения = "секунды назад"
+        # График показывает окно от -CONTINUOUS_WINDOW_SEC до 0
+        # times содержит относительное время от первого сэмпла, вычитаем текущее относительное время
+        plot_times = times - current_relative_time
+        
+        # Фильтруем данные, которые попадают в окно отображения
+        # Показываем только последние CONTINUOUS_WINDOW_SEC секунд
+        mask = (plot_times >= -CONTINUOUS_WINDOW_SEC) & (plot_times <= 0.1)  # Небольшой запас справа
+        if np.any(mask):
+            plot_times = plot_times[mask]
+            plot_data = data[mask]
+        else:
+            # Если нет данных в окне, все равно показываем последние данные
+            # (на случай, если данных еще мало)
+            if len(plot_times) > 0:
+                # Показываем все данные, которые есть
+                plot_times = plot_times
+                plot_data = data
+            else:
+                plot_times = np.array([])
+                plot_data = np.array([])
+        
+        self.signal_line.setData(plot_times, plot_data)
         self.plot_widget.setXRange(-CONTINUOUS_WINDOW_SEC, 0)
         
-        if self.auto_scale and len(data) > 0:
-            y_min, y_max = np.min(data), np.max(data)
+        if self.auto_scale and len(plot_data) > 0:
+            y_min, y_max = np.min(plot_data), np.max(plot_data)
             if y_max != y_min:
                 margin = (y_max - y_min) * 0.2
                 self.plot_widget.setYRange(y_min - margin, y_max + margin)
             else:
                 self.plot_widget.setYRange(y_min - 10, y_max + 10)
         
-        self._update_markers(now_lsl)
+        self._update_markers(current_relative_time)
     
-    def _update_markers(self, now_lsl: float):
+    def _update_markers(self, current_relative_time: float):
         """Обновляет маркеры на графике."""
         for line in self.marker_lines:
             self.plot_widget.removeItem(line)
@@ -185,11 +228,21 @@ class ContinuousSignalWidget(QWidget):
         self.marker_lines.clear()
         self.marker_labels.clear()
         
+        if self.first_sample_time is None:
+            return
+        
+        # current_relative_time содержит текущее относительное время от первого сэмпла
+        # marker_time содержит абсолютное LSL время маркера
         for marker_time, tile_id in self.markers:
-            relative_time = marker_time - now_lsl
-            if -CONTINUOUS_WINDOW_SEC <= relative_time <= 0:
+            # Вычисляем относительное время маркера от первого сэмпла
+            marker_relative_time = marker_time - self.first_sample_time
+            
+            # Преобразуем в систему координат графика
+            plot_time = marker_relative_time - current_relative_time
+            
+            if -CONTINUOUS_WINDOW_SEC <= plot_time <= 0:
                 line = pg.InfiniteLine(
-                    pos=relative_time, angle=90,
+                    pos=plot_time, angle=90,
                     pen=pg.mkPen('yellow', width=2)
                 )
                 self.plot_widget.addItem(line)
@@ -200,7 +253,7 @@ class ContinuousSignalWidget(QWidget):
                 label = pg.TextItem(
                     f"#{tile_id}", color='yellow', anchor=(0.5, 1)
                 )
-                label.setPos(relative_time, y_top * 0.95)
+                label.setPos(plot_time, y_top * 0.95)
                 self.plot_widget.addItem(label)
                 self.marker_labels.append(label)
     
