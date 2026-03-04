@@ -39,11 +39,14 @@ from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QFont
 import pyqtgraph as pg
 
+# Отключить упрощение линий и включить сглаживание (как в Нейроспектре / OpenBCI GUI)
+pg.setConfigOptions(useOpenGL=True, antialias=True)
+
 # Параметры по ТЗ
 EEG_STREAM_TYPES = ("EEG", "Signal")
 WINDOW_SEC = 3.0          # скользящее окно на экране и для ковариации (сек)
 COV_UPDATE_INTERVAL = 2.0  # вывод матрицы ковариаций каждые 2 секунды
-UPDATE_INTERVAL_MS = 33    # обновление графиков каждые 33 мс (~30 FPS)
+UPDATE_INTERVAL_MS = 16   # обновление графиков ~60 FPS (как в EEG-визуализаторах)
 
 
 def find_eeg_stream():
@@ -83,8 +86,11 @@ class ChannelWidget(QWidget):
         header.setStyleSheet("color: white; background-color: #2b2b2b; padding: 5px; border-radius: 3px;")
         layout.addWidget(header)
         
-        # График
+        # График (без даунсемплинга — полная точность, как в медицинских ЭЭГ)
         self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setDownsampling(mode=None)
+        self.plot_widget.setClipToView(False)
+        self.plot_widget.setAutoVisible(y=True)
         self.plot_widget.setLabel('left', 'мкВ', color='white', fontsize=9)
         self.plot_widget.setLabel('bottom', 'Время (сек)', color='white', fontsize=9)
         self.plot_widget.setBackground('black')
@@ -92,9 +98,13 @@ class ChannelWidget(QWidget):
         self.plot_widget.setMouseEnabled(x=True, y=True)
         self.plot_widget.setMinimumHeight(150)
         
-        # Линия сигнала
+        # Линия сигнала (гладкая, без упрощения)
         colors = pg.intColor(self.channel_id, hues=10, values=1, maxValue=255, minValue=150, maxHue=360)
-        self.signal_line = self.plot_widget.plot([], [], pen=pg.mkPen(colors, width=1.5))
+        self.signal_line = self.plot_widget.plot(
+            [], [],
+            pen=pg.mkPen(colors, width=1),
+            antialias=True
+        )
         
         layout.addWidget(self.plot_widget)
         
@@ -120,56 +130,25 @@ class ChannelWidget(QWidget):
     
     def update_plot(self):
         """Обновляет график и статистику."""
-        if len(self.time_buffer) < 2 or self.first_sample_time is None:
-            return
-        
-        times = np.array(self.time_buffer)
         data = np.array(self.data_buffer)
-        
-        if len(times) != len(data):
-            min_len = min(len(times), len(data))
-            times = times[:min_len]
-            data = data[:min_len]
-        
-        if len(times) == 0:
+        if len(data) == 0:
             return
         
-        # Вычисляем текущее относительное время
-        if self.last_sample_time is not None:
-            current_relative_time = self.last_sample_time - self.first_sample_time
-        else:
-            current_relative_time = local_clock() - self.first_sample_time
+        # Равномерная временная шкала (как в EEG-софте): от -WINDOW_SEC до 0
+        times = np.linspace(-WINDOW_SEC, 0, len(data))
         
-        # Преобразуем времена в систему координат графика (отрицательные = секунды назад)
-        plot_times = times - current_relative_time
-        
-        # Фильтруем данные для окна отображения
-        mask = (plot_times >= -WINDOW_SEC) & (plot_times <= 0.1)
-        if np.any(mask):
-            plot_times = plot_times[mask]
-            plot_data = data[mask]
-        else:
-            if len(plot_times) > 0:
-                plot_times = plot_times
-                plot_data = data
-            else:
-                plot_times = np.array([])
-                plot_data = np.array([])
-        
-        # Обновляем график
-        self.signal_line.setData(plot_times, plot_data)
+        self.signal_line.setData(times, data)
         self.plot_widget.setXRange(-WINDOW_SEC, 0)
         
-        # Автомасштабирование
-        if len(plot_data) > 0:
-            y_min, y_max = np.nanmin(plot_data), np.nanmax(plot_data)
-            if y_max != y_min:
-                margin = (y_max - y_min) * 0.15
-                if margin == 0:
-                    margin = 1.0
-                self.plot_widget.setYRange(y_min - margin, y_max + margin)
-            else:
-                self.plot_widget.setYRange(y_min - 10, y_max + 10)
+        # Автомасштабирование по Y
+        y_min, y_max = np.nanmin(data), np.nanmax(data)
+        if y_max != y_min:
+            margin = (y_max - y_min) * 0.15
+            if margin == 0:
+                margin = 1.0
+            self.plot_widget.setYRange(y_min - margin, y_max + margin)
+        else:
+            self.plot_widget.setYRange(y_min - 10, y_max + 10)
         
         # Обновляем статистику
         if len(data) > 0:
