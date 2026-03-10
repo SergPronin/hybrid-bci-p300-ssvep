@@ -143,26 +143,9 @@ hybrid-bci-p300-ssvep/
 
 ---
 
-## Устранение проблем
-
-**PermissionError при импорте psychopy:**
-```bash
-rm -rf ~/.psychopy3
-```
-
-**LSL-стрим не найден:** убедитесь, что стимуляция запущена и нажат START; для дашборда — что ЭЭГ транслируется в LSL. Проверка: `python scripts/lsl_listen.py`.
-
-**Python 3.11+:** используйте Python 3.10 (ограничение PsychoPy).
-
----
 
 ## Лицензия
 
 Проект распространяется под **MIT License**. См. [LICENSE](LICENSE).
 
 ---
-
-## Контакты
-
-- **GitHub:** [@your-username](https://github.com/your-username)
-- **Telegram:** @your_telegram
