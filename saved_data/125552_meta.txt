@@ -1,0 +1,30 @@
+=== МЕТАДАННЫЕ ===
+stream_name: NeuronSpectrum 11.03.2026 12:52:34
+sampling_rate: 500.0
+n_channels: 20
+active_channels: 20
+total_samples: 12840
+timestamp: 2026-03-11_12-53-09
+window_seconds: 0.2
+
+=== Имена каналов ===
+FP1
+FP2
+F3
+F4
+C3
+C4
+P3
+P4
+O1
+O2
+F7
+F8
+T3
+T4
+T5
+T6
+FZ
+CZ
+PZ
+Ch 20
