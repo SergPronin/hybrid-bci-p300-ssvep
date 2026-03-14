@@ -114,11 +114,11 @@ def find_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
 
 
 # ==============================================================================
-# ПОИСК ПОТОКА В ФОНЕ (нативный C++ блокирующий resolve)
+# ПОИСК ПОТОКА В ФОНЕ (захват inlet в фоне, без задержки Qt Event Loop)
 # ==============================================================================
 class StreamSearchThread(QThread):
-    """Нативный C++ блокирующий поиск LSL: реакция на UDP без time.sleep и GIL."""
-    streams_found = pyqtSignal(list)
+    """Экстремальный захват потока: создает inlet прямо в фоне за микросекунды."""
+    stream_hooked = pyqtSignal(object, object)  # StreamInfo, StreamInlet
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,21 +128,31 @@ class StreamSearchThread(QThread):
         self._stop_requested = True
 
     def run(self):
+        self.setPriority(QThread.TimeCriticalPriority)
         while not self._stop_requested:
             try:
-                streams = resolve_byprop("type", "EEG", minimum=1, timeout=0.2)
-            except TypeError:
-                streams = resolve_byprop("type", "EEG", timeout=0.2)
-            if not streams:
                 try:
-                    streams = resolve_byprop("type", "Signal", minimum=1, timeout=0.2)
+                    streams = resolve_byprop("type", "EEG", minimum=1, timeout=0.1)
                 except TypeError:
-                    streams = resolve_byprop("type", "Signal", timeout=0.2)
-            if streams:
-                allowed = [s for s in streams if _is_allowed_stream(s)]
-                if allowed:
-                    self.streams_found.emit(allowed)
-                    break
+                    streams = resolve_byprop("type", "EEG", timeout=0.1)
+                if not streams:
+                    try:
+                        streams = resolve_byprop("type", "Signal", minimum=1, timeout=0.1)
+                    except TypeError:
+                        streams = resolve_byprop("type", "Signal", timeout=0.1)
+
+                if streams:
+                    valid_stream = next((s for s in streams if _is_allowed_stream(s)), None)
+                    if valid_stream:
+                        try:
+                            inlet = StreamInlet(valid_stream, max_buffered=LSL_MAX_BUFFERED_SEC)
+                            inlet.open_stream(timeout=1.0)
+                            self.stream_hooked.emit(valid_stream, inlet)
+                            break
+                        except Exception as e:
+                            log.error(f"Ошибка мгновенного захвата: {e}")
+            except Exception:
+                pass
 
 
 class LSLPullThread(QThread):
@@ -158,7 +168,7 @@ class LSLPullThread(QThread):
         self.main_window = main_window
 
     def run(self):
-        self.setPriority(QThread.HighestPriority)
+        self.setPriority(QThread.TimeCriticalPriority)
         while not self._stop_flag[0]:
             try:
                 try:
@@ -886,7 +896,7 @@ class HardwareValidationWindow(QMainWindow):
         self.btn_search_stream.setText("⏹ Остановить поиск")
         self.btn_search_stream.setStyleSheet("QPushButton { background-color: #dc3545; font-weight: bold; }")
         self._search_thread = StreamSearchThread(self)
-        self._search_thread.streams_found.connect(self._on_streams_found)
+        self._search_thread.stream_hooked.connect(self._on_stream_hooked)
         self._search_thread.finished.connect(self._on_search_thread_finished)
         self._search_thread.start()
         log.info("Поиск потока запущен (остановить — кнопкой «Остановить поиск»).")
@@ -911,27 +921,12 @@ class HardwareValidationWindow(QMainWindow):
         self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
         self._search_thread = None
 
-    def _on_streams_found(self, streams: list):
-        """Подключиться к найденному потоку и остановить поиск."""
+    def _on_stream_hooked(self, eeg_info: StreamInfo, pre_opened_inlet: StreamInlet):
+        """Интерфейс получает уже подключенный поток без потери времени на TCP handshake."""
         self._search_thread.request_stop()
         self._on_search_thread_finished()
-        if not streams:
-            return
-        eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, self)
-        if not eeg_info:
-            return
 
-        try:
-            inlet = StreamInlet(eeg_info, max_buffered=LSL_MAX_BUFFERED_SEC)
-            inlet.open_stream(timeout=1.0)
-        except TypeError:
-            inlet = StreamInlet(eeg_info)
-            try:
-                inlet.open_stream(timeout=1.0)
-            except Exception:
-                pass
-
-        self.inlet = inlet
+        self.inlet = pre_opened_inlet
         self.n_channels = eeg_info.channel_count()
         self.sampling_rate = eeg_info.nominal_srate()
         self.stream_name = eeg_info.name() or "EEG"
@@ -941,18 +936,18 @@ class HardwareValidationWindow(QMainWindow):
         self._pull_queue = queue.Queue()
         self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
         self._pull_thread.start()
+        log.info("Экстремальный старт: фоновое чтение подключено к пре-открытому сокету.")
 
-        # Имена каналов из константы — без вызова inlet.info() (блокирует мьютекс liblsl)
         self.channel_names = [
             DEFAULT_CHANNEL_NAMES_21[i] if i < len(DEFAULT_CHANNEL_NAMES_21) else f"Ch {i+1}"
             for i in range(self.n_channels)
         ]
 
         self.setWindowTitle(f"LSL Validation — {self.stream_name}")
-        QTimer.singleShot(100, self._delayed_ui_build)
+        QTimer.singleShot(50, self._delayed_ui_build)
 
     def _delayed_ui_build(self):
-        """Вызывается через 100 мс после старта записи, чтобы не мешать захвату начала потока."""
+        """Вызывается через 50 мс после старта записи, чтобы не мешать захвату начала потока."""
         while self.cb_layout.count():
             item = self.cb_layout.takeAt(0)
             if item.widget():
