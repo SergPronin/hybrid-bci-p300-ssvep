@@ -145,8 +145,14 @@ class StreamSearchThread(QThread):
                     valid_stream = next((s for s in streams if _is_allowed_stream(s)), None)
                     if valid_stream:
                         try:
-                            inlet = StreamInlet(valid_stream, max_buffered=LSL_MAX_BUFFERED_SEC)
-                            inlet.open_stream(timeout=1.0)
+                            try:
+                                inlet = StreamInlet(valid_stream, max_buffered=LSL_MAX_BUFFERED_SEC)
+                            except TypeError:
+                                inlet = StreamInlet(valid_stream)
+                            try:
+                                inlet.open_stream(timeout=1.0)
+                            except Exception:
+                                pass
                             self.stream_hooked.emit(valid_stream, inlet)
                             break
                         except Exception as e:
