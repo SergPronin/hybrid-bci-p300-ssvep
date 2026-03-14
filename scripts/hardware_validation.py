@@ -950,10 +950,39 @@ class HardwareValidationWindow(QMainWindow):
         ]
 
         self.setWindowTitle(f"LSL Validation — {self.stream_name}")
-        QTimer.singleShot(50, self._delayed_ui_build)
+        # Не строим тяжёлый UI сразу — только запись без потерь; графики по кнопке
+        self._show_recording_placeholder()
+
+    def _show_recording_placeholder(self):
+        """Заглушка «запись идёт»: графики не строятся, сэмплы не теряются. Показать по кнопке."""
+        if getattr(self, "placeholder_widget", None):
+            self.right_layout.removeWidget(self.placeholder_widget)
+            self.placeholder_widget.setParent(None)
+            self.placeholder_widget = None
+        self.placeholder_widget = QWidget()
+        pl_layout = QVBoxLayout(self.placeholder_widget)
+        pl_layout.setAlignment(Qt.AlignCenter)
+        pl_layout.setSpacing(24)
+        lbl = QLabel(
+            "Поток подключён. Запись идёт без потерь.\n"
+            "Нажмите «Показать графики» для отображения каналов."
+        )
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet("color: #5bc0be; font-size: 14px;")
+        lbl.setWordWrap(True)
+        pl_layout.addWidget(lbl)
+        btn_show = QPushButton("📈 Показать графики")
+        btn_show.setStyleSheet(
+            "QPushButton { background-color: #28a745; color: white; font-weight: bold; "
+            "padding: 12px 24px; border-radius: 6px; font-size: 14px; } "
+            "QPushButton:hover { background-color: #218838; }"
+        )
+        btn_show.clicked.connect(self._delayed_ui_build)
+        pl_layout.addWidget(btn_show, alignment=Qt.AlignCenter)
+        self.right_layout.addWidget(self.placeholder_widget, stretch=1)
 
     def _delayed_ui_build(self):
-        """Вызывается через 50 мс после старта записи, чтобы не мешать захвату начала потока."""
+        """Строим тяжёлый UI по запросу пользователя (после нажатия «Показать графики»)."""
         while self.cb_layout.count():
             item = self.cb_layout.takeAt(0)
             if item.widget():
