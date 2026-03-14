@@ -19,7 +19,7 @@ from typing import Optional, List
 from datetime import datetime
 import os
 
-from pylsl import StreamInlet, StreamInfo, resolve_byprop
+from pylsl import StreamInlet, StreamInfo, resolve_byprop, ContinuousResolver
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -117,7 +117,7 @@ def find_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
 # ПОИСК ПОТОКА В ФОНЕ (пока не нажата "Остановить поиск")
 # ==============================================================================
 class StreamSearchThread(QThread):
-    """Поток поиска LSL: ищет поток раз в несколько секунд, пока не найден или не остановлен."""
+    """Поиск LSL через ContinuousResolver: реакция на появление потока за миллисекунды, без блокирующего resolve."""
     streams_found = pyqtSignal(list)  # list of StreamInfo
 
     def __init__(self, parent=None):
@@ -128,13 +128,31 @@ class StreamSearchThread(QThread):
         self._stop_requested = True
 
     def run(self):
+        resolvers = []
+        try:
+            resolvers.append(ContinuousResolver())
+        except TypeError:
+            for stream_type in EEG_STREAM_TYPES:
+                try:
+                    resolvers.append(ContinuousResolver("type", stream_type))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if not resolvers:
+            return
         while not self._stop_requested:
-            streams = find_eeg_streams(timeout=2.0)
-            if self._stop_requested:
+            streams = []
+            for resolver in resolvers:
+                try:
+                    streams.extend(resolver.results())
+                except Exception:
+                    pass
+            allowed = [s for s in streams if _is_allowed_stream(s)]
+            if allowed:
+                self.streams_found.emit(allowed)
                 break
-            if streams:
-                self.streams_found.emit(streams)
-                break
+            time.sleep(0.05)
 
 
 class LSLPullThread(QThread):
@@ -171,14 +189,13 @@ class LSLPullThread(QThread):
 
 
 def _create_inlet(info: StreamInfo) -> StreamInlet:
-    """Создать inlet с большим буфером для записи (без потери начальных сэмплов)."""
+    """Создать inlet и сразу открыть поток — без блокирующего time_correction, чтобы не терять первые сэмплы."""
     try:
         inlet = StreamInlet(info, max_buffered=LSL_MAX_BUFFERED_SEC)
     except TypeError:
         inlet = StreamInlet(info)
-    # Прогрев соединения LSL — снижает потерю первых сэмплов при старте потока в NeuroSpectrum
     try:
-        inlet.time_correction(timeout=2.0)
+        inlet.open_stream(timeout=1.0)
     except Exception:
         pass
     return inlet
