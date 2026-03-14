@@ -931,7 +931,6 @@ class HardwareValidationWindow(QMainWindow):
         if not eeg_info:
             return
 
-        # 1. МГНОВЕННАЯ ПОДПИСКА (занимает < 10 мс)
         try:
             inlet = StreamInlet(eeg_info, max_buffered=LSL_MAX_BUFFERED_SEC)
             inlet.open_stream(timeout=1.0)
@@ -942,31 +941,24 @@ class HardwareValidationWindow(QMainWindow):
             except Exception:
                 pass
 
-        # 2. МГНОВЕННАЯ НАСТРОЙКА ПАРАМЕТРОВ ИЗ БАЗОВОГО ИНФО (без скачивания XML)
         self.inlet = inlet
         self.n_channels = eeg_info.channel_count()
         self.sampling_rate = eeg_info.nominal_srate()
         self.stream_name = eeg_info.name() or "EEG"
         self._has_stream = True
 
-        # 3. КРИТИЧЕСКИ ВАЖНО: ЗАПУСК ЧТЕНИЯ ДО СКАЧИВАНИЯ МЕТАДАННЫХ
         self._pull_stop[0] = False
         self._pull_queue = queue.Queue()
         self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
         self._pull_thread.start()
-        log.info("Фоновое чтение запущено мгновенно, ДО парсинга тяжелых метаданных.")
 
-        # 4. ТЕПЕРЬ СКАЧИВАЕМ ИМЕНА КАНАЛОВ (Тормозит на ~700мс, но данные уже в безопасности)
-        try:
-            full_info = inlet.info()
-            self.channel_names = get_channel_names(full_info, self.n_channels)
-        except Exception as e:
-            log.warning(f"Не удалось получить имена каналов: {e}")
-            self.channel_names = [f"Ch {i+1}" for i in range(self.n_channels)]
+        # Имена каналов из константы — без вызова inlet.info() (блокирует мьютекс liblsl)
+        self.channel_names = [
+            DEFAULT_CHANNEL_NAMES_21[i] if i < len(DEFAULT_CHANNEL_NAMES_21) else f"Ch {i+1}"
+            for i in range(self.n_channels)
+        ]
 
         self.setWindowTitle(f"LSL Validation — {self.stream_name}")
-
-        # 5. ОТКЛАДЫВАЕМ РЕНДЕР ИНТЕРФЕЙСА
         QTimer.singleShot(100, self._delayed_ui_build)
 
     def _delayed_ui_build(self):
@@ -1098,7 +1090,7 @@ def main():
     app.setStyle('Fusion')
 
     inlet = None
-    full_info = None
+    stream_info_light = None
     channel_names = None
     try:
         streams = find_eeg_streams()
@@ -1106,12 +1098,16 @@ def main():
             eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, None)
             if eeg_info:
                 inlet = _create_inlet(eeg_info)
-                full_info = inlet.info()
-                channel_names = get_channel_names(full_info, full_info.channel_count())
+                stream_info_light = eeg_info
+                n_ch = eeg_info.channel_count()
+                channel_names = [
+                    DEFAULT_CHANNEL_NAMES_21[i] if i < len(DEFAULT_CHANNEL_NAMES_21) else f"Ch {i+1}"
+                    for i in range(n_ch)
+                ]
     except Exception as e:
         log.warning("Поток при старте не найден или ошибка: %s. Окно откроется без потока.", e)
 
-    window = HardwareValidationWindow(inlet=inlet, full_info=full_info, channel_names=channel_names)
+    window = HardwareValidationWindow(inlet=inlet, full_info=stream_info_light, channel_names=channel_names)
     window.show()
     sys.exit(app.exec_())
 
