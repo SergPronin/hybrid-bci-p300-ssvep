@@ -246,6 +246,23 @@ class ChannelWidget(QFrame):
         self.current_y_max = float(y_max)
         self.plot_widget.setYRange(self.current_y_min, self.current_y_max, padding=0, update=False)
 
+    def set_time_window(self, sec: float):
+        """Изменить длительность окна по оси X (секунды)."""
+        if sec <= 0:
+            return
+        new_size = max(1, int(sec * self.sampling_rate))
+        old_size = len(self.y_data)
+        new_y = np.zeros(new_size, dtype=np.float32)
+        if new_size <= old_size:
+            new_y[:] = self.y_data[-new_size:]
+        else:
+            new_y[-old_size:] = self.y_data[:]
+        self.y_data = new_y
+        self.x_data = np.linspace(-sec, 0, new_size, dtype=np.float32)
+        self.buffer_size = new_size
+        self.filled = min(self.filled, new_size)
+        self.plot_widget.setXRange(-sec, 0, padding=0)
+
     def update_stats(self):
         if not self.is_active or self.filled < 10 or not self.isVisible():
             return
@@ -374,6 +391,30 @@ class HardwareValidationWindow(QMainWindow):
         scale_layout.addLayout(scale_row2)
         scale_group.setLayout(scale_layout)
         sidebar_layout.addWidget(scale_group)
+
+        # Масштаб по X (время, секунды)
+        scale_x_group = QGroupBox("Масштаб X (с)")
+        scale_x_group.setStyleSheet(
+            "QGroupBox { color: white; margin-top: 6px; } "
+            "QDoubleSpinBox { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #555; "
+            "border-radius: 3px; padding: 4px; min-width: 72px; selection-background-color: #007bff; } "
+            "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { background-color: #3d3d3d; border: none; } "
+            "QLabel { color: #ccc; }"
+        )
+        scale_x_layout = QVBoxLayout()
+        scale_x_row = QHBoxLayout()
+        scale_x_row.addWidget(QLabel("Окно:"))
+        self.spin_x_window = QDoubleSpinBox()
+        self.spin_x_window.setRange(0.05, 60.0)
+        self.spin_x_window.setValue(WINDOW_SEC)
+        self.spin_x_window.setDecimals(2)
+        self.spin_x_window.setSingleStep(0.1)
+        self.spin_x_window.setSuffix(" с")
+        self.spin_x_window.valueChanged.connect(self._apply_x_window)
+        scale_x_row.addWidget(self.spin_x_window)
+        scale_x_layout.addLayout(scale_x_row)
+        scale_x_group.setLayout(scale_x_layout)
+        sidebar_layout.addWidget(scale_x_group)
 
         # СЕКЦИЯ СОХРАНЕНИЯ ДАННЫХ
         save_group = QGroupBox("Сохранение данных")
@@ -606,6 +647,16 @@ class HardwareValidationWindow(QMainWindow):
         for cw in self.channel_widgets:
             cw.set_y_range(y_min, y_max)
 
+    def _apply_x_window(self):
+        """Применить длительность окна по X ко всем каналам."""
+        if not self._has_stream or not self.channel_widgets:
+            return
+        sec = self.spin_x_window.value()
+        if sec <= 0:
+            return
+        for cw in self.channel_widgets:
+            cw.set_time_window(sec)
+
     def _set_all_channels(self, state: bool):
         for cb in self.checkboxes:
             cb.blockSignals(True)
@@ -728,6 +779,7 @@ class HardwareValidationWindow(QMainWindow):
         self.cb_layout.addStretch()
 
         self._build_stream_content()
+        self._apply_x_window()
         self._setup_timers()
         log.info("Поток подключён. Режим DYNAMIC GRID активирован.")
 
