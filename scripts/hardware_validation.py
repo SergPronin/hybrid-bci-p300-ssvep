@@ -37,12 +37,13 @@ import pyqtgraph as pg
 EEG_STREAM_TYPES = ("EEG", "Signal")
 WINDOW_SEC = 0.2
 COV_UPDATE_INTERVAL = 10.0
-UPDATE_INTERVAL_MS = 100  # ~125 FPS
+UPDATE_INTERVAL_MS = 50   # чаще обрабатываем очередь — меньше задержка и потерь в начале
 STATS_INTERVAL_MS = 500
 SAVE_INTERVAL_MS = 5000  # Автосохранение каждые 5 секунд (можно отключить)
 # Поток чтения LSL: быстрый drain буфера, чтобы не терять начальные сэмплы при старте потока в NeuroSpectrum
-LSL_PULL_TIMEOUT_S = 0.05  # короткий timeout — ждём данные, не блокируем надолго
-LSL_MAX_SAMPLES_PER_CHUNK = 4096  # за один pull забираем больше сэмплов
+LSL_PULL_TIMEOUT_S = 0.01  # 10 ms — быстрая реакция на появление данных
+LSL_PULL_POLL_S = 0.002   # при отсутствии данных опрашивать каждые 2 ms
+LSL_MAX_SAMPLES_PER_CHUNK = 8192  # за один pull забираем больше сэмплов
 LSL_MAX_BUFFERED_SEC = 600  # буфер inlet в секундах (для записи — с запасом)
 
 SIMULATOR_NAME = "EEG_Simulator"
@@ -139,8 +140,7 @@ class StreamSearchThread(QThread):
 class LSLPullThread(QThread):
     """
     Фоновый поток, непрерывно читающий из LSL и складывающий чанки в очередь.
-    Так мы не теряем начальные сэмплы: как только поток в NeuroSpectrum стартует,
-    данные сразу забираются в очередь, а не ждут следующего тика GUI-таймера (100 ms).
+    При появлении данных тянем сразу (timeout=0), иначе короткий sleep — минимизируем потерю начала.
     """
     def __init__(self, inlet: StreamInlet, chunk_queue: queue.Queue, stop_flag: List[bool], parent=None):
         super().__init__(parent)
@@ -151,12 +151,20 @@ class LSLPullThread(QThread):
     def run(self):
         while not self._stop_flag[0]:
             try:
+                # Если данные уже есть — забираем без ожидания; иначе коротко ждём
+                try:
+                    n = self.inlet.samples_available()
+                except Exception:
+                    n = 0
+                timeout = 0.0 if n > 0 else LSL_PULL_TIMEOUT_S
                 chunk, timestamps = self.inlet.pull_chunk(
-                    timeout=LSL_PULL_TIMEOUT_S,
+                    timeout=timeout,
                     max_samples=LSL_MAX_SAMPLES_PER_CHUNK,
                 )
                 if chunk:
                     self.chunk_queue.put((chunk, timestamps))
+                elif n == 0:
+                    time.sleep(LSL_PULL_POLL_S)
             except Exception as e:
                 log.debug("LSL pull thread: %s", e)
                 break
@@ -165,9 +173,15 @@ class LSLPullThread(QThread):
 def _create_inlet(info: StreamInfo) -> StreamInlet:
     """Создать inlet с большим буфером для записи (без потери начальных сэмплов)."""
     try:
-        return StreamInlet(info, max_buffered=LSL_MAX_BUFFERED_SEC)
+        inlet = StreamInlet(info, max_buffered=LSL_MAX_BUFFERED_SEC)
     except TypeError:
-        return StreamInlet(info)
+        inlet = StreamInlet(info)
+    # Прогрев соединения LSL — снижает потерю первых сэмплов при старте потока в NeuroSpectrum
+    try:
+        inlet.time_correction(timeout=2.0)
+    except Exception:
+        pass
+    return inlet
 
 
 def get_channel_names(info: StreamInfo, n_channels: int) -> List[str]:
@@ -835,7 +849,7 @@ class HardwareValidationWindow(QMainWindow):
                     for ch in channels_to_save:
                         buf = self.recording_buffer[ch]
                         val = buf[row_idx] if row_idx < len(buf) else 0.0
-                        row_vals.append(f"{val:.3f}")
+                        row_vals.append(f"{val:.3f}".replace(".", ","))
                     f.write(",".join(row_vals) + "\n")
         except Exception as e:
             log.error(f"Ошибка записи в файл: {e}")
