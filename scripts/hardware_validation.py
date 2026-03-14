@@ -157,19 +157,20 @@ class StreamSearchThread(QThread):
 
 class LSLPullThread(QThread):
     """
-    Фоновый поток, непрерывно читающий из LSL и складывающий чанки в очередь.
-    При появлении данных тянем сразу (timeout=0), иначе короткий sleep — минимизируем потерю начала.
+    Фоновый поток чтения LSL. Кладёт чанки в очередь для GUI и сразу пишет в буфер записи,
+    минуя главный поток — гарантия нулевой потери сэмплов при тяжёлом рендере.
     """
-    def __init__(self, inlet: StreamInlet, chunk_queue: queue.Queue, stop_flag: List[bool], parent=None):
+    def __init__(self, inlet: StreamInlet, chunk_queue: queue.Queue, stop_flag: List[bool], main_window, parent=None):
         super().__init__(parent)
         self.inlet = inlet
         self.chunk_queue = chunk_queue
-        self._stop_flag = stop_flag  # [False] -> ставим [0]=True для остановки
+        self._stop_flag = stop_flag
+        self.main_window = main_window
 
     def run(self):
+        self.setPriority(QThread.HighestPriority)
         while not self._stop_flag[0]:
             try:
-                # Если данные уже есть — забираем без ожидания; иначе коротко ждём
                 try:
                     n = self.inlet.samples_available()
                 except Exception:
@@ -181,10 +182,19 @@ class LSLPullThread(QThread):
                 )
                 if chunk:
                     self.chunk_queue.put((chunk, timestamps))
+                    if self.main_window.recording:
+                        arr = np.array(chunk)
+                        if arr.shape[1] != self.main_window.n_channels and arr.shape[0] == self.main_window.n_channels:
+                            arr = arr.T
+                        n_record = min(FIXED_RECORDING_CHANNELS, arr.shape[1])
+                        for ch in range(n_record):
+                            if self.main_window.record_channel_checked[ch]:
+                                col = arr[:, ch].astype(np.float64)
+                                col = np.nan_to_num(col, nan=0.0, posinf=0.0, neginf=0.0)
+                                self.main_window.recording_buffer[ch].extend(col.tolist())
                 elif n == 0:
                     time.sleep(LSL_PULL_POLL_S)
-            except Exception as e:
-                log.debug("LSL pull thread: %s", e)
+            except Exception:
                 break
 
 
@@ -436,7 +446,7 @@ class HardwareValidationWindow(QMainWindow):
         if self._has_stream:
             self._setup_timers()
             self._pull_stop[0] = False
-            self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self)
+            self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
             self._pull_thread.start()
             log.info("GUI готово. Режим DYNAMIC GRID активирован. Фоновое чтение LSL запущено.")
         else:
@@ -936,15 +946,17 @@ class HardwareValidationWindow(QMainWindow):
         self._has_stream = True
         self.setWindowTitle(f"LSL Validation — {self.stream_name}")
 
-        # 1. КРИТИЧЕСКИЙ ФИКС: ЗАПУСКАЕМ ЧТЕНИЕ ДО ОТРИСОВКИ ТЯЖЕЛОГО ИНТЕРФЕЙСА
+        # ЗАПУСК ЧТЕНИЯ МГНОВЕННО ДО ЛЮБОГО РЕНДЕРА
         self._pull_stop[0] = False
         self._pull_queue = queue.Queue()
-        self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self)
+        self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
         self._pull_thread.start()
-        log.info("Поток подключен. Фоновое чтение LSL запущено ДО отрисовки графиков.")
 
-        # 2. ПОТОМ СТРОИМ UI
-        # Очистить старые чекбоксы в сайдбаре и добавить новые
+        # ОТКЛАДЫВАЕМ ТЯЖЕЛЫЙ РЕНДЕР GUI НА 300 МС — LSLPullThread успевает захватить первые сэмплы
+        QTimer.singleShot(300, self._delayed_ui_build)
+
+    def _delayed_ui_build(self):
+        """Вызывается через 300 мс после старта записи, чтобы не мешать захвату начала потока."""
         while self.cb_layout.count():
             item = self.cb_layout.takeAt(0)
             if item.widget():
@@ -984,15 +996,6 @@ class HardwareValidationWindow(QMainWindow):
 
                 for ch in range(self.n_channels):
                     self.channel_widgets[ch].push_chunk(arr[:, ch])
-
-                # Буфер записи: только выбранные каналы, в порядке 0..20 (можно запись до подключения потока)
-                if self.recording:
-                    n_record = min(FIXED_RECORDING_CHANNELS, arr.shape[1])
-                    for ch in range(n_record):
-                        if self.record_channel_checked[ch]:
-                            col = arr[:, ch].astype(np.float64)
-                            col = np.nan_to_num(col, nan=0.0, posinf=0.0, neginf=0.0)
-                            self.recording_buffer[ch].extend(col.tolist())
 
             auto_scale_enabled = self.cb_autoscale.isChecked()
             for cw in self.channel_widgets:
