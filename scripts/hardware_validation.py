@@ -930,33 +930,47 @@ class HardwareValidationWindow(QMainWindow):
         eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, self)
         if not eeg_info:
             return
-        inlet = _create_inlet(eeg_info)
-        full_info = inlet.info()
-        channel_names = get_channel_names(full_info, full_info.channel_count())
-        self._connect_stream(inlet, full_info, channel_names)
-        QMessageBox.information(self, "Поток найден", f"Подключено к потоку: {full_info.name() or 'EEG'}.")
 
-    def _connect_stream(self, inlet: StreamInlet, full_info: StreamInfo, channel_names: List[str]):
-        """Подключить найденный поток и переключить UI на отображение каналов."""
+        # 1. МГНОВЕННАЯ ПОДПИСКА (занимает < 10 мс)
+        try:
+            inlet = StreamInlet(eeg_info, max_buffered=LSL_MAX_BUFFERED_SEC)
+            inlet.open_stream(timeout=1.0)
+        except TypeError:
+            inlet = StreamInlet(eeg_info)
+            try:
+                inlet.open_stream(timeout=1.0)
+            except Exception:
+                pass
+
+        # 2. МГНОВЕННАЯ НАСТРОЙКА ПАРАМЕТРОВ ИЗ БАЗОВОГО ИНФО (без скачивания XML)
         self.inlet = inlet
-        self.stream_name = full_info.name() or "EEG"
-        self.channel_names = channel_names
-        self.n_channels = full_info.channel_count()
-        self.sampling_rate = full_info.nominal_srate()
+        self.n_channels = eeg_info.channel_count()
+        self.sampling_rate = eeg_info.nominal_srate()
+        self.stream_name = eeg_info.name() or "EEG"
         self._has_stream = True
-        self.setWindowTitle(f"LSL Validation — {self.stream_name}")
 
-        # ЗАПУСК ЧТЕНИЯ МГНОВЕННО ДО ЛЮБОГО РЕНДЕРА
+        # 3. КРИТИЧЕСКИ ВАЖНО: ЗАПУСК ЧТЕНИЯ ДО СКАЧИВАНИЯ МЕТАДАННЫХ
         self._pull_stop[0] = False
         self._pull_queue = queue.Queue()
         self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
         self._pull_thread.start()
+        log.info("Фоновое чтение запущено мгновенно, ДО парсинга тяжелых метаданных.")
 
-        # ОТКЛАДЫВАЕМ ТЯЖЕЛЫЙ РЕНДЕР GUI НА 300 МС — LSLPullThread успевает захватить первые сэмплы
-        QTimer.singleShot(300, self._delayed_ui_build)
+        # 4. ТЕПЕРЬ СКАЧИВАЕМ ИМЕНА КАНАЛОВ (Тормозит на ~700мс, но данные уже в безопасности)
+        try:
+            full_info = inlet.info()
+            self.channel_names = get_channel_names(full_info, self.n_channels)
+        except Exception as e:
+            log.warning(f"Не удалось получить имена каналов: {e}")
+            self.channel_names = [f"Ch {i+1}" for i in range(self.n_channels)]
+
+        self.setWindowTitle(f"LSL Validation — {self.stream_name}")
+
+        # 5. ОТКЛАДЫВАЕМ РЕНДЕР ИНТЕРФЕЙСА
+        QTimer.singleShot(100, self._delayed_ui_build)
 
     def _delayed_ui_build(self):
-        """Вызывается через 300 мс после старта записи, чтобы не мешать захвату начала потока."""
+        """Вызывается через 100 мс после старта записи, чтобы не мешать захвату начала потока."""
         while self.cb_layout.count():
             item = self.cb_layout.takeAt(0)
             if item.widget():
