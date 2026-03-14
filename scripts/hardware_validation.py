@@ -928,29 +928,27 @@ class HardwareValidationWindow(QMainWindow):
         self._search_thread = None
 
     def _on_stream_hooked(self, eeg_info: StreamInfo, pre_opened_inlet: StreamInlet):
-        """Интерфейс получает уже подключенный поток без потери времени на TCP handshake."""
-        self._search_thread.request_stop()
-        self._on_search_thread_finished()
-
+        """Интерфейс получает уже подключенный поток. Первым делом запускаем чтение — потом всё остальное."""
         self.inlet = pre_opened_inlet
         self.n_channels = eeg_info.channel_count()
-        self.sampling_rate = eeg_info.nominal_srate()
-        self.stream_name = eeg_info.name() or "EEG"
-        self._has_stream = True
-
+        # Сразу запускаем чтение, чтобы не терять сэмплы пока обновляем UI
         self._pull_stop[0] = False
         self._pull_queue = queue.Queue()
         self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
         self._pull_thread.start()
-        log.info("Экстремальный старт: фоновое чтение подключено к пре-открытому сокету.")
+        log.info("Фоновое чтение запущено (до обновления UI).")
 
+        self._search_thread.request_stop()
+        self._on_search_thread_finished()
+
+        self.sampling_rate = eeg_info.nominal_srate()
+        self.stream_name = eeg_info.name() or "EEG"
+        self._has_stream = True
         self.channel_names = [
             DEFAULT_CHANNEL_NAMES_21[i] if i < len(DEFAULT_CHANNEL_NAMES_21) else f"Ch {i+1}"
             for i in range(self.n_channels)
         ]
-
         self.setWindowTitle(f"LSL Validation — {self.stream_name}")
-        # Не строим тяжёлый UI сразу — только запись без потерь; графики по кнопке
         self._show_recording_placeholder()
 
     def _show_recording_placeholder(self):
