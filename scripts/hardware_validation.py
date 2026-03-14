@@ -19,7 +19,7 @@ from typing import Optional, List
 from datetime import datetime
 import os
 
-from pylsl import StreamInlet, StreamInfo, resolve_byprop, ContinuousResolver
+from pylsl import StreamInlet, StreamInfo, resolve_byprop
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -114,11 +114,11 @@ def find_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
 
 
 # ==============================================================================
-# ПОИСК ПОТОКА В ФОНЕ (пока не нажата "Остановить поиск")
+# ПОИСК ПОТОКА В ФОНЕ (нативный C++ блокирующий resolve)
 # ==============================================================================
 class StreamSearchThread(QThread):
-    """Поиск LSL через ContinuousResolver: реакция на появление потока за миллисекунды, без блокирующего resolve."""
-    streams_found = pyqtSignal(list)  # list of StreamInfo
+    """Нативный C++ блокирующий поиск LSL: реакция на UDP без time.sleep и GIL."""
+    streams_found = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,31 +128,21 @@ class StreamSearchThread(QThread):
         self._stop_requested = True
 
     def run(self):
-        resolvers = []
-        try:
-            resolvers.append(ContinuousResolver())
-        except TypeError:
-            for stream_type in EEG_STREAM_TYPES:
-                try:
-                    resolvers.append(ContinuousResolver("type", stream_type))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        if not resolvers:
-            return
         while not self._stop_requested:
-            streams = []
-            for resolver in resolvers:
+            try:
+                streams = resolve_byprop("type", "EEG", minimum=1, timeout=0.2)
+            except TypeError:
+                streams = resolve_byprop("type", "EEG", timeout=0.2)
+            if not streams:
                 try:
-                    streams.extend(resolver.results())
-                except Exception:
-                    pass
-            allowed = [s for s in streams if _is_allowed_stream(s)]
-            if allowed:
-                self.streams_found.emit(allowed)
-                break
-            time.sleep(0.05)
+                    streams = resolve_byprop("type", "Signal", minimum=1, timeout=0.2)
+                except TypeError:
+                    streams = resolve_byprop("type", "Signal", timeout=0.2)
+            if streams:
+                allowed = [s for s in streams if _is_allowed_stream(s)]
+                if allowed:
+                    self.streams_found.emit(allowed)
+                    break
 
 
 class LSLPullThread(QThread):
