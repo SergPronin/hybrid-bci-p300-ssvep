@@ -50,15 +50,6 @@ SIMULATOR_NAME = "EEG_Simulator"
 SIMULATOR_SOURCE_ID = "eeg-simulator-neurospectr"
 NEUROSPECTR_MARKER = "neuro"
 
-# Стандартные полные названия 21 канала (10-20 система), порядок фиксирован
-DEFAULT_CHANNEL_NAMES_21 = [
-    "Fp1", "Fpz", "Fp2", "F7", "F3", "Fz", "F4", "F8",
-    "T7", "C3", "Cz", "C4", "T8", "P7", "P3", "Pz", "P4", "P8",
-    "O1", "Oz", "O2",
-]
-
-FIXED_RECORDING_CHANNELS = 21
-
 pg.setConfigOptions(useOpenGL=False, antialias=False, useCupy=False)
 
 
@@ -204,13 +195,16 @@ class LSLPullThread(QThread):
                 )
                 if chunk:
                     self.chunk_queue.put((chunk, timestamps))
-                    if self.main_window.recording:
+                    if self.main_window.recording and self.main_window.n_channels > 0:
+                        n_ch = len(self.main_window.recording_buffer)
+                        if n_ch == 0:
+                            continue
                         arr = np.array(chunk)
                         if arr.shape[1] != self.main_window.n_channels and arr.shape[0] == self.main_window.n_channels:
                             arr = arr.T
-                        n_record = min(FIXED_RECORDING_CHANNELS, arr.shape[1])
+                        n_record = min(n_ch, arr.shape[1])
                         for ch in range(n_record):
-                            if self.main_window.record_channel_checked[ch]:
+                            if ch < len(self.main_window.record_channel_checked) and self.main_window.record_channel_checked[ch]:
                                 col = arr[:, ch].astype(np.float64)
                                 col = np.nan_to_num(col, nan=0.0, posinf=0.0, neginf=0.0)
                                 self.main_window.recording_buffer[ch].extend(col.tolist())
@@ -449,11 +443,11 @@ class HardwareValidationWindow(QMainWindow):
 
         self.recording = False
         self.save_folder = "saved_data"
-        # Каналы для записи: 21 чекбокс, можно выбрать до подключения потока
-        self.record_channel_checked = [True] * FIXED_RECORDING_CHANNELS  # какие из 21 записывать
-        self.record_checkboxes: List[QCheckBox] = []  # чекбоксы "каналы для записи"
-        # Буфер записи: один список на канал (по порядку 0..20), заполняется при recording и при подключённом потоке
-        self.recording_buffer: List[List[float]] = [[] for _ in range(FIXED_RECORDING_CHANNELS)]
+        # Каналы для записи: количество и имена из потока (обновляются при подключении)
+        n_ch = self.n_channels
+        self.record_channel_checked = [True] * n_ch if n_ch else []
+        self.record_checkboxes = []
+        self.recording_buffer = [[] for _ in range(n_ch)] if n_ch else []
         if not os.path.exists(self.save_folder):
             os.makedirs(self.save_folder)
 
@@ -565,7 +559,7 @@ class HardwareValidationWindow(QMainWindow):
         scale_x_group.setLayout(scale_x_layout)
         sidebar_layout.addWidget(scale_x_group)
 
-        # СЕКЦИЯ КАНАЛЫ ДЛЯ ЗАПИСИ (доступна до подключения потока, 21 канал по порядку)
+        # СЕКЦИЯ КАНАЛЫ ДЛЯ ЗАПИСИ (заполняется при подключении потока — имена из LSL)
         record_channels_group = QGroupBox("Каналы для записи")
         record_channels_group.setStyleSheet("QGroupBox { color: #5bc0be; margin-top: 10px; font-weight: bold; }")
         record_channels_layout = QVBoxLayout()
@@ -585,15 +579,7 @@ class HardwareValidationWindow(QMainWindow):
         record_cb_container.setStyleSheet("background-color: transparent;")
         self.record_cb_layout = QVBoxLayout(record_cb_container)
         self.record_cb_layout.setSpacing(2)
-        for i in range(FIXED_RECORDING_CHANNELS):
-            name = DEFAULT_CHANNEL_NAMES_21[i] if i < len(DEFAULT_CHANNEL_NAMES_21) else f"Ch{i+1}"
-            cb = QCheckBox(f"[{i+1}] {name}")
-            cb.setChecked(True)
-            cb.setProperty("channel_index", i)
-            cb.stateChanged.connect(self._on_record_channel_toggled)
-            self.record_checkboxes.append(cb)
-            self.record_cb_layout.addWidget(cb)
-        self.record_cb_layout.addStretch()
+        self._rebuild_record_checkboxes()
         scroll_record.setWidget(record_cb_container)
         record_channels_layout.addWidget(scroll_record)
         record_channels_group.setLayout(record_channels_layout)
@@ -729,8 +715,7 @@ class HardwareValidationWindow(QMainWindow):
     def save_data_to_file(self):
         """Сохранить буфер записи в файл: один столбец — один канал (по порядку), 3 знака после запятой, в имени — дата/время, в файле — частота дискретизации."""
         try:
-            # Используем буфер записи (выбранные каналы в порядке 0..20)
-            channels_to_save = [i for i in range(FIXED_RECORDING_CHANNELS) if self.record_channel_checked[i]]
+            channels_to_save = [i for i in range(len(self.record_channel_checked)) if self.record_channel_checked[i]]
             if not channels_to_save:
                 QMessageBox.warning(self, "Нет каналов", "Выберите хотя бы один канал для записи в блоке «Каналы для записи».")
                 return
@@ -782,7 +767,7 @@ class HardwareValidationWindow(QMainWindow):
         )
 
         if reply == QMessageBox.Yes:
-            for i in range(FIXED_RECORDING_CHANNELS):
+            for i in range(len(self.recording_buffer)):
                 self.recording_buffer[i] = []
             for cw in self.channel_widgets:
                 cw.clear_saved_data()
@@ -819,10 +804,31 @@ class HardwareValidationWindow(QMainWindow):
             cb.blockSignals(False)
             self.record_channel_checked[i] = checked
 
+    def _rebuild_record_checkboxes(self):
+        """Построить чекбоксы «каналы для записи» по текущим channel_names (из потока или пусто)."""
+        while self.record_cb_layout.count():
+            item = self.record_cb_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.record_checkboxes.clear()
+        for i in range(len(self.channel_names)):
+            name = self.channel_names[i]
+            cb = QCheckBox(f"[{i+1}] {name}")
+            cb.setChecked(i < len(self.record_channel_checked) and self.record_channel_checked[i])
+            cb.setProperty("channel_index", i)
+            cb.stateChanged.connect(self._on_record_channel_toggled)
+            self.record_checkboxes.append(cb)
+            self.record_cb_layout.addWidget(cb)
+        if not self.channel_names:
+            lbl = QLabel("Подключите поток для выбора каналов")
+            lbl.setStyleSheet("color: #888; font-size: 11px;")
+            self.record_cb_layout.addWidget(lbl)
+        self.record_cb_layout.addStretch()
+
     def _on_record_channel_toggled(self):
         """Синхронизировать состояние чекбоксов записи с record_channel_checked."""
         for i, cb in enumerate(self.record_checkboxes):
-            if i < FIXED_RECORDING_CHANNELS:
+            if i < len(self.record_channel_checked):
                 self.record_channel_checked[i] = cb.isChecked()
 
     def _set_all_channels(self, state: bool):
@@ -874,7 +880,7 @@ class HardwareValidationWindow(QMainWindow):
         """Автоматическое сохранение буфера записи при включенной записи (тот же формат: столбцы по порядку, 3 знака)."""
         if not self.recording:
             return
-        channels_to_save = [i for i in range(FIXED_RECORDING_CHANNELS) if self.record_channel_checked[i]]
+        channels_to_save = [i for i in range(len(self.record_channel_checked)) if self.record_channel_checked[i]]
         if not channels_to_save:
             return
         max_len = max(len(self.recording_buffer[i]) for i in channels_to_save)
@@ -891,7 +897,10 @@ class HardwareValidationWindow(QMainWindow):
             srate = self.sampling_rate if self._has_stream else 0
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(f"# sampling_rate={srate}\n")
-                header_names = [DEFAULT_CHANNEL_NAMES_21[i] if i < len(DEFAULT_CHANNEL_NAMES_21) else f"Ch{i+1}" for i in channels_to_save]
+                header_names = [
+                    self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}"
+                    for i in channels_to_save
+                ]
                 f.write(",".join(header_names) + "\n")
                 for row_idx in range(max_len):
                     row_vals = []
@@ -961,10 +970,10 @@ class HardwareValidationWindow(QMainWindow):
         self.sampling_rate = eeg_info.nominal_srate()
         self.stream_name = eeg_info.name() or "EEG"
         self._has_stream = True
-        self.channel_names = [
-            DEFAULT_CHANNEL_NAMES_21[i] if i < len(DEFAULT_CHANNEL_NAMES_21) else f"Ch {i+1}"
-            for i in range(self.n_channels)
-        ]
+        # Имена каналов из метаданных потока LSL (desc/channels/channel)
+        self.channel_names = get_channel_names(eeg_info, self.n_channels)
+        self.record_channel_checked = [True] * self.n_channels
+        self.recording_buffer = [[] for _ in range(self.n_channels)]
         self.setWindowTitle(f"LSL Validation — {self.stream_name}")
         self._show_recording_placeholder()
 
@@ -997,7 +1006,7 @@ class HardwareValidationWindow(QMainWindow):
         self.right_layout.addWidget(self.placeholder_widget, stretch=1)
 
     def _delayed_ui_build(self):
-        """Строим тяжёлый UI по запросу пользователя (после нажатия «Показать графики»)."""
+        """Строим тяжёлый UI по запросу пользователя (после нажатия «Показать графики»). Каналы и имена из LSL."""
         while self.cb_layout.count():
             item = self.cb_layout.takeAt(0)
             if item.widget():
@@ -1011,6 +1020,7 @@ class HardwareValidationWindow(QMainWindow):
             self.cb_layout.addWidget(cb)
         self.cb_layout.addStretch()
 
+        self._rebuild_record_checkboxes()
         self._build_stream_content()
         self._apply_x_window()
         self._setup_timers()
@@ -1135,10 +1145,7 @@ def main():
                 inlet = _create_inlet(eeg_info)
                 stream_info_light = eeg_info
                 n_ch = eeg_info.channel_count()
-                channel_names = [
-                    DEFAULT_CHANNEL_NAMES_21[i] if i < len(DEFAULT_CHANNEL_NAMES_21) else f"Ch {i+1}"
-                    for i in range(n_ch)
-                ]
+                channel_names = get_channel_names(eeg_info, n_ch)
     except Exception as e:
         log.warning("Поток при старте не найден или ошибка: %s. Окно откроется без потока.", e)
 
