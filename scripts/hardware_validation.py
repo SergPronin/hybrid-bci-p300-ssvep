@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QScrollArea, QFrame, QFileDialog, QMessageBox,
     QDoubleSpinBox,
 )
-from PyQt5.QtCore import QTimer, Qt, QDateTime
+from PyQt5.QtCore import QTimer, Qt, QDateTime, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
 import pyqtgraph as pg
 
@@ -105,6 +105,30 @@ def find_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
     allowed = [s for s in all_streams if _is_allowed_stream(s)]
     log.info(f"Найдено подходящих потоков: {len(allowed)}")
     return allowed
+
+
+# ==============================================================================
+# ПОИСК ПОТОКА В ФОНЕ (пока не нажата "Остановить поиск")
+# ==============================================================================
+class StreamSearchThread(QThread):
+    """Поток поиска LSL: ищет поток раз в несколько секунд, пока не найден или не остановлен."""
+    streams_found = pyqtSignal(list)  # list of StreamInfo
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop_requested = False
+
+    def request_stop(self):
+        self._stop_requested = True
+
+    def run(self):
+        while not self._stop_requested:
+            streams = find_eeg_streams(timeout=2.0)
+            if self._stop_requested:
+                break
+            if streams:
+                self.streams_found.emit(streams)
+                break
 
 
 def get_channel_names(info: StreamInfo, n_channels: int) -> List[str]:
@@ -331,6 +355,9 @@ class HardwareValidationWindow(QMainWindow):
         if not os.path.exists(self.save_folder):
             os.makedirs(self.save_folder)
 
+        self._search_thread: Optional[StreamSearchThread] = None
+        self._searching = False
+
         self._setup_ui()
         if self._has_stream:
             self._setup_timers()
@@ -360,10 +387,10 @@ class HardwareValidationWindow(QMainWindow):
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Кнопка поиска потока (видна всегда; при подключённом потоке — для переподключения)
+        # Кнопка поиска / остановки поиска потока (поиск идёт, пока не нажата "Остановить поиск")
         self.btn_search_stream = QPushButton("🔍 Поиск потока")
         self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
-        self.btn_search_stream.clicked.connect(self._on_search_stream)
+        self.btn_search_stream.clicked.connect(self._on_search_or_stop_stream)
         sidebar_layout.addWidget(self.btn_search_stream)
 
         # Кнопка автомасштаба (актуальна только при подключённом потоке)
@@ -767,20 +794,51 @@ class HardwareValidationWindow(QMainWindow):
         except Exception as e:
             log.error(f"Ошибка записи в файл: {e}")
 
-    def _on_search_stream(self):
-        """Поиск LSL-потока и подключение к нему."""
-        self.btn_search_stream.setEnabled(False)
-        self.btn_search_stream.setText("Поиск...")
-        QApplication.processEvents()
-        streams = find_eeg_streams()
-        self.btn_search_stream.setEnabled(True)
+    def _on_search_or_stop_stream(self):
+        """Запуск поиска потока (идет до нажатия «Остановить поиск») или остановка поиска."""
+        if self._searching:
+            self._stop_stream_search()
+            return
+        self._start_stream_search()
+
+    def _start_stream_search(self):
+        """Запустить фоновый поиск LSL-потока (пока не нажата «Остановить поиск»)."""
+        if self._search_thread is not None and self._search_thread.isRunning():
+            return
+        self._searching = True
+        self.btn_search_stream.setText("⏹ Остановить поиск")
+        self.btn_search_stream.setStyleSheet("QPushButton { background-color: #dc3545; font-weight: bold; }")
+        self._search_thread = StreamSearchThread(self)
+        self._search_thread.streams_found.connect(self._on_streams_found)
+        self._search_thread.finished.connect(self._on_search_thread_finished)
+        self._search_thread.start()
+        log.info("Поиск потока запущен (остановить — кнопкой «Остановить поиск»).")
+
+    def _stop_stream_search(self):
+        """Остановить поиск потока."""
+        self._searching = False
+        if self._search_thread is not None and self._search_thread.isRunning():
+            self._search_thread.request_stop()
+            self._search_thread.wait(5000)
+        self._search_thread = None
         self.btn_search_stream.setText("🔍 Поиск потока")
+        self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
+        log.info("Поиск потока остановлен.")
+
+    def _on_search_thread_finished(self):
+        """Поиск завершён (найден поток или остановлен)."""
+        if not self._searching:
+            return
+        self._searching = False
+        self.btn_search_stream.setText("🔍 Поиск потока")
+        self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
+        self._search_thread = None
+
+    def _on_streams_found(self, streams: list):
+        """Подключиться к найденному потоку и остановить поиск."""
+        self._search_thread.request_stop()
+        self._on_search_thread_finished()
         if not streams:
-            QMessageBox.information(
-                self,
-                "Потоки не найдены",
-                "LSL потоки ЭЭГ не обнаружены.\nЗапустите нейроспектр или симулятор и повторите поиск.",
-            )
             return
         eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, self)
         if not eeg_info:
@@ -789,6 +847,7 @@ class HardwareValidationWindow(QMainWindow):
         full_info = inlet.info()
         channel_names = get_channel_names(full_info, full_info.channel_count())
         self._connect_stream(inlet, full_info, channel_names)
+        QMessageBox.information(self, "Поток найден", f"Подключено к потоку: {full_info.name() or 'EEG'}.")
 
     def _connect_stream(self, inlet: StreamInlet, full_info: StreamInfo, channel_names: List[str]):
         """Подключить найденный поток и переключить UI на отображение каналов."""
