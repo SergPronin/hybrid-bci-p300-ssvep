@@ -153,6 +153,22 @@ class StreamSearchThread(QThread):
                                 inlet.open_stream(timeout=1.0)
                             except Exception:
                                 pass
+                            # Запускаем чтение сразу в этом потоке, до сигнала в GUI — нулевая задержка
+                            main_window = self.parent()
+                            if main_window is not None:
+                                main_window.inlet = inlet
+                                main_window.n_channels = valid_stream.channel_count()
+                                main_window._pull_stop[0] = False
+                                main_window._pull_queue = queue.Queue()
+                                main_window._pull_thread = LSLPullThread(
+                                    main_window.inlet,
+                                    main_window._pull_queue,
+                                    main_window._pull_stop,
+                                    main_window,
+                                    main_window,
+                                )
+                                main_window._pull_thread.start()
+                                log.info("Чтение LSL запущено в потоке поиска (до сигнала в GUI).")
                             self.stream_hooked.emit(valid_stream, inlet)
                             break
                         except Exception as e:
@@ -928,15 +944,16 @@ class HardwareValidationWindow(QMainWindow):
         self._search_thread = None
 
     def _on_stream_hooked(self, eeg_info: StreamInfo, pre_opened_inlet: StreamInlet):
-        """Интерфейс получает уже подключенный поток. Первым делом запускаем чтение — потом всё остальное."""
+        """Обновление UI после подключения. Чтение уже запущено в StreamSearchThread до этого сигнала."""
         self.inlet = pre_opened_inlet
         self.n_channels = eeg_info.channel_count()
-        # Сразу запускаем чтение, чтобы не терять сэмплы пока обновляем UI
-        self._pull_stop[0] = False
-        self._pull_queue = queue.Queue()
-        self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
-        self._pull_thread.start()
-        log.info("Фоновое чтение запущено (до обновления UI).")
+        # LSLPullThread уже запущен в StreamSearchThread — не трогаем, только UI
+        if not (getattr(self, "_pull_thread", None) and self._pull_thread.isRunning()):
+            self._pull_stop[0] = False
+            self._pull_queue = queue.Queue()
+            self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
+            self._pull_thread.start()
+            log.info("Фоновое чтение запущено из GUI (fallback).")
 
         self._search_thread.request_stop()
         self._on_search_thread_finished()
