@@ -24,7 +24,8 @@ from pylsl import StreamInlet, StreamInfo, resolve_byprop
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QGroupBox, QInputDialog, QCheckBox,
-    QPushButton, QScrollArea, QFrame, QFileDialog, QMessageBox
+    QPushButton, QScrollArea, QFrame, QFileDialog, QMessageBox,
+    QDoubleSpinBox,
 )
 from PyQt5.QtCore import QTimer, Qt, QDateTime
 from PyQt5.QtGui import QFont
@@ -237,6 +238,14 @@ class ChannelWidget(QFrame):
         except Exception:
             pass
 
+    def set_y_range(self, y_min: float, y_max: float):
+        """Задать масштаб оси Y по значениям (мкВ)."""
+        if y_min >= y_max:
+            return
+        self.current_y_min = float(y_min)
+        self.current_y_max = float(y_max)
+        self.plot_widget.setYRange(self.current_y_min, self.current_y_max, padding=0, update=False)
+
     def update_stats(self):
         if not self.is_active or self.filled < 10 or not self.isVisible():
             return
@@ -332,6 +341,35 @@ class HardwareValidationWindow(QMainWindow):
         self.cb_autoscale.setChecked(True)
         self.cb_autoscale.setStyleSheet("QCheckBox { color: #5bc0be; font-weight: bold; margin-bottom: 10px; }")
         sidebar_layout.addWidget(self.cb_autoscale)
+
+        # Ручной масштаб Y (мкВ) — ввод по цифрам
+        scale_group = QGroupBox("Масштаб Y (мкВ)")
+        scale_group.setStyleSheet("QGroupBox { color: white; margin-top: 6px; }")
+        scale_layout = QVBoxLayout()
+        scale_row = QHBoxLayout()
+        scale_row.addWidget(QLabel("Мин:"))
+        self.spin_y_min = QDoubleSpinBox()
+        self.spin_y_min.setRange(-500000, 500000)
+        self.spin_y_min.setValue(-100)
+        self.spin_y_min.setDecimals(1)
+        self.spin_y_min.setSingleStep(10)
+        self.spin_y_min.setStyleSheet("QDoubleSpinBox { color: white; min-width: 70px; }")
+        self.spin_y_min.valueChanged.connect(self._apply_manual_scale)
+        scale_row.addWidget(self.spin_y_min)
+        scale_layout.addLayout(scale_row)
+        scale_row2 = QHBoxLayout()
+        scale_row2.addWidget(QLabel("Макс:"))
+        self.spin_y_max = QDoubleSpinBox()
+        self.spin_y_max.setRange(-500000, 500000)
+        self.spin_y_max.setValue(100)
+        self.spin_y_max.setDecimals(1)
+        self.spin_y_max.setSingleStep(10)
+        self.spin_y_max.setStyleSheet("QDoubleSpinBox { color: white; min-width: 70px; }")
+        self.spin_y_max.valueChanged.connect(self._apply_manual_scale)
+        scale_row2.addWidget(self.spin_y_max)
+        scale_layout.addLayout(scale_row2)
+        scale_group.setLayout(scale_layout)
+        sidebar_layout.addWidget(scale_group)
 
         # СЕКЦИЯ СОХРАНЕНИЯ ДАННЫХ
         save_group = QGroupBox("Сохранение данных")
@@ -552,6 +590,18 @@ class HardwareValidationWindow(QMainWindow):
             log.info("Все сохраненные данные очищены")
             QMessageBox.information(self, "Готово", "Данные очищены")
 
+    def _apply_manual_scale(self):
+        """Применить масштаб Y из полей ввода ко всем каналам."""
+        if not self._has_stream or not self.channel_widgets:
+            return
+        y_min = self.spin_y_min.value()
+        y_max = self.spin_y_max.value()
+        if y_min >= y_max:
+            return
+        self.cb_autoscale.setChecked(False)
+        for cw in self.channel_widgets:
+            cw.set_y_range(y_min, y_max)
+
     def _set_all_channels(self, state: bool):
         for cb in self.checkboxes:
             cb.blockSignals(True)
@@ -697,6 +747,16 @@ class HardwareValidationWindow(QMainWindow):
             auto_scale_enabled = self.cb_autoscale.isChecked()
             for cw in self.channel_widgets:
                 cw.update_plot(auto_scale_enabled)
+            # Показывать текущий масштаб в полях (при автомасштабе)
+            if auto_scale_enabled and self.channel_widgets:
+                cw = next((c for c in self.channel_widgets if c.is_active), self.channel_widgets[0])
+                if hasattr(self, "spin_y_min") and hasattr(self, "spin_y_max"):
+                    self.spin_y_min.blockSignals(True)
+                    self.spin_y_max.blockSignals(True)
+                    self.spin_y_min.setValue(cw.current_y_min)
+                    self.spin_y_max.setValue(cw.current_y_max)
+                    self.spin_y_min.blockSignals(False)
+                    self.spin_y_max.blockSignals(False)
 
             now = time.time()
             if now - self.last_cov_time >= COV_UPDATE_INTERVAL:
@@ -766,13 +826,16 @@ def main():
     inlet = None
     full_info = None
     channel_names = None
-    streams = find_eeg_streams()
-    if streams:
-        eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, None)
-        if eeg_info:
-            inlet = StreamInlet(eeg_info)
-            full_info = inlet.info()
-            channel_names = get_channel_names(full_info, full_info.channel_count())
+    try:
+        streams = find_eeg_streams()
+        if streams:
+            eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, None)
+            if eeg_info:
+                inlet = StreamInlet(eeg_info)
+                full_info = inlet.info()
+                channel_names = get_channel_names(full_info, full_info.channel_count())
+    except Exception as e:
+        log.warning("Поток при старте не найден или ошибка: %s. Окно откроется без потока.", e)
 
     window = HardwareValidationWindow(inlet=inlet, full_info=full_info, channel_names=channel_names)
     window.show()
