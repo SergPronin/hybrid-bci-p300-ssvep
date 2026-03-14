@@ -263,31 +263,41 @@ class ChannelWidget(QFrame):
 # ==============================================================================
 class HardwareValidationWindow(QMainWindow):
 
-    def __init__(self, inlet: StreamInlet, full_info: StreamInfo, channel_names: List[str]):
+    def __init__(
+        self,
+        inlet: Optional[StreamInlet] = None,
+        full_info: Optional[StreamInfo] = None,
+        channel_names: Optional[List[str]] = None,
+    ):
         super().__init__()
         self.inlet = inlet
-        self.stream_name = full_info.name() or "EEG"
-        self.channel_names = channel_names
-        self.n_channels = full_info.channel_count()
-        self.sampling_rate = full_info.nominal_srate()
+        self.stream_name = (full_info.name() or "EEG") if full_info else "—"
+        self.channel_names = channel_names or []
+        self.n_channels = full_info.channel_count() if full_info else 0
+        self.sampling_rate = full_info.nominal_srate() if full_info else 0
+        self._has_stream = inlet is not None and full_info is not None
 
         self.channel_widgets: List[ChannelWidget] = []
         self.checkboxes: List[QCheckBox] = []
+        self.info_panel: Optional[QWidget] = None
+        self.grid_widget: Optional[QWidget] = None
+        self.placeholder_widget: Optional[QWidget] = None
 
         self.start_time = time.time()
         self.last_cov_time = self.start_time
         self.sample_count = 0
 
-        self.recording = False  # Флаг записи данных
-        self.save_folder = "saved_data"  # Папка для сохранения
-
-        # Создаем папку для сохранения, если её нет
+        self.recording = False
+        self.save_folder = "saved_data"
         if not os.path.exists(self.save_folder):
             os.makedirs(self.save_folder)
 
         self._setup_ui()
-        self._setup_timers()
-        log.info("GUI готово. Режим DYNAMIC GRID активирован.")
+        if self._has_stream:
+            self._setup_timers()
+            log.info("GUI готово. Режим DYNAMIC GRID активирован.")
+        else:
+            log.info("GUI готово. Поток не подключён — нажмите «Поиск потока».")
 
     def _setup_ui(self):
         self.setWindowTitle(f"LSL Validation — {self.stream_name}")
@@ -311,7 +321,13 @@ class HardwareValidationWindow(QMainWindow):
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Кнопка автомасштаба
+        # Кнопка поиска потока (видна всегда; при подключённом потоке — для переподключения)
+        self.btn_search_stream = QPushButton("🔍 Поиск потока")
+        self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
+        self.btn_search_stream.clicked.connect(self._on_search_stream)
+        sidebar_layout.addWidget(self.btn_search_stream)
+
+        # Кнопка автомасштаба (актуальна только при подключённом потоке)
         self.cb_autoscale = QCheckBox("Автомасштаб Y")
         self.cb_autoscale.setChecked(True)
         self.cb_autoscale.setStyleSheet("QCheckBox { color: #5bc0be; font-weight: bold; margin-bottom: 10px; }")
@@ -364,51 +380,69 @@ class HardwareValidationWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
-
         cb_container = QWidget()
         cb_container.setStyleSheet("background-color: transparent;")
         self.cb_layout = QVBoxLayout(cb_container)
         self.cb_layout.setSpacing(6)
-
         for i, name in enumerate(self.channel_names):
             cb = QCheckBox(f"[{i + 1}] {name}")
             cb.setChecked(True)
             cb.stateChanged.connect(self._rebuild_grid)
             self.checkboxes.append(cb)
             self.cb_layout.addWidget(cb)
-
         self.cb_layout.addStretch()
         scroll.setWidget(cb_container)
         sidebar_layout.addWidget(scroll)
 
-        # 2. ПРАВАЯ ПАНЕЛЬ (ГРАФИКИ)
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        # 2. ПРАВАЯ ПАНЕЛЬ (графики или заглушка)
+        self.right_panel = QWidget()
+        self.right_layout = QVBoxLayout(self.right_panel)
+        self.right_layout.setContentsMargins(0, 0, 0, 0)
 
-        info_panel = QHBoxLayout()
-        info_panel.addWidget(QLabel(f"<b>Поток:</b> {self.stream_name}"))
-        info_panel.addWidget(QLabel(f"<b>Частота:</b> {self.sampling_rate} Гц"))
-        info_panel.addWidget(QLabel(f"<b>Сэмплов:</b> {self.sample_count}"))
-        info_panel.addStretch()
-        right_layout.addLayout(info_panel)
+        if self._has_stream:
+            self._build_stream_content()
+        else:
+            self._build_placeholder()
 
+        main_layout.addWidget(sidebar)
+        main_layout.addWidget(self.right_panel, stretch=1)
+        self.resize(1600, 1000)
+
+    def _build_placeholder(self):
+        """Правая панель при отсутствии потока."""
+        self.placeholder_widget = QWidget()
+        pl_layout = QVBoxLayout(self.placeholder_widget)
+        pl_layout.setAlignment(Qt.AlignCenter)
+        pl_layout.setSpacing(20)
+        lbl = QLabel("Поток ЭЭГ не подключён.\nЗапустите нейроспектр или симулятор и нажмите «Поиск потока» в боковой панели.")
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet("color: #888; font-size: 14px;")
+        lbl.setWordWrap(True)
+        pl_layout.addWidget(lbl)
+        self.right_layout.addWidget(self.placeholder_widget, stretch=1)
+
+    def _build_stream_content(self):
+        """Правая панель с информацией и графиками каналов."""
+        if self.placeholder_widget:
+            self.right_layout.removeWidget(self.placeholder_widget)
+            self.placeholder_widget.setParent(None)
+            self.placeholder_widget = None
+        self.info_panel = QHBoxLayout()
+        self.info_panel.addWidget(QLabel(f"<b>Поток:</b> {self.stream_name}"))
+        self.info_panel.addWidget(QLabel(f"<b>Частота:</b> {self.sampling_rate} Гц"))
+        self.samples_label = QLabel(f"<b>Сэмплов:</b> {self.sample_count}")
+        self.info_panel.addWidget(self.samples_label)
+        self.info_panel.addStretch()
+        self.right_layout.addLayout(self.info_panel)
         self.grid_widget = QWidget()
         self.grid_layout = QGridLayout(self.grid_widget)
         self.grid_layout.setSpacing(4)
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
-
         for ch in range(self.n_channels):
             cw = ChannelWidget(ch, self.channel_names[ch], self.sampling_rate)
             self.channel_widgets.append(cw)
-
-        right_layout.addWidget(self.grid_widget, stretch=1)
-
-        main_layout.addWidget(sidebar)
-        main_layout.addWidget(right_panel, stretch=1)
-
+        self.right_layout.addWidget(self.grid_widget, stretch=1)
         self._rebuild_grid()
-        self.resize(1600, 1000)
 
     def toggle_recording(self):
         """Включить/выключить непрерывную запись данных"""
@@ -526,6 +560,8 @@ class HardwareValidationWindow(QMainWindow):
         self._rebuild_grid()
 
     def _rebuild_grid(self):
+        if not self._has_stream or not self.channel_widgets:
+            return
         for cw in self.channel_widgets:
             self.grid_layout.removeWidget(cw)
             cw.setVisible(False)
@@ -590,7 +626,60 @@ class HardwareValidationWindow(QMainWindow):
         except Exception as e:
             log.error(f"Ошибка автосохранения: {e}")
 
+    def _on_search_stream(self):
+        """Поиск LSL-потока и подключение к нему."""
+        self.btn_search_stream.setEnabled(False)
+        self.btn_search_stream.setText("Поиск...")
+        QApplication.processEvents()
+        streams = find_eeg_streams()
+        self.btn_search_stream.setEnabled(True)
+        self.btn_search_stream.setText("🔍 Поиск потока")
+        if not streams:
+            QMessageBox.information(
+                self,
+                "Потоки не найдены",
+                "LSL потоки ЭЭГ не обнаружены.\nЗапустите нейроспектр или симулятор и повторите поиск.",
+            )
+            return
+        eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, self)
+        if not eeg_info:
+            return
+        inlet = StreamInlet(eeg_info)
+        full_info = inlet.info()
+        channel_names = get_channel_names(full_info, full_info.channel_count())
+        self._connect_stream(inlet, full_info, channel_names)
+
+    def _connect_stream(self, inlet: StreamInlet, full_info: StreamInfo, channel_names: List[str]):
+        """Подключить найденный поток и переключить UI на отображение каналов."""
+        self.inlet = inlet
+        self.stream_name = full_info.name() or "EEG"
+        self.channel_names = channel_names
+        self.n_channels = full_info.channel_count()
+        self.sampling_rate = full_info.nominal_srate()
+        self._has_stream = True
+        self.setWindowTitle(f"LSL Validation — {self.stream_name}")
+
+        # Очистить старые чекбоксы в сайдбаре и добавить новые
+        while self.cb_layout.count():
+            item = self.cb_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.checkboxes.clear()
+        for i, name in enumerate(self.channel_names):
+            cb = QCheckBox(f"[{i + 1}] {name}")
+            cb.setChecked(True)
+            cb.stateChanged.connect(self._rebuild_grid)
+            self.checkboxes.append(cb)
+            self.cb_layout.addWidget(cb)
+        self.cb_layout.addStretch()
+
+        self._build_stream_content()
+        self._setup_timers()
+        log.info("Поток подключён. Режим DYNAMIC GRID активирован.")
+
     def _pull_and_plot(self):
+        if not self.inlet:
+            return
         try:
             chunk, timestamps = self.inlet.pull_chunk(timeout=0.0, max_samples=1024)
             if chunk:
@@ -599,6 +688,8 @@ class HardwareValidationWindow(QMainWindow):
                     arr = arr.T
 
                 self.sample_count += len(arr)
+                if hasattr(self, "samples_label") and self.samples_label:
+                    self.samples_label.setText(f"<b>Сэмплов:</b> {self.sample_count}")
 
                 for ch in range(self.n_channels):
                     self.channel_widgets[ch].push_chunk(arr[:, ch])
@@ -656,14 +747,14 @@ class HardwareValidationWindow(QMainWindow):
             pass
 
 
-def select_stream_gui(streams: List[StreamInfo]):
+def select_stream_gui(streams: List[StreamInfo], parent=None):
     items = []
     for info in streams:
         name = info.name() or "Unknown"
         stype = info.type() or "EEG"
         items.append(f"{name} (type={stype}, ch={info.channel_count()})")
 
-    item, ok = QInputDialog.getItem(None, "Выбор LSL‑потока", "Выберите поток:", items, 0, False)
+    item, ok = QInputDialog.getItem(parent, "Выбор LSL‑потока", "Выберите поток:", items, 0, False)
     return streams[items.index(item)] if ok else None
 
 
@@ -672,21 +763,18 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
 
+    inlet = None
+    full_info = None
+    channel_names = None
     streams = find_eeg_streams()
-    if not streams:
-        log.error("Потоки LSL не найдены. Выход.")
-        return
+    if streams:
+        eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, None)
+        if eeg_info:
+            inlet = StreamInlet(eeg_info)
+            full_info = inlet.info()
+            channel_names = get_channel_names(full_info, full_info.channel_count())
 
-    eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams)
-    if not eeg_info:
-        return
-
-    inlet = StreamInlet(eeg_info)
-    full_info = inlet.info()
-    n_channels = full_info.channel_count()
-    channel_names = get_channel_names(full_info, n_channels)
-
-    window = HardwareValidationWindow(inlet, full_info, channel_names)
+    window = HardwareValidationWindow(inlet=inlet, full_info=full_info, channel_names=channel_names)
     window.show()
     sys.exit(app.exec_())
 
