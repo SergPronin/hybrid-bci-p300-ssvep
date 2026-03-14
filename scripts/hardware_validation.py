@@ -13,6 +13,7 @@
 import sys
 import time
 import logging
+import queue
 import numpy as np
 from typing import Optional, List
 from datetime import datetime
@@ -39,6 +40,10 @@ COV_UPDATE_INTERVAL = 10.0
 UPDATE_INTERVAL_MS = 100  # ~125 FPS
 STATS_INTERVAL_MS = 500
 SAVE_INTERVAL_MS = 5000  # Автосохранение каждые 5 секунд (можно отключить)
+# Поток чтения LSL: быстрый drain буфера, чтобы не терять начальные сэмплы при старте потока в NeuroSpectrum
+LSL_PULL_TIMEOUT_S = 0.05  # короткий timeout — ждём данные, не блокируем надолго
+LSL_MAX_SAMPLES_PER_CHUNK = 4096  # за один pull забираем больше сэмплов
+LSL_MAX_BUFFERED_SEC = 600  # буфер inlet в секундах (для записи — с запасом)
 
 SIMULATOR_NAME = "EEG_Simulator"
 SIMULATOR_SOURCE_ID = "eeg-simulator-neurospectr"
@@ -129,6 +134,40 @@ class StreamSearchThread(QThread):
             if streams:
                 self.streams_found.emit(streams)
                 break
+
+
+class LSLPullThread(QThread):
+    """
+    Фоновый поток, непрерывно читающий из LSL и складывающий чанки в очередь.
+    Так мы не теряем начальные сэмплы: как только поток в NeuroSpectrum стартует,
+    данные сразу забираются в очередь, а не ждут следующего тика GUI-таймера (100 ms).
+    """
+    def __init__(self, inlet: StreamInlet, chunk_queue: queue.Queue, stop_flag: List[bool], parent=None):
+        super().__init__(parent)
+        self.inlet = inlet
+        self.chunk_queue = chunk_queue
+        self._stop_flag = stop_flag  # [False] -> ставим [0]=True для остановки
+
+    def run(self):
+        while not self._stop_flag[0]:
+            try:
+                chunk, timestamps = self.inlet.pull_chunk(
+                    timeout=LSL_PULL_TIMEOUT_S,
+                    max_samples=LSL_MAX_SAMPLES_PER_CHUNK,
+                )
+                if chunk:
+                    self.chunk_queue.put((chunk, timestamps))
+            except Exception as e:
+                log.debug("LSL pull thread: %s", e)
+                break
+
+
+def _create_inlet(info: StreamInfo) -> StreamInlet:
+    """Создать inlet с большим буфером для записи (без потери начальных сэмплов)."""
+    try:
+        return StreamInlet(info, max_buffered=LSL_MAX_BUFFERED_SEC)
+    except TypeError:
+        return StreamInlet(info)
 
 
 def get_channel_names(info: StreamInfo, n_channels: int) -> List[str]:
@@ -357,11 +396,18 @@ class HardwareValidationWindow(QMainWindow):
 
         self._search_thread: Optional[StreamSearchThread] = None
         self._searching = False
+        # Очередь чанков от фонового потока LSL (чтобы не терять начальные сэмплы)
+        self._pull_queue: queue.Queue = queue.Queue()
+        self._pull_stop: List[bool] = [False]
+        self._pull_thread: Optional[LSLPullThread] = None
 
         self._setup_ui()
         if self._has_stream:
             self._setup_timers()
-            log.info("GUI готово. Режим DYNAMIC GRID активирован.")
+            self._pull_stop[0] = False
+            self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self)
+            self._pull_thread.start()
+            log.info("GUI готово. Режим DYNAMIC GRID активирован. Фоновое чтение LSL запущено.")
         else:
             log.info("GUI готово. Поток не подключён — нажмите «Поиск потока».")
 
@@ -843,7 +889,7 @@ class HardwareValidationWindow(QMainWindow):
         eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, self)
         if not eeg_info:
             return
-        inlet = StreamInlet(eeg_info)
+        inlet = _create_inlet(eeg_info)
         full_info = inlet.info()
         channel_names = get_channel_names(full_info, full_info.channel_count())
         self._connect_stream(inlet, full_info, channel_names)
@@ -876,14 +922,25 @@ class HardwareValidationWindow(QMainWindow):
         self._build_stream_content()
         self._apply_x_window()
         self._setup_timers()
-        log.info("Поток подключён. Режим DYNAMIC GRID активирован.")
+        # Фоновый поток читает LSL непрерывно — начальные сэмплы не теряются при старте потока в NeuroSpectrum
+        self._pull_stop[0] = False
+        self._pull_queue = queue.Queue()
+        self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self)
+        self._pull_thread.start()
+        log.info("Поток подключён. Режим DYNAMIC GRID активирован. Фоновое чтение LSL запущено.")
 
     def _pull_and_plot(self):
         if not self.inlet:
             return
         try:
-            chunk, timestamps = self.inlet.pull_chunk(timeout=0.0, max_samples=1024)
-            if chunk:
+            # Обрабатываем все чанки из очереди (накопленные фоновым потоком) — без потери начальных сэмплов
+            while True:
+                try:
+                    chunk, timestamps = self._pull_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if not chunk:
+                    continue
                 arr = np.array(chunk)
                 if arr.shape[1] != self.n_channels and arr.shape[0] == self.n_channels:
                     arr = arr.T
@@ -966,6 +1023,13 @@ class HardwareValidationWindow(QMainWindow):
         except Exception:
             pass
 
+    def closeEvent(self, event):
+        """Остановить фоновый поток чтения LSL при закрытии окна."""
+        self._pull_stop[0] = True
+        if self._pull_thread is not None and self._pull_thread.isRunning():
+            self._pull_thread.wait(2000)
+        super().closeEvent(event)
+
 
 def select_stream_gui(streams: List[StreamInfo], parent=None):
     items = []
@@ -991,7 +1055,7 @@ def main():
         if streams:
             eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, None)
             if eeg_info:
-                inlet = StreamInlet(eeg_info)
+                inlet = _create_inlet(eeg_info)
                 full_info = inlet.info()
                 channel_names = get_channel_names(full_info, full_info.channel_count())
     except Exception as e:
