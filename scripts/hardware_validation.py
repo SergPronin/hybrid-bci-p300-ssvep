@@ -936,6 +936,14 @@ class HardwareValidationWindow(QMainWindow):
         self._has_stream = True
         self.setWindowTitle(f"LSL Validation — {self.stream_name}")
 
+        # 1. КРИТИЧЕСКИЙ ФИКС: ЗАПУСКАЕМ ЧТЕНИЕ ДО ОТРИСОВКИ ТЯЖЕЛОГО ИНТЕРФЕЙСА
+        self._pull_stop[0] = False
+        self._pull_queue = queue.Queue()
+        self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self)
+        self._pull_thread.start()
+        log.info("Поток подключен. Фоновое чтение LSL запущено ДО отрисовки графиков.")
+
+        # 2. ПОТОМ СТРОИМ UI
         # Очистить старые чекбоксы в сайдбаре и добавить новые
         while self.cb_layout.count():
             item = self.cb_layout.takeAt(0)
@@ -953,12 +961,6 @@ class HardwareValidationWindow(QMainWindow):
         self._build_stream_content()
         self._apply_x_window()
         self._setup_timers()
-        # Фоновый поток читает LSL непрерывно — начальные сэмплы не теряются при старте потока в NeuroSpectrum
-        self._pull_stop[0] = False
-        self._pull_queue = queue.Queue()
-        self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self)
-        self._pull_thread.start()
-        log.info("Поток подключён. Режим DYNAMIC GRID активирован. Фоновое чтение LSL запущено.")
 
     def _pull_and_plot(self):
         if not self.inlet:
