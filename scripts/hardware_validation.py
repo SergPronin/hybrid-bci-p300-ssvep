@@ -344,7 +344,13 @@ class HardwareValidationWindow(QMainWindow):
 
         # Ручной масштаб Y (мкВ) — ввод по цифрам
         scale_group = QGroupBox("Масштаб Y (мкВ)")
-        scale_group.setStyleSheet("QGroupBox { color: white; margin-top: 6px; }")
+        scale_group.setStyleSheet(
+            "QGroupBox { color: white; margin-top: 6px; } "
+            "QDoubleSpinBox { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #555; "
+            "border-radius: 3px; padding: 4px; min-width: 72px; selection-background-color: #007bff; } "
+            "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { background-color: #3d3d3d; border: none; } "
+            "QLabel { color: #ccc; }"
+        )
         scale_layout = QVBoxLayout()
         scale_row = QHBoxLayout()
         scale_row.addWidget(QLabel("Мин:"))
@@ -353,7 +359,6 @@ class HardwareValidationWindow(QMainWindow):
         self.spin_y_min.setValue(-100)
         self.spin_y_min.setDecimals(1)
         self.spin_y_min.setSingleStep(10)
-        self.spin_y_min.setStyleSheet("QDoubleSpinBox { color: white; min-width: 70px; }")
         self.spin_y_min.valueChanged.connect(self._apply_manual_scale)
         scale_row.addWidget(self.spin_y_min)
         scale_layout.addLayout(scale_row)
@@ -364,7 +369,6 @@ class HardwareValidationWindow(QMainWindow):
         self.spin_y_max.setValue(100)
         self.spin_y_max.setDecimals(1)
         self.spin_y_max.setSingleStep(10)
-        self.spin_y_max.setStyleSheet("QDoubleSpinBox { color: white; min-width: 70px; }")
         self.spin_y_max.valueChanged.connect(self._apply_manual_scale)
         scale_row2.addWidget(self.spin_y_max)
         scale_layout.addLayout(scale_row2)
