@@ -959,7 +959,7 @@ class HardwareValidationWindow(QMainWindow):
                         buf = self.recording_buffer[ch]
                         val = buf[row_idx] if row_idx < len(buf) else 0.0
                         row_vals.append(f"{val:.3f}".replace(".", ","))
-                    f.write(",".join(row_vals) + "\n")
+                    f.write(" ".join(row_vals) + "\n")
         except Exception as e:
             log.error(f"Ошибка записи в файл: {e}")
 
