@@ -418,7 +418,7 @@ class ChannelWidget(QFrame):
 
             if p2p > 200000:
                 self.stats_label.setStyleSheet("color: #ff4d4d; font-weight: bold; border: none;")
-                self.stats_label.setText("⚠ ОШИБКА КОНТАКТА ⚠")
+                self.stats_label.setText("ОШИБКА КОНТАКТА")
             else:
                 self.stats_label.setStyleSheet("color: #a8ff9e; border: none;")
                 self.stats_label.setText(
@@ -517,7 +517,7 @@ class HardwareValidationWindow(QMainWindow):
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
 
         # Кнопка поиска / остановки поиска потока (поиск идёт, пока не нажата "Остановить поиск")
-        self.btn_search_stream = QPushButton("🔍 Поиск потока")
+        self.btn_search_stream = QPushButton("Поиск потока")
         self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
         self.btn_search_stream.clicked.connect(self._on_search_or_stop_stream)
         sidebar_layout.addWidget(self.btn_search_stream)
@@ -617,25 +617,25 @@ class HardwareValidationWindow(QMainWindow):
         save_layout = QVBoxLayout()
 
         # Кнопка начала/остановки записи (можно нажать до подключения потока)
-        self.btn_record = QPushButton("⏺ Начать запись")
+        self.btn_record = QPushButton("Начать запись")
         self.btn_record.setStyleSheet("QPushButton { background-color: #28a745; font-weight: bold; }")
         self.btn_record.clicked.connect(self.toggle_recording)
         save_layout.addWidget(self.btn_record)
 
         # Кнопка сохранения текущих данных
-        self.btn_save = QPushButton("💾 Сохранить в файл")
+        self.btn_save = QPushButton("Сохранить в файл")
         self.btn_save.setStyleSheet("QPushButton { background-color: #007bff; }")
         self.btn_save.clicked.connect(self.save_data_to_file)
         save_layout.addWidget(self.btn_save)
 
         # Кнопка очистки буфера записи
-        self.btn_clear = QPushButton("🗑 Очистить буфер записи")
+        self.btn_clear = QPushButton("Очистить буфер записи")
         self.btn_clear.setStyleSheet("QPushButton { background-color: #dc3545; }")
         self.btn_clear.clicked.connect(self.clear_saved_data)
         save_layout.addWidget(self.btn_clear)
 
         # Индикатор записи
-        self.recording_label = QLabel("⚫ Запись остановлена")
+        self.recording_label = QLabel("Запись остановлена")
         self.recording_label.setStyleSheet("color: #dc3545; font-weight: bold;")
         save_layout.addWidget(self.recording_label)
 
@@ -726,15 +726,15 @@ class HardwareValidationWindow(QMainWindow):
         """Включить/выключить непрерывную запись данных"""
         self.recording = not self.recording
         if self.recording:
-            self.btn_record.setText("⏹ Остановить запись")
+            self.btn_record.setText("Остановить запись")
             self.btn_record.setStyleSheet("QPushButton { background-color: #dc3545; font-weight: bold; }")
-            self.recording_label.setText("🔴 ИДЕТ ЗАПИСЬ...")
+            self.recording_label.setText("ИДЕТ ЗАПИСЬ")
             self.recording_label.setStyleSheet("color: #28a745; font-weight: bold;")
             log.info("Начало непрерывной записи данных")
         else:
-            self.btn_record.setText("⏺ Начать запись")
+            self.btn_record.setText("Начать запись")
             self.btn_record.setStyleSheet("QPushButton { background-color: #28a745; font-weight: bold; }")
-            self.recording_label.setText("⚫ Запись остановлена")
+            self.recording_label.setText("Запись остановлена")
             self.recording_label.setStyleSheet("color: #dc3545; font-weight: bold;")
             log.info("Остановка записи данных")
 
@@ -950,7 +950,7 @@ class HardwareValidationWindow(QMainWindow):
         if self._search_thread is not None and self._search_thread.isRunning():
             return
         self._searching = True
-        self.btn_search_stream.setText("⏹ Остановить поиск")
+        self.btn_search_stream.setText("Остановить поиск")
         self.btn_search_stream.setStyleSheet("QPushButton { background-color: #dc3545; font-weight: bold; }")
         self._search_thread = StreamSearchThread(self)
         self._search_thread.stream_hooked.connect(self._on_stream_hooked)
@@ -965,7 +965,7 @@ class HardwareValidationWindow(QMainWindow):
             self._search_thread.request_stop()
             self._search_thread.wait(5000)
         self._search_thread = None
-        self.btn_search_stream.setText("🔍 Поиск потока")
+        self.btn_search_stream.setText("Поиск потока")
         self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
         log.info("Поиск потока остановлен.")
 
@@ -974,7 +974,7 @@ class HardwareValidationWindow(QMainWindow):
         if not self._searching:
             return
         self._searching = False
-        self.btn_search_stream.setText("🔍 Поиск потока")
+        self.btn_search_stream.setText("Поиск потока")
         self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
         self._search_thread = None
 
@@ -1027,7 +1027,7 @@ class HardwareValidationWindow(QMainWindow):
         lbl.setStyleSheet("color: #5bc0be; font-size: 14px;")
         lbl.setWordWrap(True)
         pl_layout.addWidget(lbl)
-        btn_show = QPushButton("📈 Показать графики")
+        btn_show = QPushButton("Показать графики")
         btn_show.setStyleSheet(
             "QPushButton { background-color: #28a745; color: white; font-weight: bold; "
             "padding: 12px 24px; border-radius: 6px; font-size: 14px; } "
