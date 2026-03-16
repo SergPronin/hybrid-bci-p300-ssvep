@@ -243,18 +243,44 @@ def _create_inlet(info: StreamInfo) -> StreamInlet:
 
 
 def get_channel_names(info: StreamInfo, n_channels: int) -> List[str]:
-    channels = []
+    xml_names: List[Optional[str]] = []
     try:
-        ch = info.desc().child("channels").child("channel")
-        for _ in range(n_channels):
-            name = ch.child_value("label") or ch.child_value("name") or ch.child_value("type")
-            channels.append(name.strip() if name else f"Ch {len(channels) + 1}")
-            ch = ch.next_sibling()
+        desc = info.desc()
+        ch = desc.child("channels").child("channel") if desc is not None else None
+        # Пытаемся вытащить имена каналов из XML‑описания
+        while ch is not None and len(xml_names) < n_channels:
+            try:
+                name = (
+                    ch.child_value("label")
+                    or ch.child_value("name")
+                    or ch.child_value("type")
+                )
+            except Exception:
+                name = None
+            if isinstance(name, str):
+                name = name.strip() or None
+            xml_names.append(name)
+            next_ch = ch.next_sibling()
+            if next_ch is None or next_ch is ch:
+                break
+            ch = next_ch
     except Exception:
-        pass
-    while len(channels) < n_channels:
-        channels.append(f"Ch {len(channels) + 1}")
-    return channels[:n_channels]
+        # Если info.desc() или парсинг XML не сработал — просто пойдём по запасным вариантам
+        xml_names = []
+
+    # Строим итоговый список имён с учётом fallbackов:
+    # 1) XML‑имена
+    # 2) Глобальный DEFAULT_CHANNEL_NAMES
+    # 3) "Ch {i}"
+    result: List[str] = []
+    for i in range(n_channels):
+        name = xml_names[i] if i < len(xml_names) else None
+        if not name and i < len(DEFAULT_CHANNEL_NAMES):
+            name = DEFAULT_CHANNEL_NAMES[i]
+        if not name:
+            name = f"Ch {i + 1}"
+        result.append(name)
+    return result
 
 
 # ==============================================================================
@@ -981,7 +1007,11 @@ class HardwareValidationWindow(QMainWindow):
     def _on_stream_hooked(self, eeg_info: StreamInfo, pre_opened_inlet: StreamInlet):
         """Обновление UI после подключения. Чтение уже запущено в StreamSearchThread до этого сигнала."""
         self.inlet = pre_opened_inlet
-        self.n_channels = eeg_info.channel_count()
+        try:
+            full_info = self.inlet.info()
+        except Exception:
+            full_info = eeg_info
+        self.n_channels = full_info.channel_count()
         # LSLPullThread уже запущен в StreamSearchThread — не трогаем, только UI
         if not (getattr(self, "_pull_thread", None) and self._pull_thread.isRunning()):
             self._pull_stop[0] = False
@@ -993,11 +1023,11 @@ class HardwareValidationWindow(QMainWindow):
         self._search_thread.request_stop()
         self._on_search_thread_finished()
 
-        self.sampling_rate = eeg_info.nominal_srate()
-        self.stream_name = eeg_info.name() or "EEG"
+        self.sampling_rate = full_info.nominal_srate()
+        self.stream_name = full_info.name() or "EEG"
         self._has_stream = True
         # Имена каналов из метаданных потока LSL (desc/channels/channel)
-        self.channel_names = get_channel_names(eeg_info, self.n_channels)
+        self.channel_names = get_channel_names(full_info, self.n_channels)
 
         # Сохраняем начальный выбор каналов пользователя, если он уже что‑то выбрал
         old_checked = list(self.record_channel_checked) if self.record_channel_checked else []
@@ -1175,9 +1205,13 @@ def main():
             eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, None)
             if eeg_info:
                 inlet = _create_inlet(eeg_info)
-                stream_info_light = eeg_info
-                n_ch = eeg_info.channel_count()
-                channel_names = get_channel_names(eeg_info, n_ch)
+                try:
+                    full_info = inlet.info()
+                except Exception:
+                    full_info = eeg_info
+                stream_info_light = full_info
+                n_ch = full_info.channel_count()
+                channel_names = get_channel_names(full_info, n_ch)
     except Exception as e:
         log.warning("Поток при старте не найден или ошибка: %s. Окно откроется без потока.", e)
 
