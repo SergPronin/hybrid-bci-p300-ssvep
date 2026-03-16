@@ -50,6 +50,22 @@ SIMULATOR_NAME = "EEG_Simulator"
 SIMULATOR_SOURCE_ID = "eeg-simulator-neurospectr"
 NEUROSPECTR_MARKER = "neuro"
 
+DEFAULT_N_CHANNELS = 21
+# Имена каналов как в NeuroSpectrum (монополярные отведённые к A1/A2)
+DEFAULT_CHANNEL_NAMES = [
+    "FP1-A1", "FP2-A2",
+    "F3-A1", "F4-A2",
+    "C3-A1", "C4-A2",
+    "P3-A1", "P4-A2",
+    "O1-A1", "O2-A2",
+    "F7-A1", "F8-A2",
+    "T3-A1", "T4-A2",
+    "T5-A1", "T6-A2",
+    "FPZ-A1", "FZ-A2",
+    "CZ-A1", "PZ-A2",
+    "OZ-A1",
+]
+
 pg.setConfigOptions(useOpenGL=False, antialias=False, useCupy=False)
 
 
@@ -204,10 +220,9 @@ class LSLPullThread(QThread):
                             arr = arr.T
                         n_record = min(n_ch, arr.shape[1])
                         for ch in range(n_record):
-                            if ch < len(self.main_window.record_channel_checked) and self.main_window.record_channel_checked[ch]:
-                                col = arr[:, ch].astype(np.float64)
-                                col = np.nan_to_num(col, nan=0.0, posinf=0.0, neginf=0.0)
-                                self.main_window.recording_buffer[ch].extend(col.tolist())
+                            col = arr[:, ch].astype(np.float64)
+                            col = np.nan_to_num(col, nan=0.0, posinf=0.0, neginf=0.0)
+                            self.main_window.recording_buffer[ch].extend(col.tolist())
                 elif n == 0:
                     time.sleep(LSL_PULL_POLL_S)
             except Exception:
@@ -425,11 +440,22 @@ class HardwareValidationWindow(QMainWindow):
     ):
         super().__init__()
         self.inlet = inlet
-        self.stream_name = (full_info.name() or "EEG") if full_info else "—"
-        self.channel_names = channel_names or []
-        self.n_channels = full_info.channel_count() if full_info else 0
-        self.sampling_rate = full_info.nominal_srate() if full_info else 0
-        self._has_stream = inlet is not None and full_info is not None
+
+        if full_info is not None:
+            # Реальный поток уже найден
+            self.stream_name = full_info.name() or "EEG"
+            self.n_channels = full_info.channel_count()
+            self.channel_names = channel_names or get_channel_names(full_info, self.n_channels)
+            self.sampling_rate = full_info.nominal_srate()
+            self._has_stream = inlet is not None
+        else:
+            # Работаем в режиме "по умолчанию": фиксированное количество каналов,
+            # чтобы пользователь мог заранее выбрать каналы для сохранения
+            self.stream_name = "—"
+            self.n_channels = DEFAULT_N_CHANNELS
+            self.channel_names = channel_names or list(DEFAULT_CHANNEL_NAMES)
+            self.sampling_rate = 0
+            self._has_stream = False
 
         self.channel_widgets: List[ChannelWidget] = []
         self.checkboxes: List[QCheckBox] = []
@@ -972,7 +998,13 @@ class HardwareValidationWindow(QMainWindow):
         self._has_stream = True
         # Имена каналов из метаданных потока LSL (desc/channels/channel)
         self.channel_names = get_channel_names(eeg_info, self.n_channels)
-        self.record_channel_checked = [True] * self.n_channels
+
+        # Сохраняем начальный выбор каналов пользователя, если он уже что‑то выбрал
+        old_checked = list(self.record_channel_checked) if self.record_channel_checked else []
+        self.record_channel_checked = [
+            (old_checked[i] if i < len(old_checked) else True)
+            for i in range(self.n_channels)
+        ]
         self.recording_buffer = [[] for _ in range(self.n_channels)]
         self.setWindowTitle(f"LSL Validation — {self.stream_name}")
         self._show_recording_placeholder()
