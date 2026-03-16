@@ -39,7 +39,7 @@ WINDOW_SEC = 0.2
 COV_UPDATE_INTERVAL = 10.0
 UPDATE_INTERVAL_MS = 50   # чаще обрабатываем очередь — меньше задержка и потерь в начале
 STATS_INTERVAL_MS = 500
-SAVE_INTERVAL_MS = 5000  # Автосохранение каждые 5 секунд (можно отключить)
+SAVE_INTERVAL_MS = 60000  # Автосохранение каждые 5 секунд (можно отключить)
 # Поток чтения LSL: быстрый drain буфера, чтобы не терять начальные сэмплы при старте потока в NeuroSpectrum
 LSL_PULL_TIMEOUT_S = 0.01  # 10 ms — быстрая реакция на появление данных
 LSL_PULL_POLL_S = 0.002   # при отсутствии данных опрашивать каждые 2 ms
@@ -854,7 +854,8 @@ class HardwareValidationWindow(QMainWindow):
             cb.blockSignals(True)
             cb.setChecked(checked)
             cb.blockSignals(False)
-            self.record_channel_checked[i] = checked
+            if i < len(self.record_channel_checked):
+                self.record_channel_checked[i] = checked
 
     def _rebuild_record_checkboxes(self):
         """Построить чекбоксы «каналы для записи» по текущим channel_names (из потока или пусто)."""
@@ -868,7 +869,7 @@ class HardwareValidationWindow(QMainWindow):
             cb = QCheckBox(f"[{i+1}] {name}")
             cb.setChecked(i < len(self.record_channel_checked) and self.record_channel_checked[i])
             cb.setProperty("channel_index", i)
-            cb.stateChanged.connect(self._on_record_channel_toggled)
+            cb.stateChanged.connect(lambda state, idx=i: self._on_record_channel_toggled(idx, state))
             self.record_checkboxes.append(cb)
             self.record_cb_layout.addWidget(cb)
         if not self.channel_names:
@@ -877,11 +878,9 @@ class HardwareValidationWindow(QMainWindow):
             self.record_cb_layout.addWidget(lbl)
         self.record_cb_layout.addStretch()
 
-    def _on_record_channel_toggled(self):
-        """Синхронизировать состояние чекбоксов записи с record_channel_checked."""
-        for i, cb in enumerate(self.record_checkboxes):
-            if i < len(self.record_channel_checked):
-                self.record_channel_checked[i] = cb.isChecked()
+    def _on_record_channel_toggled(self, idx: int, state: int):
+        if idx < len(self.record_channel_checked):
+            self.record_channel_checked[idx] = bool(state)
 
     def _set_all_channels(self, state: bool):
         for cb in self.checkboxes:
@@ -1037,6 +1036,7 @@ class HardwareValidationWindow(QMainWindow):
         ]
         self.recording_buffer = [[] for _ in range(self.n_channels)]
         self.setWindowTitle(f"LSL Validation — {self.stream_name}")
+        self._rebuild_record_checkboxes()
         self._show_recording_placeholder()
 
     def _show_recording_placeholder(self):
