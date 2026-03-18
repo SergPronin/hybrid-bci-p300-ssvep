@@ -22,12 +22,6 @@ pip install -r requirements.txt
 
 ## Запуск
 
-- **Стимуляция (основное приложение)**  
-  ```bash
-  python -m app.main
-  ```  
-  Окно PsychoPy с 3×3 плитками, кнопками START/STOP и слайдерами (интервал, длительность вспышки, число блоков). Нажмите START, чтобы запустить эксперимент; Esc — выход.
-
 - **Валидация аппаратуры ЭЭГ**  
   ```bash
   python scripts/hardware_validation.py
