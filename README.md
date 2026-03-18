@@ -28,37 +28,20 @@ pip install -r requirements.txt
   ```  
   Окно Qt отображает каналы ЭЭГ, позволяет менять масштаб X/Y и сохранять данные в `saved_data/`.
 
-## Сборка в исполняемый файл (exe/app)
+## Быстрый старт из архива
 
-Для `scripts/hardware_validation.py` есть готовый spec-файл PyInstaller: `hardware_validation.spec`.
-
-- **Windows (exe)**
-
-  ```bash
-  py -3.10 -m venv .venv
-  .venv\Scripts\activate
-  pip install -r requirements.txt
-  pip install -r requirements-dev.txt
-
-  py -3.10 -m PyInstaller --clean --noconfirm hardware_validation.spec
-  # или:
-  py scripts\build_hardware_validation_exe.py
-  ```
-
-  Результат: `dist/hardware_validation/hardware_validation.exe`
-
-- **macOS/Linux (app/onefolder)**
-
-  ```bash
-  python3.10 -m venv .venv
-  source .venv/bin/activate
-  pip install -r requirements.txt
-  pip install -r requirements-dev.txt
-
-  python -m PyInstaller --clean --noconfirm hardware_validation.spec
-  ```
-
-  Результат: `dist/hardware_validation/hardware_validation` (на macOS можно упаковать дальше в `.app`, если нужно).
+1. Установите зависимости:
+   ```bash
+   python bootstrap_env.py
+   ```
+2. Запустите GUI:
+   ```bash
+   python run_app.py
+   ```
+3. Запустите валидацию ЭЭГ:
+   ```bash
+   python run_hardware_validation.py
+   ```
 
 ## LSL‑потоки
 
@@ -70,6 +53,6 @@ pip install -r requirements.txt
 - `app/` — точка входа `main.py`.
 - `core/` — сетка плиток, контроллер стимуляции, отправка LSL‑маркеров.
 - `gui/` — GUI на PsychoPy.
-- `scripts/` — утилиты, в т.ч. `hardware_validation.py` и `lsl_record_minimal.py`.
+- `scripts/` — утилиты, в т.ч. `hardware_validation.py`.
 
 Лицензия: MIT (см. `LICENSE`).

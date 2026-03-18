@@ -1,31 +1,18 @@
-"""Конфигурация приложения (размеры, цвета, диапазоны параметров)."""
-
-# Окно
 WINDOW_SIZE = (1200, 800)
-WINDOW_COLOR = "black"
-
-# Сетка плиток
+WINDOW_COLOR = 'black'
 GRID_SIZE = 3
 TILE_SIZE_PX = 120
 TILE_SPACING_PX = 20
-TILE_DEFAULT_COLOR = "gray"
-TILE_LINE_COLOR = "white"
-
-# Цвета мигания (случайный выбор при подсветке)
-FLASH_COLORS = ["yellow", "green", "red", "white"]
-
-# Слайдеры
-ISI_RANGE = (0.001, 5.0)  # Уменьшено минимальное значение для более быстрого мигания (до 0.01 сек = 100 Гц)
+TILE_DEFAULT_COLOR = 'gray'
+TILE_LINE_COLOR = 'white'
+FLASH_COLORS = ['yellow', 'green', 'red', 'white']
+ISI_RANGE = (0.001, 5.0)
 FLASH_DURATION_RANGE = (0.01, 2.0)
 SLIDER_GRANULARITY = 0.01
-
-# Кнопки
 BUTTON_WIDTH = 150
 BUTTON_HEIGHT = 50
 START_BUTTON_POS = (-100, -250)
 STOP_BUTTON_POS = (100, -250)
-
-# Расположение панели настроек (позиции слайдеров и подписей)
 PANEL_FREQ_LABEL_POS = (450, 260)
 PANEL_FREQ_SLIDER_POS = (450, 200)
 PANEL_FREQ_VALUE_POS = (450, 180)
@@ -34,24 +21,15 @@ PANEL_FLASH_SLIDER_POS = (450, 100)
 PANEL_FLASH_VALUE_POS = (450, 80)
 SLIDER_SIZE = (200, 20)
 TEXT_HEIGHT = 20
-
 SEQUENCES_RANGE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
 DEFAULT_SEQUENCES = 10
-
-# Цвет вспышек в режиме испытуемого (один цвет для всех плиток)
-FLASH_COLOR = "white"  # или "green", "cyan" и т.д.
-
-# Фиксационный крест
-FIXATION_CROSS_COLOR = "white"
+FLASH_COLOR = 'white'
+FIXATION_CROSS_COLOR = 'white'
 FIXATION_CROSS_SIZE = 20
-
-PANEL_SEQ_LABEL_POS = (450, 20)   # подберите под ваш макет
+PANEL_SEQ_LABEL_POS = (450, 20)
 PANEL_SEQ_SLIDER_POS = (450, -20)
 PANEL_SEQ_VALUE_POS = (450, -40)
-
 CUE_DURATION = 2.0
 READY_DURATION = 1.5
-
-# Цвета
-CUE_COLOR = "blue"
-STIM_COLOR = "white"
+CUE_COLOR = 'blue'
+STIM_COLOR = 'white'

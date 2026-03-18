@@ -1,5 +1,2 @@
-"""Графический интерфейс."""
-
 from .gui import StimulusApp
-
-__all__ = ["StimulusApp"]
+__all__ = ['StimulusApp']

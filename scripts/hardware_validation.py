@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Аппаратная валидация ЭЭГ: EXTREME PERFORMANCE + DYNAMIC UI + MANUAL SCALING + DATA SAVING
-Оптимизации:
-- Сохранение данных из нейроспектра в CSV для сравнения
-- Интерактивный сайдбар для включения/выключения каналов.
-- Глобальный тумблер "Автомасштаб Y" для возможности ручного зума (колесико мыши).
-- Жесткая защита от мусорных данных (NaN, Inf), предотвращающая краш C++ ядра Qt.
-- Оптимизированный рендеринг (120+ FPS) скрытых и активных каналов.
-"""
 
 import sys
 import time
@@ -18,87 +9,47 @@ import numpy as np
 from typing import Optional, List
 from datetime import datetime
 import os
-
 from pylsl import StreamInlet, StreamInfo, resolve_byprop
-
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QLabel, QGroupBox, QInputDialog, QCheckBox,
-    QPushButton, QScrollArea, QFrame, QFileDialog, QMessageBox,
-    QDoubleSpinBox,
-)
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QGroupBox, QInputDialog, QCheckBox, QPushButton, QScrollArea, QFrame, QFileDialog, QMessageBox, QDoubleSpinBox
 from PyQt5.QtCore import QTimer, Qt, QDateTime, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
 import pyqtgraph as pg
-
-# ==============================================================================
-# КОНФИГУРАЦИЯ
-# ==============================================================================
-EEG_STREAM_TYPES = ("EEG", "Signal")
+EEG_STREAM_TYPES = ('EEG', 'Signal')
 WINDOW_SEC = 0.2
 COV_UPDATE_INTERVAL = 10.0
-UPDATE_INTERVAL_MS = 50   # чаще обрабатываем очередь — меньше задержка и потерь в начале
+UPDATE_INTERVAL_MS = 50
 STATS_INTERVAL_MS = 500
-SAVE_INTERVAL_MS = 60000  # Автосохранение каждые 5 секунд (можно отключить)
-# Поток чтения LSL: быстрый drain буфера, чтобы не терять начальные сэмплы при старте потока в NeuroSpectrum
-LSL_PULL_TIMEOUT_S = 0.01  # 10 ms — быстрая реакция на появление данных
-LSL_PULL_POLL_S = 0.002   # при отсутствии данных опрашивать каждые 2 ms
-LSL_MAX_SAMPLES_PER_CHUNK = 8192  # за один pull забираем больше сэмплов
-LSL_MAX_BUFFERED_SEC = 600  # буфер inlet в секундах (для записи — с запасом)
-
-SIMULATOR_NAME = "EEG_Simulator"
-SIMULATOR_SOURCE_ID = "eeg-simulator-neurospectr"
-NEUROSPECTR_MARKER = "neuro"
-
+SAVE_INTERVAL_MS = 60000
+LSL_PULL_TIMEOUT_S = 0.01
+LSL_PULL_POLL_S = 0.002
+LSL_MAX_SAMPLES_PER_CHUNK = 8192
+LSL_MAX_BUFFERED_SEC = 600
+SIMULATOR_NAME = 'EEG_Simulator'
+SIMULATOR_SOURCE_ID = 'eeg-simulator-neurospectr'
+NEUROSPECTR_MARKER = 'neuro'
 DEFAULT_N_CHANNELS = 21
-# Имена каналов как в NeuroSpectrum (монополярные отведённые к A1/A2)
-DEFAULT_CHANNEL_NAMES = [
-    "FP1-A1", "FP2-A2",
-    "F3-A1", "F4-A2",
-    "C3-A1", "C4-A2",
-    "P3-A1", "P4-A2",
-    "O1-A1", "O2-A2",
-    "F7-A1", "F8-A2",
-    "T3-A1", "T4-A2",
-    "T5-A1", "T6-A2",
-    "FPZ-A1", "FZ-A2",
-    "CZ-A1", "PZ-A2",
-    "OZ-A1",
-]
-
+DEFAULT_CHANNEL_NAMES = ['FP1-A1', 'FP2-A2', 'F3-A1', 'F4-A2', 'C3-A1', 'C4-A2', 'P3-A1', 'P4-A2', 'O1-A1', 'O2-A2', 'F7-A1', 'F8-A2', 'T3-A1', 'T4-A2', 'T5-A1', 'T6-A2', 'FPZ-A1', 'FZ-A2', 'CZ-A1', 'PZ-A2', 'OZ-A1']
 pg.setConfigOptions(useOpenGL=False, antialias=False, useCupy=False)
 
-
-# ==============================================================================
-# ЛОГИРОВАНИЕ
-# ==============================================================================
 def setup_logging():
-    logger = logging.getLogger("EEG_Validation")
+    logger = logging.getLogger('EEG_Validation')
     logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s', datefmt='%H:%M:%S')
-
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
-
-    file_handler = logging.FileHandler("hardware_validation.log", mode='w', encoding='utf-8')
+    file_handler = logging.FileHandler('hardware_validation.log', mode='w', encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
     return logger
-
-
 log = setup_logging()
 
-
-# ==============================================================================
-# ПОИСК ПОТОКОВ И МЕТАДАННЫЕ
-# ==============================================================================
 def _is_allowed_stream(info: StreamInfo) -> bool:
     try:
-        name = (info.name() or "").strip().lower()
-        sid = (info.source_id() or "").strip().lower()
+        name = (info.name() or '').strip().lower()
+        sid = (info.source_id() or '').strip().lower()
     except Exception:
         return False
     if name == SIMULATOR_NAME.lower() or SIMULATOR_SOURCE_ID in sid:
@@ -107,25 +58,18 @@ def _is_allowed_stream(info: StreamInfo) -> bool:
         return True
     return False
 
-
-def find_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
-    log.info("Поиск LSL потоков ЭЭГ...")
+def find_eeg_streams(timeout: float=3.0) -> List[StreamInfo]:
+    log.info('Поиск LSL потоков ЭЭГ...')
     all_streams = []
     for stream_type in EEG_STREAM_TYPES:
-        streams = resolve_byprop("type", stream_type, timeout=timeout)
+        streams = resolve_byprop('type', stream_type, timeout=timeout)
         all_streams.extend(streams)
-
     allowed = [s for s in all_streams if _is_allowed_stream(s)]
-    log.info(f"Найдено подходящих потоков: {len(allowed)}")
+    log.info(f'Найдено подходящих потоков: {len(allowed)}')
     return allowed
 
-
-# ==============================================================================
-# ПОИСК ПОТОКА В ФОНЕ (захват inlet в фоне, без задержки Qt Event Loop)
-# ==============================================================================
 class StreamSearchThread(QThread):
-    """Экстремальный захват потока: создает inlet прямо в фоне за микросекунды."""
-    stream_hooked = pyqtSignal(object, object)  # StreamInfo, StreamInlet
+    stream_hooked = pyqtSignal(object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -139,15 +83,14 @@ class StreamSearchThread(QThread):
         while not self._stop_requested:
             try:
                 try:
-                    streams = resolve_byprop("type", "EEG", minimum=1, timeout=0.1)
+                    streams = resolve_byprop('type', 'EEG', minimum=1, timeout=0.1)
                 except TypeError:
-                    streams = resolve_byprop("type", "EEG", timeout=0.1)
+                    streams = resolve_byprop('type', 'EEG', timeout=0.1)
                 if not streams:
                     try:
-                        streams = resolve_byprop("type", "Signal", minimum=1, timeout=0.1)
+                        streams = resolve_byprop('type', 'Signal', minimum=1, timeout=0.1)
                     except TypeError:
-                        streams = resolve_byprop("type", "Signal", timeout=0.1)
-
+                        streams = resolve_byprop('type', 'Signal', timeout=0.1)
                 if streams:
                     valid_stream = next((s for s in streams if _is_allowed_stream(s)), None)
                     if valid_stream:
@@ -160,35 +103,24 @@ class StreamSearchThread(QThread):
                                 inlet.open_stream(timeout=1.0)
                             except Exception:
                                 pass
-                            # Запускаем чтение сразу в этом потоке, до сигнала в GUI — нулевая задержка
                             main_window = self.parent()
                             if main_window is not None:
                                 main_window.inlet = inlet
                                 main_window.n_channels = valid_stream.channel_count()
                                 main_window._pull_stop[0] = False
                                 main_window._pull_queue = queue.Queue()
-                                main_window._pull_thread = LSLPullThread(
-                                    main_window.inlet,
-                                    main_window._pull_queue,
-                                    main_window._pull_stop,
-                                    main_window,
-                                    main_window,
-                                )
+                                main_window._pull_thread = LSLPullThread(main_window.inlet, main_window._pull_queue, main_window._pull_stop, main_window, main_window)
                                 main_window._pull_thread.start()
-                                log.info("Чтение LSL запущено в потоке поиска (до сигнала в GUI).")
+                                log.info('Чтение LSL запущено в потоке поиска (до сигнала в GUI).')
                             self.stream_hooked.emit(valid_stream, inlet)
                             break
                         except Exception as e:
-                            log.error(f"Ошибка мгновенного захвата: {e}")
+                            log.error(f'Ошибка мгновенного захвата: {e}')
             except Exception:
                 pass
 
-
 class LSLPullThread(QThread):
-    """
-    Фоновый поток чтения LSL. Кладёт чанки в очередь для GUI и сразу пишет в буфер записи,
-    минуя главный поток — гарантия нулевой потери сэмплов при тяжёлом рендере.
-    """
+
     def __init__(self, inlet: StreamInlet, chunk_queue: queue.Queue, stop_flag: List[bool], main_window, parent=None):
         super().__init__(parent)
         self.inlet = inlet
@@ -205,10 +137,7 @@ class LSLPullThread(QThread):
                 except Exception:
                     n = 0
                 timeout = 0.0 if n > 0 else LSL_PULL_TIMEOUT_S
-                chunk, timestamps = self.inlet.pull_chunk(
-                    timeout=timeout,
-                    max_samples=LSL_MAX_SAMPLES_PER_CHUNK,
-                )
+                (chunk, timestamps) = self.inlet.pull_chunk(timeout=timeout, max_samples=LSL_MAX_SAMPLES_PER_CHUNK)
                 if chunk:
                     self.chunk_queue.put((chunk, timestamps))
                     if self.main_window.recording and self.main_window.n_channels > 0:
@@ -228,9 +157,7 @@ class LSLPullThread(QThread):
             except Exception:
                 break
 
-
 def _create_inlet(info: StreamInfo) -> StreamInlet:
-    """Создать inlet и сразу открыть поток — без блокирующего time_correction, чтобы не терять первые сэмплы."""
     try:
         inlet = StreamInlet(info, max_buffered=LSL_MAX_BUFFERED_SEC)
     except TypeError:
@@ -241,20 +168,14 @@ def _create_inlet(info: StreamInfo) -> StreamInlet:
         pass
     return inlet
 
-
 def get_channel_names(info: StreamInfo, n_channels: int) -> List[str]:
     xml_names: List[Optional[str]] = []
     try:
         desc = info.desc()
-        ch = desc.child("channels").child("channel") if desc is not None else None
-        # Пытаемся вытащить имена каналов из XML‑описания
+        ch = desc.child('channels').child('channel') if desc is not None else None
         while ch is not None and len(xml_names) < n_channels:
             try:
-                name = (
-                    ch.child_value("label")
-                    or ch.child_value("name")
-                    or ch.child_value("type")
-                )
+                name = ch.child_value('label') or ch.child_value('name') or ch.child_value('type')
             except Exception:
                 name = None
             if isinstance(name, str):
@@ -265,27 +186,17 @@ def get_channel_names(info: StreamInfo, n_channels: int) -> List[str]:
                 break
             ch = next_ch
     except Exception:
-        # Если info.desc() или парсинг XML не сработал — просто пойдём по запасным вариантам
         xml_names = []
-
-    # Строим итоговый список имён с учётом fallbackов:
-    # 1) XML‑имена
-    # 2) Глобальный DEFAULT_CHANNEL_NAMES
-    # 3) "Ch {i}"
     result: List[str] = []
     for i in range(n_channels):
         name = xml_names[i] if i < len(xml_names) else None
         if not name and i < len(DEFAULT_CHANNEL_NAMES):
             name = DEFAULT_CHANNEL_NAMES[i]
         if not name:
-            name = f"Ch {i + 1}"
+            name = f'Ch {i + 1}'
         result.append(name)
     return result
 
-
-# ==============================================================================
-# GUI КОМПОНЕНТЫ
-# ==============================================================================
 class ChannelWidget(QFrame):
 
     def __init__(self, channel_id: int, channel_name: str, sampling_rate: float):
@@ -294,83 +205,58 @@ class ChannelWidget(QFrame):
         self.channel_name = channel_name
         self.sampling_rate = sampling_rate
         self.buffer_size = int(WINDOW_SEC * sampling_rate)
-
         self.y_data = np.zeros(self.buffer_size, dtype=np.float32)
         self.x_data = np.linspace(-WINDOW_SEC, 0, self.buffer_size, dtype=np.float32)
         self.filled = 0
-
-        # Для сохранения полных данных (не только буфер)
-        self.full_data = []  # будет хранить все полученные данные
-
+        self.full_data = []
         self.current_y_min = -10.0
         self.current_y_max = 10.0
-
         self.is_active = True
-
         self._setup_ui()
 
     def _setup_ui(self):
         self.setFrameShape(QFrame.StyledPanel)
-        self.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 4px; }")
-
+        self.setStyleSheet('QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 4px; }')
         layout = QVBoxLayout()
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(1)
-
-        header = QLabel(f"[{self.channel_id + 1}] {self.channel_name}")
-        header.setFont(QFont("Arial", 8, QFont.Bold))
-        header.setStyleSheet("color: white; background-color: transparent; border: none; padding: 2px;")
+        header = QLabel(f'[{self.channel_id + 1}] {self.channel_name}')
+        header.setFont(QFont('Arial', 8, QFont.Bold))
+        header.setStyleSheet('color: white; background-color: transparent; border: none; padding: 2px;')
         layout.addWidget(header)
-
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setDownsampling(mode=None)
         self.plot_widget.setClipToView(True)
-
-        # Разрешаем зум мышью только по оси Y (чтобы шкала времени не ломалась)
         self.plot_widget.setMouseEnabled(x=False, y=True)
-        self.plot_widget.setMenuEnabled(True)  # Включаем меню по правому клику
-
+        self.plot_widget.setMenuEnabled(True)
         self.plot_widget.getViewBox().setLimits(yMin=-1000000, yMax=1000000)
-
         self.plot_widget.setLabel('left', 'мкВ', color='white', fontsize=6)
         self.plot_widget.setBackground('#000000')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
         self.plot_widget.setMinimumHeight(80)
         self.plot_widget.setXRange(-WINDOW_SEC, 0, padding=0)
-
         colors = pg.intColor(self.channel_id, hues=15, values=1, maxValue=255, minValue=150)
-        self.signal_line = self.plot_widget.plot(self.x_data, self.y_data, pen=pg.mkPen(colors, width=1.0),
-                                                 autoDownsample=False)
-
+        self.signal_line = self.plot_widget.plot(self.x_data, self.y_data, pen=pg.mkPen(colors, width=1.0), autoDownsample=False)
         layout.addWidget(self.plot_widget)
-
-        self.stats_label = QLabel("Ожидание...")
-        self.stats_label.setFont(QFont("Courier", 7))
-        self.stats_label.setStyleSheet("color: #a8ff9e; background-color: transparent; border: none;")
+        self.stats_label = QLabel('Ожидание...')
+        self.stats_label.setFont(QFont('Courier', 7))
+        self.stats_label.setStyleSheet('color: #a8ff9e; background-color: transparent; border: none;')
         layout.addWidget(self.stats_label)
-
         self.setLayout(layout)
 
     def push_chunk(self, new_data: np.ndarray):
         if not self.is_active:
             return
-
         n = len(new_data)
-        if n == 0: return
-
+        if n == 0:
+            return
         try:
-            # Защита от переполнения и NaN
             clean_data = np.nan_to_num(new_data, nan=0.0, posinf=0.0, neginf=0.0)
             clean_data = np.clip(clean_data, -250000.0, 250000.0)
-
-            # Сохраняем полные данные (для экспорта)
             self.full_data.extend(clean_data.tolist())
-
         except Exception:
             clean_data = np.zeros(n, dtype=np.float32)
-
         self.filled = min(self.buffer_size, self.filled + n)
-
         if n >= self.buffer_size:
             self.y_data[:] = clean_data[-self.buffer_size:]
         else:
@@ -378,37 +264,30 @@ class ChannelWidget(QFrame):
             self.y_data[-n:] = clean_data
 
     def clear_saved_data(self):
-        """Очистить сохраненные данные (для нового сеанса записи)"""
         self.full_data = []
-        log.info(f"Канал {self.channel_name}: данные очищены")
+        log.info(f'Канал {self.channel_name}: данные очищены')
 
     def update_plot(self, auto_scale: bool):
-        if not self.is_active or self.filled == 0 or not self.isVisible():
+        if not self.is_active or self.filled == 0 or (not self.isVisible()):
             return
-
         try:
             self.signal_line.setData(self.x_data, self.y_data, skipFiniteCheck=True)
-
-            # Применяем умное масштабирование, ТОЛЬКО если включена галочка
             if auto_scale:
-                y_min, y_max = float(np.min(self.y_data)), float(np.max(self.y_data))
-
+                (y_min, y_max) = (float(np.min(self.y_data)), float(np.max(self.y_data)))
                 span = y_max - y_min
                 if span < 20.0:
                     center = (y_max + y_min) / 2.0
-                    target_min, target_max = center - 10.0, center + 10.0
+                    (target_min, target_max) = (center - 10.0, center + 10.0)
                 else:
                     margin = span * 0.15
-                    target_min, target_max = y_min - margin, y_max + margin
-
+                    (target_min, target_max) = (y_min - margin, y_max + margin)
                 if abs(target_min - self.current_y_min) > 2.0 or abs(target_max - self.current_y_max) > 2.0:
-                    self.current_y_min, self.current_y_max = target_min, target_max
+                    (self.current_y_min, self.current_y_max) = (target_min, target_max)
                     self.plot_widget.setYRange(self.current_y_min, self.current_y_max, padding=0, update=False)
         except Exception:
             pass
 
     def set_y_range(self, y_min: float, y_max: float):
-        """Задать масштаб оси Y по значениям (мкВ)."""
         if y_min >= y_max:
             return
         self.current_y_min = float(y_min)
@@ -416,7 +295,6 @@ class ChannelWidget(QFrame):
         self.plot_widget.setYRange(self.current_y_min, self.current_y_max, padding=0, update=False)
 
     def set_time_window(self, sec: float):
-        """Изменить длительность окна по оси X (секунды)."""
         if sec <= 0:
             return
         new_size = max(1, int(sec * self.sampling_rate))
@@ -433,139 +311,94 @@ class ChannelWidget(QFrame):
         self.plot_widget.setXRange(-sec, 0, padding=0)
 
     def update_stats(self):
-        if not self.is_active or self.filled < 10 or not self.isVisible():
+        if not self.is_active or self.filled < 10 or (not self.isVisible()):
             return
-
         try:
             data = self.y_data[-self.filled:]
-            mean_val, std_val = float(np.mean(data)), float(np.std(data))
+            (mean_val, std_val) = (float(np.mean(data)), float(np.std(data)))
             rms_val = float(np.sqrt(np.mean(data ** 2)))
             p2p = float(np.max(data) - np.min(data))
-
             if p2p > 200000:
-                self.stats_label.setStyleSheet("color: #ff4d4d; font-weight: bold; border: none;")
-                self.stats_label.setText("ОШИБКА КОНТАКТА")
+                self.stats_label.setStyleSheet('color: #ff4d4d; font-weight: bold; border: none;')
+                self.stats_label.setText('ОШИБКА КОНТАКТА')
             else:
-                self.stats_label.setStyleSheet("color: #a8ff9e; border: none;")
-                self.stats_label.setText(
-                    f"Mean:{mean_val:6.1f} | STD:{std_val:6.1f} | RMS:{rms_val:6.1f} | P2P:{p2p:6.1f}")
+                self.stats_label.setStyleSheet('color: #a8ff9e; border: none;')
+                self.stats_label.setText(f'Mean:{mean_val:6.1f} | STD:{std_val:6.1f} | RMS:{rms_val:6.1f} | P2P:{p2p:6.1f}')
         except Exception:
             pass
 
-
-# ==============================================================================
-# ГЛАВНОЕ ОКНО С САЙДБАРОМ
-# ==============================================================================
 class HardwareValidationWindow(QMainWindow):
 
-    def __init__(
-        self,
-        inlet: Optional[StreamInlet] = None,
-        full_info: Optional[StreamInfo] = None,
-        channel_names: Optional[List[str]] = None,
-    ):
+    def __init__(self, inlet: Optional[StreamInlet]=None, full_info: Optional[StreamInfo]=None, channel_names: Optional[List[str]]=None):
         super().__init__()
         self.inlet = inlet
-
         if full_info is not None:
-            # Реальный поток уже найден
-            self.stream_name = full_info.name() or "EEG"
+            self.stream_name = full_info.name() or 'EEG'
             self.n_channels = full_info.channel_count()
             self.channel_names = channel_names or get_channel_names(full_info, self.n_channels)
             self.sampling_rate = full_info.nominal_srate()
             self._has_stream = inlet is not None
         else:
-            # Работаем в режиме "по умолчанию": фиксированное количество каналов,
-            # чтобы пользователь мог заранее выбрать каналы для сохранения
-            self.stream_name = "—"
+            self.stream_name = '—'
             self.n_channels = DEFAULT_N_CHANNELS
             self.channel_names = channel_names or list(DEFAULT_CHANNEL_NAMES)
             self.sampling_rate = 0
             self._has_stream = False
-
         self.channel_widgets: List[ChannelWidget] = []
         self.checkboxes: List[QCheckBox] = []
         self.info_panel: Optional[QWidget] = None
         self.grid_widget: Optional[QWidget] = None
         self.placeholder_widget: Optional[QWidget] = None
-
         self.start_time = time.time()
         self.last_cov_time = self.start_time
         self.sample_count = 0
-
         self.recording = False
-        self.save_folder = "saved_data"
-        # Каналы для записи: количество и имена из потока (обновляются при подключении)
+        self.save_folder = 'saved_data'
         n_ch = self.n_channels
         self.record_channel_checked = [True] * n_ch if n_ch else []
         self.record_checkboxes = []
         self.recording_buffer = [[] for _ in range(n_ch)] if n_ch else []
         if not os.path.exists(self.save_folder):
             os.makedirs(self.save_folder)
-
         self._search_thread: Optional[StreamSearchThread] = None
         self._searching = False
-        # Очередь чанков от фонового потока LSL (чтобы не терять начальные сэмплы)
         self._pull_queue: queue.Queue = queue.Queue()
         self._pull_stop: List[bool] = [False]
         self._pull_thread: Optional[LSLPullThread] = None
-
         self._setup_ui()
         if self._has_stream:
             self._setup_timers()
             self._pull_stop[0] = False
             self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
             self._pull_thread.start()
-            log.info("GUI готово. Режим DYNAMIC GRID активирован. Фоновое чтение LSL запущено.")
+            log.info('GUI готово. Режим DYNAMIC GRID активирован. Фоновое чтение LSL запущено.')
         else:
-            log.info("GUI готово. Поток не подключён — нажмите «Поиск потока».")
+            log.info('GUI готово. Поток не подключён — нажмите «Поиск потока».')
 
     def _setup_ui(self):
-        self.setWindowTitle(f"LSL Validation — {self.stream_name}")
-        self.setStyleSheet("""
-            QMainWindow { background-color: #0a0a0a; color: white; }
-            QLabel { color: white; }
-            QCheckBox { color: white; spacing: 5px; font-size: 13px; }
-            QCheckBox::indicator { width: 16px; height: 16px; }
-            QPushButton { background-color: #333; color: white; border-radius: 3px; padding: 5px; }
-            QPushButton:hover { background-color: #444; }
-        """)
-
+        self.setWindowTitle(f'LSL Validation — {self.stream_name}')
+        self.setStyleSheet('\n            QMainWindow { background-color: #0a0a0a; color: white; }\n            QLabel { color: white; }\n            QCheckBox { color: white; spacing: 5px; font-size: 13px; }\n            QCheckBox::indicator { width: 16px; height: 16px; }\n            QPushButton { background-color: #333; color: white; border-radius: 3px; padding: 5px; }\n            QPushButton:hover { background-color: #444; }\n        ')
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
         main_layout.setContentsMargins(5, 5, 5, 5)
-
-        # 1. ЛЕВАЯ ПАНЕЛЬ (САЙДБАР)
         sidebar = QWidget()
         sidebar.setFixedWidth(200)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Кнопка поиска / остановки поиска потока (поиск идёт, пока не нажата "Остановить поиск")
-        self.btn_search_stream = QPushButton("Поиск потока")
-        self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
+        self.btn_search_stream = QPushButton('Поиск потока')
+        self.btn_search_stream.setStyleSheet('QPushButton { background-color: #007bff; font-weight: bold; }')
         self.btn_search_stream.clicked.connect(self._on_search_or_stop_stream)
         sidebar_layout.addWidget(self.btn_search_stream)
-
-        # Кнопка автомасштаба (актуальна только при подключённом потоке)
-        self.cb_autoscale = QCheckBox("Автомасштаб Y")
+        self.cb_autoscale = QCheckBox('Автомасштаб Y')
         self.cb_autoscale.setChecked(True)
-        self.cb_autoscale.setStyleSheet("QCheckBox { color: #5bc0be; font-weight: bold; margin-bottom: 10px; }")
+        self.cb_autoscale.setStyleSheet('QCheckBox { color: #5bc0be; font-weight: bold; margin-bottom: 10px; }')
         sidebar_layout.addWidget(self.cb_autoscale)
-
-        # Ручной масштаб Y (мкВ) — ввод по цифрам
-        scale_group = QGroupBox("Масштаб Y (мкВ)")
-        scale_group.setStyleSheet(
-            "QGroupBox { color: white; margin-top: 6px; } "
-            "QDoubleSpinBox { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #555; "
-            "border-radius: 3px; padding: 4px; min-width: 72px; selection-background-color: #007bff; } "
-            "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { background-color: #3d3d3d; border: none; } "
-            "QLabel { color: #ccc; }"
-        )
+        scale_group = QGroupBox('Масштаб Y (мкВ)')
+        scale_group.setStyleSheet('QGroupBox { color: white; margin-top: 6px; } QDoubleSpinBox { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; padding: 4px; min-width: 72px; selection-background-color: #007bff; } QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { background-color: #3d3d3d; border: none; } QLabel { color: #ccc; }')
         scale_layout = QVBoxLayout()
         scale_row = QHBoxLayout()
-        scale_row.addWidget(QLabel("Мин:"))
+        scale_row.addWidget(QLabel('Мин:'))
         self.spin_y_min = QDoubleSpinBox()
         self.spin_y_min.setRange(-500000, 500000)
         self.spin_y_min.setValue(-100)
@@ -575,7 +408,7 @@ class HardwareValidationWindow(QMainWindow):
         scale_row.addWidget(self.spin_y_min)
         scale_layout.addLayout(scale_row)
         scale_row2 = QHBoxLayout()
-        scale_row2.addWidget(QLabel("Макс:"))
+        scale_row2.addWidget(QLabel('Макс:'))
         self.spin_y_max = QDoubleSpinBox()
         self.spin_y_max.setRange(-500000, 500000)
         self.spin_y_max.setValue(100)
@@ -586,49 +419,39 @@ class HardwareValidationWindow(QMainWindow):
         scale_layout.addLayout(scale_row2)
         scale_group.setLayout(scale_layout)
         sidebar_layout.addWidget(scale_group)
-
-        # Масштаб по X (время, секунды)
-        scale_x_group = QGroupBox("Масштаб X (с)")
-        scale_x_group.setStyleSheet(
-            "QGroupBox { color: white; margin-top: 6px; } "
-            "QDoubleSpinBox { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #555; "
-            "border-radius: 3px; padding: 4px; min-width: 72px; selection-background-color: #007bff; } "
-            "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { background-color: #3d3d3d; border: none; } "
-            "QLabel { color: #ccc; }"
-        )
+        scale_x_group = QGroupBox('Масштаб X (с)')
+        scale_x_group.setStyleSheet('QGroupBox { color: white; margin-top: 6px; } QDoubleSpinBox { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; padding: 4px; min-width: 72px; selection-background-color: #007bff; } QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { background-color: #3d3d3d; border: none; } QLabel { color: #ccc; }')
         scale_x_layout = QVBoxLayout()
         scale_x_row = QHBoxLayout()
-        scale_x_row.addWidget(QLabel("Окно:"))
+        scale_x_row.addWidget(QLabel('Окно:'))
         self.spin_x_window = QDoubleSpinBox()
         self.spin_x_window.setRange(0.05, 60.0)
         self.spin_x_window.setValue(WINDOW_SEC)
         self.spin_x_window.setDecimals(2)
         self.spin_x_window.setSingleStep(0.1)
-        self.spin_x_window.setSuffix(" с")
+        self.spin_x_window.setSuffix(' с')
         self.spin_x_window.valueChanged.connect(self._apply_x_window)
         scale_x_row.addWidget(self.spin_x_window)
         scale_x_layout.addLayout(scale_x_row)
         scale_x_group.setLayout(scale_x_layout)
         sidebar_layout.addWidget(scale_x_group)
-
-        # СЕКЦИЯ КАНАЛЫ ДЛЯ ЗАПИСИ (заполняется при подключении потока — имена из LSL)
-        record_channels_group = QGroupBox("Каналы для записи")
-        record_channels_group.setStyleSheet("QGroupBox { color: #5bc0be; margin-top: 10px; font-weight: bold; }")
+        record_channels_group = QGroupBox('Каналы для записи')
+        record_channels_group.setStyleSheet('QGroupBox { color: #5bc0be; margin-top: 10px; font-weight: bold; }')
         record_channels_layout = QVBoxLayout()
         record_btn_row = QHBoxLayout()
-        btn_record_all = QPushButton("Все")
-        btn_record_none = QPushButton("Сброс")
+        btn_record_all = QPushButton('Все')
+        btn_record_none = QPushButton('Сброс')
         btn_record_all.clicked.connect(self._set_all_record_channels)
-        btn_record_none.clicked.connect(lambda: self._set_all_record_channels(False))
+        btn_record_none.clicked.connect(lambda : self._set_all_record_channels(False))
         record_btn_row.addWidget(btn_record_all)
         record_btn_row.addWidget(btn_record_none)
         record_channels_layout.addLayout(record_btn_row)
         scroll_record = QScrollArea()
         scroll_record.setWidgetResizable(True)
         scroll_record.setMaximumHeight(180)
-        scroll_record.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        scroll_record.setStyleSheet('QScrollArea { border: none; background-color: transparent; }')
         record_cb_container = QWidget()
-        record_cb_container.setStyleSheet("background-color: transparent;")
+        record_cb_container.setStyleSheet('background-color: transparent;')
         self.record_cb_layout = QVBoxLayout(record_cb_container)
         self.record_cb_layout.setSpacing(2)
         self._rebuild_record_checkboxes()
@@ -636,60 +459,46 @@ class HardwareValidationWindow(QMainWindow):
         record_channels_layout.addWidget(scroll_record)
         record_channels_group.setLayout(record_channels_layout)
         sidebar_layout.addWidget(record_channels_group)
-
-        # СЕКЦИЯ СОХРАНЕНИЯ ДАННЫХ
-        save_group = QGroupBox("Сохранение данных")
-        save_group.setStyleSheet("QGroupBox { color: white; margin-top: 10px; }")
+        save_group = QGroupBox('Сохранение данных')
+        save_group.setStyleSheet('QGroupBox { color: white; margin-top: 10px; }')
         save_layout = QVBoxLayout()
-
-        # Кнопка начала/остановки записи (можно нажать до подключения потока)
-        self.btn_record = QPushButton("Начать запись")
-        self.btn_record.setStyleSheet("QPushButton { background-color: #28a745; font-weight: bold; }")
+        self.btn_record = QPushButton('Начать запись')
+        self.btn_record.setStyleSheet('QPushButton { background-color: #28a745; font-weight: bold; }')
         self.btn_record.clicked.connect(self.toggle_recording)
         save_layout.addWidget(self.btn_record)
-
-        # Кнопка сохранения текущих данных
-        self.btn_save = QPushButton("Сохранить в файл")
-        self.btn_save.setStyleSheet("QPushButton { background-color: #007bff; }")
+        self.btn_save = QPushButton('Сохранить в файл')
+        self.btn_save.setStyleSheet('QPushButton { background-color: #007bff; }')
         self.btn_save.clicked.connect(self.save_data_to_file)
         save_layout.addWidget(self.btn_save)
-
-        # Кнопка очистки буфера записи
-        self.btn_clear = QPushButton("Очистить буфер записи")
-        self.btn_clear.setStyleSheet("QPushButton { background-color: #dc3545; }")
+        self.btn_clear = QPushButton('Очистить буфер записи')
+        self.btn_clear.setStyleSheet('QPushButton { background-color: #dc3545; }')
         self.btn_clear.clicked.connect(self.clear_saved_data)
         save_layout.addWidget(self.btn_clear)
-
-        # Индикатор записи
-        self.recording_label = QLabel("Запись остановлена")
-        self.recording_label.setStyleSheet("color: #dc3545; font-weight: bold;")
+        self.recording_label = QLabel('Запись остановлена')
+        self.recording_label.setStyleSheet('color: #dc3545; font-weight: bold;')
         save_layout.addWidget(self.recording_label)
-
         save_group.setLayout(save_layout)
         sidebar_layout.addWidget(save_group)
-
-        lbl = QLabel("ОТОБРАЖЕНИЕ:")
-        lbl.setFont(QFont("Arial", 10, QFont.Bold))
+        lbl = QLabel('ОТОБРАЖЕНИЕ:')
+        lbl.setFont(QFont('Arial', 10, QFont.Bold))
         sidebar_layout.addWidget(lbl)
-
         btn_layout = QHBoxLayout()
-        btn_all = QPushButton("Все")
-        btn_all.clicked.connect(lambda: self._set_all_channels(True))
-        btn_none = QPushButton("Сброс")
-        btn_none.clicked.connect(lambda: self._set_all_channels(False))
+        btn_all = QPushButton('Все')
+        btn_all.clicked.connect(lambda : self._set_all_channels(True))
+        btn_none = QPushButton('Сброс')
+        btn_none.clicked.connect(lambda : self._set_all_channels(False))
         btn_layout.addWidget(btn_all)
         btn_layout.addWidget(btn_none)
         sidebar_layout.addLayout(btn_layout)
-
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        scroll.setStyleSheet('QScrollArea { border: none; background-color: transparent; }')
         cb_container = QWidget()
-        cb_container.setStyleSheet("background-color: transparent;")
+        cb_container.setStyleSheet('background-color: transparent;')
         self.cb_layout = QVBoxLayout(cb_container)
         self.cb_layout.setSpacing(6)
-        for i, name in enumerate(self.channel_names):
-            cb = QCheckBox(f"[{i + 1}] {name}")
+        for (i, name) in enumerate(self.channel_names):
+            cb = QCheckBox(f'[{i + 1}] {name}')
             cb.setChecked(True)
             cb.stateChanged.connect(self._rebuild_grid)
             self.checkboxes.append(cb)
@@ -697,44 +506,38 @@ class HardwareValidationWindow(QMainWindow):
         self.cb_layout.addStretch()
         scroll.setWidget(cb_container)
         sidebar_layout.addWidget(scroll)
-
-        # 2. ПРАВАЯ ПАНЕЛЬ (графики или заглушка)
         self.right_panel = QWidget()
         self.right_layout = QVBoxLayout(self.right_panel)
         self.right_layout.setContentsMargins(0, 0, 0, 0)
-
         if self._has_stream:
             self._build_stream_content()
         else:
             self._build_placeholder()
-
         main_layout.addWidget(sidebar)
         main_layout.addWidget(self.right_panel, stretch=1)
         self.resize(1600, 1000)
 
     def _build_placeholder(self):
-        """Правая панель при отсутствии потока."""
         self.placeholder_widget = QWidget()
         pl_layout = QVBoxLayout(self.placeholder_widget)
         pl_layout.setAlignment(Qt.AlignCenter)
         pl_layout.setSpacing(20)
-        lbl = QLabel("Поток ЭЭГ не подключён.\nЗапустите нейроспектр или симулятор и нажмите «Поиск потока» в боковой панели.")
+        lbl = QLabel('Поток ЭЭГ не подключён.\nЗапустите нейроспектр или симулятор и нажмите «Поиск потока» в боковой панели.')
         lbl.setAlignment(Qt.AlignCenter)
-        lbl.setStyleSheet("color: #888; font-size: 14px;")
+        lbl.setStyleSheet('color: #888; font-size: 14px;')
         lbl.setWordWrap(True)
         pl_layout.addWidget(lbl)
         self.right_layout.addWidget(self.placeholder_widget, stretch=1)
 
     def _build_stream_content(self):
-        """Правая панель с информацией и графиками каналов."""
         if self.placeholder_widget:
             self.right_layout.removeWidget(self.placeholder_widget)
             self.placeholder_widget.setParent(None)
             self.placeholder_widget = None
         self.info_panel = QHBoxLayout()
-        self.info_panel.addWidget(QLabel(f"<b>Поток:</b> {self.stream_name}"))
-        self.info_panel.addWidget(QLabel(f"<b>Частота:</b> {self.sampling_rate} Гц"))
-        self.samples_label = QLabel(f"<b>Сэмплов:</b> {self.sample_count}")
+        self.info_panel.addWidget(QLabel(f'<b>Поток:</b> {self.stream_name}'))
+        self.info_panel.addWidget(QLabel(f'<b>Частота:</b> {self.sampling_rate} Гц'))
+        self.samples_label = QLabel(f'<b>Сэмплов:</b> {self.sample_count}')
         self.info_panel.addWidget(self.samples_label)
         self.info_panel.addStretch()
         self.right_layout.addLayout(self.info_panel)
@@ -749,85 +552,56 @@ class HardwareValidationWindow(QMainWindow):
         self._rebuild_grid()
 
     def toggle_recording(self):
-        """Включить/выключить непрерывную запись данных"""
         self.recording = not self.recording
         if self.recording:
-            self.btn_record.setText("Остановить запись")
-            self.btn_record.setStyleSheet("QPushButton { background-color: #dc3545; font-weight: bold; }")
-            self.recording_label.setText("ИДЕТ ЗАПИСЬ")
-            self.recording_label.setStyleSheet("color: #28a745; font-weight: bold;")
-            log.info("Начало непрерывной записи данных")
+            self.btn_record.setText('Остановить запись')
+            self.btn_record.setStyleSheet('QPushButton { background-color: #dc3545; font-weight: bold; }')
+            self.recording_label.setText('ИДЕТ ЗАПИСЬ')
+            self.recording_label.setStyleSheet('color: #28a745; font-weight: bold;')
+            log.info('Начало непрерывной записи данных')
         else:
-            self.btn_record.setText("Начать запись")
-            self.btn_record.setStyleSheet("QPushButton { background-color: #28a745; font-weight: bold; }")
-            self.recording_label.setText("Запись остановлена")
-            self.recording_label.setStyleSheet("color: #dc3545; font-weight: bold;")
-            log.info("Остановка записи данных")
+            self.btn_record.setText('Начать запись')
+            self.btn_record.setStyleSheet('QPushButton { background-color: #28a745; font-weight: bold; }')
+            self.recording_label.setText('Запись остановлена')
+            self.recording_label.setStyleSheet('color: #dc3545; font-weight: bold;')
+            log.info('Остановка записи данных')
 
     def save_data_to_file(self):
-        """Сохранить буфер записи в файл: один столбец — один канал (по порядку), 3 знака после запятой, в имени — дата/время, в файле — частота дискретизации."""
         try:
             channels_to_save = [i for i in range(len(self.record_channel_checked)) if self.record_channel_checked[i]]
             if not channels_to_save:
-                QMessageBox.warning(self, "Нет каналов", "Выберите хотя бы один канал для записи в блоке «Каналы для записи».")
+                QMessageBox.warning(self, 'Нет каналов', 'Выберите хотя бы один канал для записи в блоке «Каналы для записи».')
                 return
-
-            max_len = max(len(self.recording_buffer[i]) for i in channels_to_save)
+            max_len = max((len(self.recording_buffer[i]) for i in channels_to_save))
             if max_len == 0:
-                QMessageBox.warning(self, "Нет данных", "Буфер записи пуст. Запустите запись и дождитесь поступления данных.")
+                QMessageBox.warning(self, 'Нет данных', 'Буфер записи пуст. Запустите запись и дождитесь поступления данных.')
                 return
-
-            # Имя файла: дата и время с точностью до секунды (три знака после запятой в данных, не в имени)
             dt = datetime.now()
-            timestamp = dt.strftime("%Y-%m-%d_%H-%M-%S")
-            default_name = os.path.join(self.save_folder, f"eeg_{timestamp}.csv")
-
+            timestamp = dt.strftime('%Y-%m-%d_%H-%M-%S')
+            default_name = os.path.join(self.save_folder, f'eeg_{timestamp}.csv')
             options = QFileDialog.Options()
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Сохранить запись ЭЭГ",
-                default_name,
-                "CSV (*.csv);;Текстовый файл (*.txt);;Все файлы (*.*)",
-                options=options,
-            )
-
+            (file_path, _) = QFileDialog.getSaveFileName(self, 'Сохранить запись ЭЭГ', default_name, 'CSV (*.csv);;Текстовый файл (*.txt);;Все файлы (*.*)', options=options)
             if not file_path:
                 return
-
             self._write_recording_buffer_to_file(file_path, channels_to_save, max_len)
             srate = self.sampling_rate if self._has_stream else 0
-            log.info(f"Запись сохранена: {file_path}, каналы по порядку, sampling_rate={srate}")
-            QMessageBox.information(
-                self,
-                "Успех",
-                f"Данные сохранены:\n{file_path}\n\nКаналы по порядку, точность 3 знака. Частота дискретизации: {srate} Гц.",
-            )
-
+            log.info(f'Запись сохранена: {file_path}, каналы по порядку, sampling_rate={srate}')
+            QMessageBox.information(self, 'Успех', f'Данные сохранены:\n{file_path}\n\nКаналы по порядку, точность 3 знака. Частота дискретизации: {srate} Гц.')
         except Exception as e:
-            log.error(f"Ошибка при сохранении данных: {e}")
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить данные:\n{str(e)}")
-
+            log.error(f'Ошибка при сохранении данных: {e}')
+            QMessageBox.critical(self, 'Ошибка', f'Не удалось сохранить данные:\n{str(e)}')
 
     def clear_saved_data(self):
-        """Очистить буфер записи и сохранённые данные по каналам."""
-        reply = QMessageBox.question(
-            self,
-            "Очистка буфера записи",
-            "Очистить буфер записи (и данные по каналам отображения)?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-
+        reply = QMessageBox.question(self, 'Очистка буфера записи', 'Очистить буфер записи (и данные по каналам отображения)?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             for i in range(len(self.recording_buffer)):
                 self.recording_buffer[i] = []
             for cw in self.channel_widgets:
                 cw.clear_saved_data()
-            log.info("Буфер записи и данные каналов очищены")
-            QMessageBox.information(self, "Готово", "Буфер записи очищен")
+            log.info('Буфер записи и данные каналов очищены')
+            QMessageBox.information(self, 'Готово', 'Буфер записи очищен')
 
     def _apply_manual_scale(self):
-        """Применить масштаб Y из полей ввода ко всем каналам."""
         if not self._has_stream or not self.channel_widgets:
             return
         y_min = self.spin_y_min.value()
@@ -839,7 +613,6 @@ class HardwareValidationWindow(QMainWindow):
             cw.set_y_range(y_min, y_max)
 
     def _apply_x_window(self):
-        """Применить длительность окна по X ко всем каналам."""
         if not self._has_stream or not self.channel_widgets:
             return
         sec = self.spin_x_window.value()
@@ -848,9 +621,8 @@ class HardwareValidationWindow(QMainWindow):
         for cw in self.channel_widgets:
             cw.set_time_window(sec)
 
-    def _set_all_record_channels(self, checked: bool = True):
-        """Включить или выключить все каналы для записи."""
-        for i, cb in enumerate(self.record_checkboxes):
+    def _set_all_record_channels(self, checked: bool=True):
+        for (i, cb) in enumerate(self.record_checkboxes):
             cb.blockSignals(True)
             cb.setChecked(checked)
             cb.blockSignals(False)
@@ -858,7 +630,6 @@ class HardwareValidationWindow(QMainWindow):
                 self.record_channel_checked[i] = checked
 
     def _rebuild_record_checkboxes(self):
-        """Построить чекбоксы «каналы для записи» по текущим channel_names (из потока или пусто)."""
         while self.record_cb_layout.count():
             item = self.record_cb_layout.takeAt(0)
             if item.widget():
@@ -866,15 +637,15 @@ class HardwareValidationWindow(QMainWindow):
         self.record_checkboxes.clear()
         for i in range(len(self.channel_names)):
             name = self.channel_names[i]
-            cb = QCheckBox(f"[{i+1}] {name}")
+            cb = QCheckBox(f'[{i + 1}] {name}')
             cb.setChecked(i < len(self.record_channel_checked) and self.record_channel_checked[i])
-            cb.setProperty("channel_index", i)
+            cb.setProperty('channel_index', i)
             cb.stateChanged.connect(lambda state, idx=i: self._on_record_channel_toggled(idx, state))
             self.record_checkboxes.append(cb)
             self.record_cb_layout.addWidget(cb)
         if not self.channel_names:
-            lbl = QLabel("Подключите поток для выбора каналов")
-            lbl.setStyleSheet("color: #888; font-size: 11px;")
+            lbl = QLabel('Подключите поток для выбора каналов')
+            lbl.setStyleSheet('color: #888; font-size: 11px;')
             self.record_cb_layout.addWidget(lbl)
         self.record_cb_layout.addStretch()
 
@@ -896,20 +667,16 @@ class HardwareValidationWindow(QMainWindow):
             self.grid_layout.removeWidget(cw)
             cw.setVisible(False)
             cw.is_active = False
-
-        active_indices = [i for i, cb in enumerate(self.checkboxes) if cb.isChecked()]
+        active_indices = [i for (i, cb) in enumerate(self.checkboxes) if cb.isChecked()]
         n_active = len(active_indices)
-
         if n_active == 0:
             return
-
-        n_cols = 1 if n_active == 1 else (2 if n_active <= 4 else 3)
-
-        for grid_idx, ch_idx in enumerate(active_indices):
+        n_cols = 1 if n_active == 1 else 2 if n_active <= 4 else 3
+        for (grid_idx, ch_idx) in enumerate(active_indices):
             cw = self.channel_widgets[ch_idx]
             cw.is_active = True
             cw.setVisible(True)
-            row, col = grid_idx // n_cols, grid_idx % n_cols
+            (row, col) = (grid_idx // n_cols, grid_idx % n_cols)
             self.grid_layout.addWidget(cw, row, col)
 
     def _setup_timers(self):
@@ -917,131 +684,108 @@ class HardwareValidationWindow(QMainWindow):
         self.plot_timer.setTimerType(Qt.PreciseTimer)
         self.plot_timer.timeout.connect(self._pull_and_plot)
         self.plot_timer.start(UPDATE_INTERVAL_MS)
-
         self.stats_timer = QTimer()
         self.stats_timer.timeout.connect(self._update_text_stats)
         self.stats_timer.start(STATS_INTERVAL_MS)
-
-        # Таймер для автосохранения (если включена запись)
         self.save_timer = QTimer()
         self.save_timer.timeout.connect(self._auto_save)
         self.save_timer.start(SAVE_INTERVAL_MS)
 
     def _auto_save(self):
-        """Автоматическое сохранение буфера записи при включенной записи (тот же формат: столбцы по порядку, 3 знака)."""
         if not self.recording:
             return
         channels_to_save = [i for i in range(len(self.record_channel_checked)) if self.record_channel_checked[i]]
         if not channels_to_save:
             return
-        max_len = max(len(self.recording_buffer[i]) for i in channels_to_save)
+        max_len = max((len(self.recording_buffer[i]) for i in channels_to_save))
         if max_len == 0:
             return
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filepath = os.path.join(self.save_folder, f"eeg_{timestamp}.csv")
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        filepath = os.path.join(self.save_folder, f'eeg_{timestamp}.csv')
         self._write_recording_buffer_to_file(filepath, channels_to_save, max_len)
-        log.info(f"Автосохранение: {filepath}")
+        log.info(f'Автосохранение: {filepath}')
 
     def _write_recording_buffer_to_file(self, filepath: str, channels_to_save: List[int], max_len: int):
-        """Записать буфер записи в файл: один столбец — один канал по порядку, 3 знака, в первой строке sampling_rate."""
         try:
             srate = self.sampling_rate if self._has_stream else 0
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(f"# sampling_rate={srate}\n")
-                header_names = [
-                    self.channel_names[i] if i < len(self.channel_names) else f"Ch{i+1}"
-                    for i in channels_to_save
-                ]
-                f.write(",".join(header_names) + "\n")
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f'# sampling_rate={srate}\n')
+                header_names = [self.channel_names[i] if i < len(self.channel_names) else f'Ch{i + 1}' for i in channels_to_save]
+                f.write(','.join(header_names) + '\n')
                 for row_idx in range(max_len):
                     row_vals = []
                     for ch in channels_to_save:
                         buf = self.recording_buffer[ch]
                         val = buf[row_idx] if row_idx < len(buf) else 0.0
-                        row_vals.append(f"{val:.3f}".replace(".", ","))
-                    f.write(" ".join(row_vals) + "\n")
+                        row_vals.append(f'{val:.3f}'.replace('.', ','))
+                    f.write(' '.join(row_vals) + '\n')
         except Exception as e:
-            log.error(f"Ошибка записи в файл: {e}")
+            log.error(f'Ошибка записи в файл: {e}')
 
     def _on_search_or_stop_stream(self):
-        """Запуск поиска потока (идет до нажатия «Остановить поиск») или остановка поиска."""
         if self._searching:
             self._stop_stream_search()
             return
         self._start_stream_search()
 
     def _start_stream_search(self):
-        """Запустить фоновый поиск LSL-потока (пока не нажата «Остановить поиск»)."""
         if self._search_thread is not None and self._search_thread.isRunning():
             return
         self._searching = True
-        self.btn_search_stream.setText("Остановить поиск")
-        self.btn_search_stream.setStyleSheet("QPushButton { background-color: #dc3545; font-weight: bold; }")
+        self.btn_search_stream.setText('Остановить поиск')
+        self.btn_search_stream.setStyleSheet('QPushButton { background-color: #dc3545; font-weight: bold; }')
         self._search_thread = StreamSearchThread(self)
         self._search_thread.stream_hooked.connect(self._on_stream_hooked)
         self._search_thread.finished.connect(self._on_search_thread_finished)
         self._search_thread.start()
-        log.info("Поиск потока запущен (остановить — кнопкой «Остановить поиск»).")
+        log.info('Поиск потока запущен (остановить — кнопкой «Остановить поиск»).')
 
     def _stop_stream_search(self):
-        """Остановить поиск потока."""
         self._searching = False
         if self._search_thread is not None and self._search_thread.isRunning():
             self._search_thread.request_stop()
             self._search_thread.wait(5000)
         self._search_thread = None
-        self.btn_search_stream.setText("Поиск потока")
-        self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
-        log.info("Поиск потока остановлен.")
+        self.btn_search_stream.setText('Поиск потока')
+        self.btn_search_stream.setStyleSheet('QPushButton { background-color: #007bff; font-weight: bold; }')
+        log.info('Поиск потока остановлен.')
 
     def _on_search_thread_finished(self):
-        """Поиск завершён (найден поток или остановлен)."""
         if not self._searching:
             return
         self._searching = False
-        self.btn_search_stream.setText("Поиск потока")
-        self.btn_search_stream.setStyleSheet("QPushButton { background-color: #007bff; font-weight: bold; }")
+        self.btn_search_stream.setText('Поиск потока')
+        self.btn_search_stream.setStyleSheet('QPushButton { background-color: #007bff; font-weight: bold; }')
         self._search_thread = None
 
     def _on_stream_hooked(self, eeg_info: StreamInfo, pre_opened_inlet: StreamInlet):
-        """Обновление UI после подключения. Чтение уже запущено в StreamSearchThread до этого сигнала."""
         self.inlet = pre_opened_inlet
         try:
             full_info = self.inlet.info()
         except Exception:
             full_info = eeg_info
         self.n_channels = full_info.channel_count()
-        # LSLPullThread уже запущен в StreamSearchThread — не трогаем, только UI
-        if not (getattr(self, "_pull_thread", None) and self._pull_thread.isRunning()):
+        if not (getattr(self, '_pull_thread', None) and self._pull_thread.isRunning()):
             self._pull_stop[0] = False
             self._pull_queue = queue.Queue()
             self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
             self._pull_thread.start()
-            log.info("Фоновое чтение запущено из GUI (fallback).")
-
+            log.info('Фоновое чтение запущено из GUI (fallback).')
         self._search_thread.request_stop()
         self._on_search_thread_finished()
-
         self.sampling_rate = full_info.nominal_srate()
-        self.stream_name = full_info.name() or "EEG"
+        self.stream_name = full_info.name() or 'EEG'
         self._has_stream = True
-        # Имена каналов из метаданных потока LSL (desc/channels/channel)
         self.channel_names = get_channel_names(full_info, self.n_channels)
-
-        # Сохраняем начальный выбор каналов пользователя, если он уже что‑то выбрал
         old_checked = list(self.record_channel_checked) if self.record_channel_checked else []
-        self.record_channel_checked = [
-            (old_checked[i] if i < len(old_checked) else True)
-            for i in range(self.n_channels)
-        ]
+        self.record_channel_checked = [old_checked[i] if i < len(old_checked) else True for i in range(self.n_channels)]
         self.recording_buffer = [[] for _ in range(self.n_channels)]
-        self.setWindowTitle(f"LSL Validation — {self.stream_name}")
+        self.setWindowTitle(f'LSL Validation — {self.stream_name}')
         self._rebuild_record_checkboxes()
         self._show_recording_placeholder()
 
     def _show_recording_placeholder(self):
-        """Заглушка «запись идёт»: графики не строятся, сэмплы не теряются. Показать по кнопке."""
-        if getattr(self, "placeholder_widget", None):
+        if getattr(self, 'placeholder_widget', None):
             self.right_layout.removeWidget(self.placeholder_widget)
             self.placeholder_widget.setParent(None)
             self.placeholder_widget = None
@@ -1049,39 +793,30 @@ class HardwareValidationWindow(QMainWindow):
         pl_layout = QVBoxLayout(self.placeholder_widget)
         pl_layout.setAlignment(Qt.AlignCenter)
         pl_layout.setSpacing(24)
-        lbl = QLabel(
-            "Поток подключён. Запись идёт без потерь.\n"
-            "Нажмите «Показать графики» для отображения каналов."
-        )
+        lbl = QLabel('Поток подключён. Запись идёт без потерь.\nНажмите «Показать графики» для отображения каналов.')
         lbl.setAlignment(Qt.AlignCenter)
-        lbl.setStyleSheet("color: #5bc0be; font-size: 14px;")
+        lbl.setStyleSheet('color: #5bc0be; font-size: 14px;')
         lbl.setWordWrap(True)
         pl_layout.addWidget(lbl)
-        btn_show = QPushButton("Показать графики")
-        btn_show.setStyleSheet(
-            "QPushButton { background-color: #28a745; color: white; font-weight: bold; "
-            "padding: 12px 24px; border-radius: 6px; font-size: 14px; } "
-            "QPushButton:hover { background-color: #218838; }"
-        )
+        btn_show = QPushButton('Показать графики')
+        btn_show.setStyleSheet('QPushButton { background-color: #28a745; color: white; font-weight: bold; padding: 12px 24px; border-radius: 6px; font-size: 14px; } QPushButton:hover { background-color: #218838; }')
         btn_show.clicked.connect(self._delayed_ui_build)
         pl_layout.addWidget(btn_show, alignment=Qt.AlignCenter)
         self.right_layout.addWidget(self.placeholder_widget, stretch=1)
 
     def _delayed_ui_build(self):
-        """Строим тяжёлый UI по запросу пользователя (после нажатия «Показать графики»). Каналы и имена из LSL."""
         while self.cb_layout.count():
             item = self.cb_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self.checkboxes.clear()
-        for i, name in enumerate(self.channel_names):
-            cb = QCheckBox(f"[{i + 1}] {name}")
+        for (i, name) in enumerate(self.channel_names):
+            cb = QCheckBox(f'[{i + 1}] {name}')
             cb.setChecked(True)
             cb.stateChanged.connect(self._rebuild_grid)
             self.checkboxes.append(cb)
             self.cb_layout.addWidget(cb)
         self.cb_layout.addStretch()
-
         self._rebuild_record_checkboxes()
         self._build_stream_content()
         self._apply_x_window()
@@ -1091,10 +826,9 @@ class HardwareValidationWindow(QMainWindow):
         if not self.inlet:
             return
         try:
-            # Обрабатываем все чанки из очереди (накопленные фоновым потоком) — без потери начальных сэмплов
             while True:
                 try:
-                    chunk, timestamps = self._pull_queue.get_nowait()
+                    (chunk, timestamps) = self._pull_queue.get_nowait()
                 except queue.Empty:
                     break
                 if not chunk:
@@ -1102,28 +836,23 @@ class HardwareValidationWindow(QMainWindow):
                 arr = np.array(chunk)
                 if arr.shape[1] != self.n_channels and arr.shape[0] == self.n_channels:
                     arr = arr.T
-
                 self.sample_count += len(arr)
-                if hasattr(self, "samples_label") and self.samples_label:
-                    self.samples_label.setText(f"<b>Сэмплов:</b> {self.sample_count}")
-
+                if hasattr(self, 'samples_label') and self.samples_label:
+                    self.samples_label.setText(f'<b>Сэмплов:</b> {self.sample_count}')
                 for ch in range(self.n_channels):
                     self.channel_widgets[ch].push_chunk(arr[:, ch])
-
             auto_scale_enabled = self.cb_autoscale.isChecked()
             for cw in self.channel_widgets:
                 cw.update_plot(auto_scale_enabled)
-            # Показывать текущий масштаб в полях (при автомасштабе)
             if auto_scale_enabled and self.channel_widgets:
                 cw = next((c for c in self.channel_widgets if c.is_active), self.channel_widgets[0])
-                if hasattr(self, "spin_y_min") and hasattr(self, "spin_y_max"):
+                if hasattr(self, 'spin_y_min') and hasattr(self, 'spin_y_max'):
                     self.spin_y_min.blockSignals(True)
                     self.spin_y_max.blockSignals(True)
                     self.spin_y_min.setValue(cw.current_y_min)
                     self.spin_y_max.setValue(cw.current_y_max)
                     self.spin_y_min.blockSignals(False)
                     self.spin_y_max.blockSignals(False)
-
             now = time.time()
             if now - self.last_cov_time >= COV_UPDATE_INTERVAL:
                 self.last_cov_time = now
@@ -1138,64 +867,53 @@ class HardwareValidationWindow(QMainWindow):
     def _calculate_covariance(self):
         try:
             active_cws = [cw for cw in self.channel_widgets if cw.is_active]
-
             if len(active_cws) < 2:
                 return
-
             data_matrix = np.column_stack([cw.y_data for cw in active_cws])
             data_matrix = np.nan_to_num(data_matrix, nan=0.0, posinf=0.0, neginf=0.0)
             data_matrix = data_matrix - np.mean(data_matrix, axis=0)
             cov_matrix = np.cov(data_matrix.T)
-
             names = [cw.channel_name for cw in active_cws]
             n_active = len(names)
-
-            log.info(f"--- МАТРИЦА КОВАРИАЦИЙ ({n_active} активных, сэмплов: {self.sample_count}) ---")
+            log.info(f'--- МАТРИЦА КОВАРИАЦИЙ ({n_active} активных, сэмплов: {self.sample_count}) ---')
             col_w = 10
-            header = " " * col_w + "".join([f"{name[:col_w]:>{col_w}}" for name in names])
+            header = ' ' * col_w + ''.join([f'{name[:col_w]:>{col_w}}' for name in names])
             log.info(header)
-
             for i in range(n_active):
-                row_str = f"{names[i][:col_w]:>{col_w}}"
+                row_str = f'{names[i][:col_w]:>{col_w}}'
                 for j in range(n_active):
                     val = cov_matrix[i, j]
-                    if np.isnan(val) or np.isinf(val): val = 0.0
-                    row_str += f"{val:{col_w}.2f}"
+                    if np.isnan(val) or np.isinf(val):
+                        val = 0.0
+                    row_str += f'{val:{col_w}.2f}'
                 log.info(row_str)
-
             np.fill_diagonal(cov_matrix, 0)
             max_idx = np.unravel_index(np.argmax(np.abs(cov_matrix)), cov_matrix.shape)
             max_val = cov_matrix[max_idx]
-
-            ch1, ch2 = names[max_idx[0]], names[max_idx[1]]
-            log.info(f"Макс. наводка: {ch1} ↔ {ch2} = {max_val:.2f}\n")
+            (ch1, ch2) = (names[max_idx[0]], names[max_idx[1]])
+            log.info(f'Макс. наводка: {ch1} ↔ {ch2} = {max_val:.2f}\n')
         except Exception:
             pass
 
     def closeEvent(self, event):
-        """Остановить фоновый поток чтения LSL при закрытии окна."""
         self._pull_stop[0] = True
         if self._pull_thread is not None and self._pull_thread.isRunning():
             self._pull_thread.wait(2000)
         super().closeEvent(event)
 
-
 def select_stream_gui(streams: List[StreamInfo], parent=None):
     items = []
     for info in streams:
-        name = info.name() or "Unknown"
-        stype = info.type() or "EEG"
-        items.append(f"{name} (type={stype}, ch={info.channel_count()})")
-
-    item, ok = QInputDialog.getItem(parent, "Выбор LSL‑потока", "Выберите поток:", items, 0, False)
+        name = info.name() or 'Unknown'
+        stype = info.type() or 'EEG'
+        items.append(f'{name} (type={stype}, ch={info.channel_count()})')
+    (item, ok) = QInputDialog.getItem(parent, 'Выбор LSL‑потока', 'Выберите поток:', items, 0, False)
     return streams[items.index(item)] if ok else None
 
-
 def main():
-    log.info("=== СТАРТ АППАРАТНОЙ ВАЛИДАЦИИ ===")
+    log.info('=== СТАРТ АППАРАТНОЙ ВАЛИДАЦИИ ===')
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-
     inlet = None
     stream_info_light = None
     channel_names = None
@@ -1213,12 +931,9 @@ def main():
                 n_ch = full_info.channel_count()
                 channel_names = get_channel_names(full_info, n_ch)
     except Exception as e:
-        log.warning("Поток при старте не найден или ошибка: %s. Окно откроется без потока.", e)
-
+        log.warning('Поток при старте не найден или ошибка: %s. Окно откроется без потока.', e)
     window = HardwareValidationWindow(inlet=inlet, full_info=stream_info_light, channel_names=channel_names)
     window.show()
     sys.exit(app.exec_())
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
