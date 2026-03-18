@@ -34,6 +34,38 @@ pip install -r requirements.txt
   ```  
   Окно Qt отображает каналы ЭЭГ, позволяет менять масштаб X/Y и сохранять данные в `saved_data/`.
 
+## Сборка в исполняемый файл (exe/app)
+
+Для `scripts/hardware_validation.py` есть готовый spec-файл PyInstaller: `hardware_validation.spec`.
+
+- **Windows (exe)**
+
+  ```bash
+  py -3.10 -m venv .venv
+  .venv\Scripts\activate
+  pip install -r requirements.txt
+  pip install -r requirements-dev.txt
+
+  py -3.10 -m PyInstaller --clean --noconfirm hardware_validation.spec
+  # или:
+  py scripts\build_hardware_validation_exe.py
+  ```
+
+  Результат: `dist/hardware_validation/hardware_validation.exe`
+
+- **macOS/Linux (app/onefolder)**
+
+  ```bash
+  python3.10 -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+  pip install -r requirements-dev.txt
+
+  python -m PyInstaller --clean --noconfirm hardware_validation.spec
+  ```
+
+  Результат: `dist/hardware_validation/hardware_validation` (на macOS можно упаковать дальше в `.app`, если нужно).
+
 ## LSL‑потоки
 
 - Маркеры стимуляции: поток `BCI_StimMarkers`, тип `Markers`, формат `tile_id|event` (например `3|on`, `3|off`).
