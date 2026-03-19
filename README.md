@@ -43,10 +43,7 @@ pip install -r requirements.txt
    python run_hardware_validation.py
    ```
 
-## LSL‑потоки
-
-- Маркеры стимуляции: поток `BCI_StimMarkers`, тип `Markers`, формат `tile_id|event` (например `3|on`, `3|off`).
-- ЭЭГ: поток типа `EEG` или `Signal` от оборудования / симулятора.
+`run_app.py` и `run_hardware_validation.py` автоматически используют `.venv`, если он существует в корне проекта.
 
 ## Структура
 

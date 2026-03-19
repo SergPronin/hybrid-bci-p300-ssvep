@@ -1,0 +1,1791 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+app/
+  __init__.py
+  main.py
+core/
+  __init__.py
+  grid.py
+  lsl.py
+  stimulus_controller.py
+  tile.py
+gui/
+  __init__.py
+  gui.py
+scripts/
+  hardware_validation.py
+test/
+  __init__.py
+.gitignore
+bootstrap_env.py
+config.py
+create_source_archive.py
+LICENSE
+README.md
+requirements.txt
+run_app.py
+run_hardware_validation.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="create_source_archive.py">
+import argparse
+import fnmatch
+import os
+import tarfile
+from pathlib import Path
+
+
+DEFAULT_EXCLUDES = [
+    ".git",
+    ".idea",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "downloads",
+    "eggs",
+    "*.pyc",
+    "*.pyo",
+    "*.pyd",
+    "*.so",
+    "*.dll",
+    "*.dylib",
+    "*.log",
+    "saved_data",
+    ".DS_Store",
+]
+
+
+def _should_exclude(rel: str) -> bool:
+    rel = rel.replace(os.sep, "/")
+    for pat in DEFAULT_EXCLUDES:
+        if pat.startswith("*"):
+            if fnmatch.fnmatch(rel, pat):
+                return True
+        else:
+            if rel == pat or rel.startswith(pat + "/"):
+                return True
+    return False
+
+
+def _add_tar(tar: tarfile.TarFile, root: Path, rel_path: Path) -> None:
+    abs_path = root / rel_path
+    arcname = root.name + "/" + str(rel_path.as_posix())
+    tar.add(str(abs_path), arcname=arcname, recursive=False)
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parent
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", default=None, help="Path to archive (tar.gz).")
+    args = parser.parse_args()
+
+    out = args.out
+    if out is None:
+        out = str(root.parent / f"{root.name}_source.tar.gz")
+
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with tarfile.open(out_path, "w:gz") as tar:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dir_abs = Path(dirpath)
+            rel_dir = dir_abs.relative_to(root)
+
+            dirnames[:] = [
+                d for d in dirnames if not _should_exclude((rel_dir / d).as_posix())
+            ]
+            for name in filenames:
+                rel_file = (rel_dir / name)
+                if _should_exclude(rel_file.as_posix()):
+                    continue
+                _add_tar(tar, root, rel_file)
+
+    print(f"OK. Created: {out_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+</file>
+
+<file path="LICENSE">
+MIT License
+
+Copyright (c) 2025 Sergej Pronin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</file>
+
+<file path="run_app.py">
+import os
+import sys
+from pathlib import Path
+
+
+def _maybe_reexec_in_venv(root: Path) -> None:
+    venv_dir = root / ".venv"
+    vpy = venv_dir / "bin" / "python"
+    if not vpy.exists():
+        vpy = venv_dir / "Scripts" / "python.exe"
+    if not vpy.exists():
+        return
+
+    cur = Path(sys.executable).resolve()
+    target = vpy.resolve()
+    if cur == target:
+        return
+
+    # Re-run under venv Python so imports/dependencies match.
+    os.execv(str(target), [str(target), *sys.argv])
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parent
+    _maybe_reexec_in_venv(root)
+    os.chdir(root)
+    sys.path.insert(0, str(root))
+
+    from app.main import main as app_main
+
+    app_main()
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="run_hardware_validation.py">
+import os
+import runpy
+import sys
+from pathlib import Path
+
+
+def _maybe_reexec_in_venv(root: Path) -> None:
+    venv_dir = root / ".venv"
+    vpy = venv_dir / "bin" / "python"
+    if not vpy.exists():
+        vpy = venv_dir / "Scripts" / "python.exe"
+    if not vpy.exists():
+        return
+
+    cur = Path(sys.executable).resolve()
+    target = vpy.resolve()
+    if cur == target:
+        return
+
+    # Re-run under venv Python so imports/dependencies match.
+    os.execv(str(target), [str(target), *sys.argv])
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parent
+    _maybe_reexec_in_venv(root)
+    os.chdir(root)
+    sys.path.insert(0, str(root))
+
+    script = root / "scripts" / "hardware_validation.py"
+    runpy.run_path(str(script), run_name="__main__")
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="app/__init__.py">
+
+</file>
+
+<file path="core/__init__.py">
+from .grid import Grid
+from .lsl import LslMarkerSender
+from .stimulus_controller import StimulusController
+from .tile import Tile
+__all__ = ['Grid', 'LslMarkerSender', 'StimulusController', 'Tile']
+</file>
+
+<file path="core/lsl.py">
+from typing import Optional
+from pylsl import StreamInfo, StreamOutlet
+
+class LslMarkerSender:
+    STREAM_NAME = 'BCI_StimMarkers'
+    STREAM_TYPE = 'Markers'
+    SOURCE_ID = 'stimulus-controller-001'
+
+    def __init__(self) -> None:
+        self._outlet: Optional[StreamOutlet] = None
+        self._init_stream()
+
+    def _init_stream(self) -> None:
+        try:
+            info = StreamInfo(name=self.STREAM_NAME, type=self.STREAM_TYPE, channel_count=1, nominal_srate=0, channel_format='string', source_id=self.SOURCE_ID)
+            self._outlet = StreamOutlet(info)
+        except Exception as e:
+            print(f'LSL: не удалось создать стрим: {e}')
+            self._outlet = None
+
+    def send(self, tile_id: int, event: str) -> None:
+        if self._outlet is None:
+            return
+        marker = f'{tile_id}|{event}'
+        try:
+            self._outlet.push_sample([marker])
+        except Exception as e:
+            print(f'LSL: ошибка отправки маркера: {e}')
+</file>
+
+<file path="gui/__init__.py">
+from .gui import StimulusApp
+__all__ = ['StimulusApp']
+</file>
+
+<file path="test/__init__.py">
+
+</file>
+
+<file path="bootstrap_env.py">
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _run(cmd: list[str]) -> None:
+    subprocess.check_call(cmd)
+
+def _venv_python(venv_dir: Path) -> Path:
+    # macOS/Linux: <venv>/bin/python
+    # Windows: <venv>/Scripts/python.exe
+    posix = venv_dir / "bin" / "python"
+    win = venv_dir / "Scripts" / "python.exe"
+    return win if win.exists() else posix
+
+
+def _which_or_none(exe: str) -> str | None:
+    resolved = shutil.which(exe)
+    return resolved
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parent
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--venv-dir", default=str(root / ".venv"))
+    parser.add_argument("--requirements", default=str(root / "requirements.txt"))
+    parser.add_argument("--python", default="python3.10", help="Python interpreter to use for venv (default: python3.10).")
+    parser.add_argument("--no-install", action="store_true")
+    args = parser.parse_args()
+
+    venv_dir = Path(args.venv_dir)
+    requirements = Path(args.requirements)
+    python_exe = _which_or_none(args.python) or _which_or_none("python") or sys.executable
+
+    if not requirements.exists():
+        raise FileNotFoundError(f"requirements not found: {requirements}")
+
+    # Create venv using the requested interpreter (so dependency pins work).
+    if not _venv_python(venv_dir).exists():
+        if not _which_or_none(args.python):
+            print(
+                f"WARNING: requested interpreter '{args.python}' not found; falling back to '{python_exe}'.",
+                file=sys.stderr,
+            )
+        _run([python_exe, "-m", "venv", str(venv_dir)])
+
+    py = _venv_python(venv_dir)
+    if not args.no_install:
+        _run([str(py), "-m", "pip", "install", "-r", str(requirements)])
+
+    print("OK. If you want to run commands manually, activate the venv:")
+    print(f"  {venv_dir}/bin/activate  # macOS/Linux")
+    print(f"  {venv_dir}\\Scripts\\activate  # Windows")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+</file>
+
+<file path="core/grid.py">
+from typing import List
+from .tile import Tile
+
+class Grid:
+
+    def __init__(self, size: int=3):
+        self.size = size
+        self.tiles: List[Tile] = []
+        self._build()
+
+    def _build(self) -> None:
+        tile_id = 0
+        for row in range(self.size):
+            for col in range(self.size):
+                self.tiles.append(Tile(tile_id, row, col))
+                tile_id += 1
+
+    def reset(self) -> None:
+        for tile in self.tiles:
+            tile.active = False
+</file>
+
+<file path="core/tile.py">
+from dataclasses import dataclass
+
+@dataclass
+class Tile:
+    id: int
+    row: int
+    col: int
+    active: bool = False
+</file>
+
+<file path=".gitignore">
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual env
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# PsychoPy
+*.psyexp
+.psychopy3/
+
+# Environment
+.env
+.env.local
+*.log
+lsl_report_*.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Results data files (binary logs, pickled epochs)
+results/*.pkl
+scripts/results/*.pkl
+
+# Hardware validation saved EEG data
+saved_data/
+scripts/saved_data/
+</file>
+
+<file path="config.py">
+WINDOW_SIZE = (1200, 800)
+WINDOW_COLOR = 'black'
+GRID_SIZE = 3
+TILE_SIZE_PX = 120
+TILE_SPACING_PX = 20
+TILE_DEFAULT_COLOR = 'gray'
+TILE_LINE_COLOR = 'white'
+FLASH_COLORS = ['yellow', 'green', 'red', 'white']
+ISI_RANGE = (0.001, 5.0)
+FLASH_DURATION_RANGE = (0.01, 2.0)
+SLIDER_GRANULARITY = 0.01
+BUTTON_WIDTH = 150
+BUTTON_HEIGHT = 50
+START_BUTTON_POS = (-100, -250)
+STOP_BUTTON_POS = (100, -250)
+PANEL_FREQ_LABEL_POS = (450, 260)
+PANEL_FREQ_SLIDER_POS = (450, 200)
+PANEL_FREQ_VALUE_POS = (450, 180)
+PANEL_FLASH_LABEL_POS = (450, 140)
+PANEL_FLASH_SLIDER_POS = (450, 100)
+PANEL_FLASH_VALUE_POS = (450, 80)
+SLIDER_SIZE = (200, 20)
+TEXT_HEIGHT = 20
+SEQUENCES_RANGE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+DEFAULT_SEQUENCES = 10
+FLASH_COLOR = 'white'
+FIXATION_CROSS_COLOR = 'white'
+FIXATION_CROSS_SIZE = 20
+PANEL_SEQ_LABEL_POS = (450, 20)
+PANEL_SEQ_SLIDER_POS = (450, -20)
+PANEL_SEQ_VALUE_POS = (450, -40)
+CUE_DURATION = 2.0
+READY_DURATION = 1.5
+CUE_COLOR = 'blue'
+STIM_COLOR = 'white'
+</file>
+
+<file path="core/stimulus_controller.py">
+import random
+from typing import Dict, Optional, List
+from psychopy import core
+from .grid import Grid
+from .lsl import LslMarkerSender
+from .tile import Tile
+
+class StimulusController:
+
+    def __init__(self, grid: Grid, flash_duration: float=0.1, isi: float=0.05, cue_duration: float=2.0, ready_duration: float=1.5, cue_color: str='blue', stim_color: str='white') -> None:
+        self.grid = grid
+        self.flash_duration = flash_duration
+        self.isi = isi
+        self.cue_duration = cue_duration
+        self.ready_duration = ready_duration
+        self.cue_color = cue_color
+        self.stim_color = stim_color
+        self._clock = core.Clock()
+        self._state = 'idle'
+        self._state_start = 0.0
+        self._current_tile: Optional[Tile] = None
+        self._running = False
+        self._lsl = LslMarkerSender()
+        self.sequences: int = 0
+        self.target_tile: Optional[Tile] = None
+        self._blocks_completed: int = 0
+        self._current_block: List[int] = []
+        self._block_index: int = 0
+
+    @property
+    def lsl(self) -> LslMarkerSender:
+        return self._lsl
+
+    def get_target_id(self) -> Optional[int]:
+        return self.target_tile.id if self.target_tile else None
+
+    def get_target_color(self) -> Optional[str]:
+        if self._state == 'cue' and self.target_tile:
+            return self.cue_color
+        return None
+
+    def get_stim_color(self) -> str:
+        return self.stim_color
+
+    def is_running(self) -> bool:
+        return self._running
+
+    def start_experiment(self, sequences: int) -> None:
+        if sequences <= 0:
+            return
+        self.sequences = sequences
+        self._blocks_completed = 0
+        self.target_tile = random.choice(self.grid.tiles)
+        self._running = True
+        self._state = 'cue'
+        self._state_start = self._clock.getTime()
+        self.grid.reset()
+
+    def stop(self) -> None:
+        self._running = False
+        self.grid.reset()
+        self._state = 'idle'
+        self.target_tile = None
+        self._current_block = []
+        self._block_index = 0
+        if hasattr(self, '_substate'):
+            del self._substate
+
+    def _generate_next_block(self) -> None:
+        self._current_block = list(range(len(self.grid.tiles)))
+        random.shuffle(self._current_block)
+        self._block_index = 0
+
+    def update(self) -> Optional[Dict[str, object]]:
+        if not self._running:
+            return None
+        now = self._clock.getTime()
+        if self._state == 'cue':
+            if now - self._state_start >= self.cue_duration:
+                self._state = 'ready'
+                self._state_start = now
+                if self.target_tile:
+                    self.target_tile.active = False
+            else:
+                if self.target_tile and (not self.target_tile.active):
+                    self.target_tile.active = True
+                return None
+        if self._state == 'ready':
+            if now - self._state_start >= self.ready_duration:
+                self._state = 'stim'
+                self._state_start = now
+                self._generate_next_block()
+            return None
+        if self._state == 'stim':
+            if not hasattr(self, '_substate') or self._substate is None:
+                self._substate = 'isi'
+                self._substate_start = now
+            if self._substate == 'isi':
+                if now - self._substate_start >= self.isi:
+                    if self._block_index >= len(self._current_block):
+                        self._blocks_completed += 1
+                        if self._blocks_completed >= self.sequences:
+                            self._state = 'end'
+                            self._substate = None
+                            self._running = False
+                            self.grid.reset()
+                            return {'event': 'trial_end'}
+                        else:
+                            self._generate_next_block()
+                    if self._block_index < len(self._current_block):
+                        next_tile_id = self._current_block[self._block_index]
+                        self._block_index += 1
+                        self._current_tile = self.grid.tiles[next_tile_id]
+                        self._current_tile.active = True
+                        self._substate = 'on'
+                        self._substate_start = now
+                        return {'tile_id': self._current_tile.id, 'event': 'on', 'timestamp': now}
+            elif self._substate == 'on':
+                if now - self._substate_start >= self.flash_duration:
+                    self._current_tile.active = False
+                    self._substate = 'isi'
+                    self._substate_start = now
+                    return {'tile_id': self._current_tile.id, 'event': 'off', 'timestamp': now}
+            return None
+        if self._state == 'end':
+            self._state = 'idle'
+            self._running = False
+            return None
+        return None
+</file>
+
+<file path="gui/gui.py">
+import random
+from typing import Dict, Optional
+from psychopy import visual, core, event
+import config
+from core.grid import Grid
+from core.stimulus_controller import StimulusController
+
+class StimulusApp:
+
+    def __init__(self) -> None:
+        self.win = visual.Window(size=config.WINDOW_SIZE, color=config.WINDOW_COLOR, units='pix', fullscr=False)
+        self.grid = Grid(size=config.GRID_SIZE)
+        self.controller = StimulusController(self.grid, flash_duration=0.1, isi=0.05, cue_duration=2.0, ready_duration=1.5, cue_color='blue', stim_color='white')
+        self.show_controls = True
+        self._tiles_visual: list = []
+        self._active_colors: Dict[int, str] = {}
+        self._build_visual_grid()
+        self.start_button = visual.Rect(self.win, width=config.BUTTON_WIDTH, height=config.BUTTON_HEIGHT, pos=config.START_BUTTON_POS, fillColor='green')
+        self.stop_button = visual.Rect(self.win, width=config.BUTTON_WIDTH, height=config.BUTTON_HEIGHT, pos=config.STOP_BUTTON_POS, fillColor='red')
+        self.start_text = visual.TextStim(self.win, text='START', pos=config.START_BUTTON_POS, color='black')
+        self.stop_text = visual.TextStim(self.win, text='STOP', pos=config.STOP_BUTTON_POS, color='black')
+        self.mouse = event.Mouse(win=self.win)
+        self.freq_label = visual.TextStim(self.win, text='Интервал', pos=config.PANEL_FREQ_LABEL_POS, color='white', height=config.TEXT_HEIGHT)
+        self.freq_slider = visual.Slider(self.win, ticks=config.ISI_RANGE, labels=['Быстро', 'Медленно'], pos=config.PANEL_FREQ_SLIDER_POS, size=config.SLIDER_SIZE, granularity=config.SLIDER_GRANULARITY, style='slider', color='white')
+        self.freq_slider.markerPos = self.controller.isi
+        self.freq_value = visual.TextStim(self.win, text=f'{self.controller.isi:.2f}', pos=config.PANEL_FREQ_VALUE_POS, color='white', height=config.TEXT_HEIGHT)
+        self.flash_label = visual.TextStim(self.win, text='Длительность горения', pos=config.PANEL_FLASH_LABEL_POS, color='white', height=config.TEXT_HEIGHT)
+        self.flash_slider = visual.Slider(self.win, ticks=config.FLASH_DURATION_RANGE, labels=['Быстро', 'Долго'], pos=config.PANEL_FLASH_SLIDER_POS, size=config.SLIDER_SIZE, granularity=config.SLIDER_GRANULARITY, style='slider', color='white')
+        self.flash_slider.markerPos = self.controller.flash_duration
+        self.flash_value = visual.TextStim(self.win, text=f'{self.controller.flash_duration:.2f}', pos=config.PANEL_FLASH_VALUE_POS, color='white', height=config.TEXT_HEIGHT)
+        self.seq_label = visual.TextStim(self.win, text='Блоки', pos=config.PANEL_SEQ_LABEL_POS, color='white', height=config.TEXT_HEIGHT)
+        self.seq_slider = visual.Slider(self.win, ticks=config.SEQUENCES_RANGE, labels=['1', '20'], pos=config.PANEL_SEQ_SLIDER_POS, size=config.SLIDER_SIZE, granularity=1, style='slider', color='white')
+        self.seq_slider.markerPos = config.DEFAULT_SEQUENCES
+        self.seq_value = visual.TextStim(self.win, text=str(config.DEFAULT_SEQUENCES), pos=config.PANEL_SEQ_VALUE_POS, color='white', height=config.TEXT_HEIGHT)
+        self.fixation_cross = visual.ShapeStim(self.win, vertices=((0, -config.FIXATION_CROSS_SIZE / 2), (0, config.FIXATION_CROSS_SIZE / 2), (0, 0), (-config.FIXATION_CROSS_SIZE / 2, 0), (config.FIXATION_CROSS_SIZE / 2, 0)), closeShape=False, lineWidth=2, lineColor=config.FIXATION_CROSS_COLOR, pos=(0, 0))
+
+    def _build_visual_grid(self) -> None:
+        offset = (self.grid.size - 1) / 2
+        for tile in self.grid.tiles:
+            x = (tile.col - offset) * (config.TILE_SIZE_PX + config.TILE_SPACING_PX)
+            y = (offset - tile.row) * (config.TILE_SIZE_PX + config.TILE_SPACING_PX)
+            rect = visual.Rect(self.win, width=config.TILE_SIZE_PX, height=config.TILE_SIZE_PX, pos=(x, y), fillColor=config.TILE_DEFAULT_COLOR, lineColor=config.TILE_LINE_COLOR)
+            self._tiles_visual.append(rect)
+
+    def _draw(self) -> None:
+        for (tile, rect) in zip(self.grid.tiles, self._tiles_visual):
+            if tile.active:
+                if not self.show_controls:
+                    if self.controller.get_target_id() == tile.id and self.controller.get_target_color():
+                        rect.fillColor = self.controller.get_target_color()
+                    else:
+                        rect.fillColor = self.controller.get_stim_color()
+                else:
+                    rect.fillColor = config.TILE_DEFAULT_COLOR
+            else:
+                rect.fillColor = config.TILE_DEFAULT_COLOR
+            rect.draw()
+        if self.show_controls:
+            self.start_button.draw()
+            self.stop_button.draw()
+            self.start_text.draw()
+            self.stop_text.draw()
+            self.freq_label.draw()
+            self.freq_slider.draw()
+            self.freq_value.text = f'{self.controller.isi:.2f}'
+            self.freq_value.draw()
+            self.flash_label.draw()
+            self.flash_slider.draw()
+            self.flash_value.text = f'{self.controller.flash_duration:.2f}'
+            self.flash_value.draw()
+            self.seq_label.draw()
+            self.seq_slider.draw()
+            self.seq_value.text = str(int(self.seq_slider.getRating() or config.DEFAULT_SEQUENCES))
+            self.seq_value.draw()
+        else:
+            self.fixation_cross.draw()
+
+    def _handle_buttons(self) -> None:
+        if not self.show_controls:
+            return
+        if self.mouse.getPressed()[0]:
+            if self.mouse.isPressedIn(self.start_button):
+                new_isi = self.freq_slider.getRating()
+                if new_isi is not None:
+                    self.controller.isi = new_isi
+                new_flash = self.flash_slider.getRating()
+                if new_flash is not None:
+                    self.controller.flash_duration = new_flash
+                new_seq = self.seq_slider.getRating()
+                if new_seq is not None:
+                    sequences = int(new_seq)
+                else:
+                    sequences = config.DEFAULT_SEQUENCES
+                self.show_controls = False
+                self.controller.start_experiment(sequences)
+                core.wait(0.2)
+            if self.mouse.isPressedIn(self.stop_button):
+                self.controller.stop()
+                self.show_controls = True
+                core.wait(0.2)
+
+    def run(self) -> None:
+        while True:
+            self._handle_buttons()
+            if self.show_controls:
+                new_isi = self.freq_slider.getRating()
+                if new_isi is not None:
+                    self.controller.isi = new_isi
+                new_flash = self.flash_slider.getRating()
+                if new_flash is not None:
+                    self.controller.flash_duration = new_flash
+            event_data = self.controller.update()
+            if event_data:
+                if 'tile_id' in event_data:
+                    self.win.callOnFlip(self.controller.lsl.send, event_data['tile_id'], event_data['event'])
+                    print(event_data)
+                elif event_data.get('event') == 'trial_start':
+                    target = event_data.get('target')
+                    self.win.callOnFlip(self.controller.lsl.send, -1, f'trial_start|target={target}')
+                    print(f'TRIAL START: target={target}')
+                elif event_data.get('event') == 'trial_end':
+                    self.win.callOnFlip(self.controller.lsl.send, -2, 'trial_end')
+                    print('TRIAL END')
+                    self.controller.stop()
+                    self.show_controls = True
+            self._draw()
+            self.win.flip()
+            if 'escape' in event.getKeys():
+                break
+        self.controller.stop()
+        self.win.close()
+        core.quit()
+</file>
+
+<file path="requirements.txt">
+psychopy==2026.1.0
+pylsl
+numpy
+scipy
+pyqtgraph
+PyQt5
+</file>
+
+<file path="app/main.py">
+from gui.gui import StimulusApp
+
+def main() -> None:
+    app = StimulusApp()
+    app.run()
+if __name__ == '__main__':
+    main()
+</file>
+
+<file path="README.md">
+# Hybrid BCI P300-SSVEP
+
+Кросс‑платформенное приложение визуальной стимуляции для гибридного BCI (P300) с публикацией маркеров в LSL и отдельным GUI для валидации ЭЭГ.
+
+## Требования
+
+- Python 3.10 (PsychoPy не поддерживает 3.11+)
+- macOS / Linux / Windows
+
+## Установка
+
+```bash
+git clone <repository-url>
+cd hybrid-bci-p300-ssvep
+
+python3.10 -m venv .venv
+source .venv/bin/activate   # macOS/Linux
+# .venv\Scripts\activate    # Windows
+
+pip install -r requirements.txt
+```
+
+## Запуск
+
+- **Валидация аппаратуры ЭЭГ**  
+  ```bash
+  python scripts/hardware_validation.py
+  ```  
+  Окно Qt отображает каналы ЭЭГ, позволяет менять масштаб X/Y и сохранять данные в `saved_data/`.
+
+## Быстрый старт из архива
+
+1. Установите зависимости:
+   ```bash
+   python bootstrap_env.py
+   ```
+2. Запустите GUI:
+   ```bash
+   python run_app.py
+   ```
+3. Запустите валидацию ЭЭГ:
+   ```bash
+   python run_hardware_validation.py
+   ```
+
+`run_app.py` и `run_hardware_validation.py` автоматически используют `.venv`, если он существует в корне проекта.
+
+## Структура
+
+- `app/` — точка входа `main.py`.
+- `core/` — сетка плиток, контроллер стимуляции, отправка LSL‑маркеров.
+- `gui/` — GUI на PsychoPy.
+- `scripts/` — утилиты, в т.ч. `hardware_validation.py`.
+
+Лицензия: MIT (см. `LICENSE`).
+</file>
+
+<file path="scripts/hardware_validation.py">
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+import time
+import logging
+import queue
+import numpy as np
+from typing import Optional, List
+from datetime import datetime
+import os
+from pylsl import StreamInlet, StreamInfo, resolve_byprop
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QGroupBox, QInputDialog, QCheckBox, QPushButton, QScrollArea, QFrame, QFileDialog, QMessageBox, QDoubleSpinBox
+from PyQt5.QtCore import QTimer, Qt, QDateTime, QThread, pyqtSignal
+from PyQt5.QtGui import QFont
+import pyqtgraph as pg
+EEG_STREAM_TYPES = ('EEG', 'Signal')
+WINDOW_SEC = 0.2
+COV_UPDATE_INTERVAL = 10.0
+UPDATE_INTERVAL_MS = 50
+STATS_INTERVAL_MS = 500
+SAVE_INTERVAL_MS = 60000
+LSL_PULL_TIMEOUT_S = 0.01
+LSL_PULL_POLL_S = 0.002
+LSL_MAX_SAMPLES_PER_CHUNK = 8192
+LSL_MAX_BUFFERED_SEC = 600
+SIMULATOR_NAME = 'EEG_Simulator'
+SIMULATOR_SOURCE_ID = 'eeg-simulator-neurospectr'
+NEUROSPECTR_MARKER = 'neuro'
+DEFAULT_N_CHANNELS = 21
+DEFAULT_CHANNEL_NAMES = ['FP1-A1', 'FP2-A2', 'F3-A1', 'F4-A2', 'C3-A1', 'C4-A2', 'P3-A1', 'P4-A2', 'O1-A1', 'O2-A2', 'F7-A1', 'F8-A2', 'T3-A1', 'T4-A2', 'T5-A1', 'T6-A2', 'FPZ-A1', 'FZ-A2', 'CZ-A1', 'PZ-A2', 'OZ-A1']
+pg.setConfigOptions(useOpenGL=False, antialias=False, useCupy=False)
+
+def setup_logging():
+    logger = logging.getLogger('EEG_Validation')
+    logger.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s', datefmt='%H:%M:%S')
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    file_handler = logging.FileHandler('hardware_validation.log', mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    return logger
+log = setup_logging()
+
+def _is_allowed_stream(info: StreamInfo) -> bool:
+    try:
+        name = (info.name() or '').strip().lower()
+        sid = (info.source_id() or '').strip().lower()
+    except Exception:
+        return False
+    if name == SIMULATOR_NAME.lower() or SIMULATOR_SOURCE_ID in sid:
+        return True
+    if NEUROSPECTR_MARKER in name or NEUROSPECTR_MARKER in sid:
+        return True
+    return False
+
+def find_eeg_streams(timeout: float=3.0) -> List[StreamInfo]:
+    log.info('Поиск LSL потоков ЭЭГ...')
+    all_streams = []
+    for stream_type in EEG_STREAM_TYPES:
+        streams = resolve_byprop('type', stream_type, timeout=timeout)
+        all_streams.extend(streams)
+    allowed = [s for s in all_streams if _is_allowed_stream(s)]
+    log.info(f'Найдено подходящих потоков: {len(allowed)}')
+    return allowed
+
+class StreamSearchThread(QThread):
+    stream_hooked = pyqtSignal(object, object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._stop_requested = False
+
+    def request_stop(self):
+        self._stop_requested = True
+
+    def run(self):
+        self.setPriority(QThread.TimeCriticalPriority)
+        while not self._stop_requested:
+            try:
+                try:
+                    streams = resolve_byprop('type', 'EEG', minimum=1, timeout=0.1)
+                except TypeError:
+                    streams = resolve_byprop('type', 'EEG', timeout=0.1)
+                if not streams:
+                    try:
+                        streams = resolve_byprop('type', 'Signal', minimum=1, timeout=0.1)
+                    except TypeError:
+                        streams = resolve_byprop('type', 'Signal', timeout=0.1)
+                if streams:
+                    valid_stream = next((s for s in streams if _is_allowed_stream(s)), None)
+                    if valid_stream:
+                        try:
+                            try:
+                                inlet = StreamInlet(valid_stream, max_buffered=LSL_MAX_BUFFERED_SEC)
+                            except TypeError:
+                                inlet = StreamInlet(valid_stream)
+                            try:
+                                inlet.open_stream(timeout=1.0)
+                            except Exception:
+                                pass
+                            main_window = self.parent()
+                            if main_window is not None:
+                                main_window.inlet = inlet
+                                main_window.n_channels = valid_stream.channel_count()
+                                main_window._pull_stop[0] = False
+                                main_window._pull_queue = queue.Queue()
+                                main_window._pull_thread = LSLPullThread(main_window.inlet, main_window._pull_queue, main_window._pull_stop, main_window, main_window)
+                                main_window._pull_thread.start()
+                                log.info('Чтение LSL запущено в потоке поиска (до сигнала в GUI).')
+                            self.stream_hooked.emit(valid_stream, inlet)
+                            break
+                        except Exception as e:
+                            log.error(f'Ошибка мгновенного захвата: {e}')
+            except Exception:
+                pass
+
+class LSLPullThread(QThread):
+
+    def __init__(self, inlet: StreamInlet, chunk_queue: queue.Queue, stop_flag: List[bool], main_window, parent=None):
+        super().__init__(parent)
+        self.inlet = inlet
+        self.chunk_queue = chunk_queue
+        self._stop_flag = stop_flag
+        self.main_window = main_window
+
+    def run(self):
+        self.setPriority(QThread.TimeCriticalPriority)
+        while not self._stop_flag[0]:
+            try:
+                try:
+                    n = self.inlet.samples_available()
+                except Exception:
+                    n = 0
+                timeout = 0.0 if n > 0 else LSL_PULL_TIMEOUT_S
+                (chunk, timestamps) = self.inlet.pull_chunk(timeout=timeout, max_samples=LSL_MAX_SAMPLES_PER_CHUNK)
+                if chunk:
+                    self.chunk_queue.put((chunk, timestamps))
+                    if self.main_window.recording and self.main_window.n_channels > 0:
+                        n_ch = len(self.main_window.recording_buffer)
+                        if n_ch == 0:
+                            continue
+                        arr = np.array(chunk)
+                        if arr.shape[1] != self.main_window.n_channels and arr.shape[0] == self.main_window.n_channels:
+                            arr = arr.T
+                        n_record = min(n_ch, arr.shape[1])
+                        for ch in range(n_record):
+                            col = arr[:, ch].astype(np.float64)
+                            col = np.nan_to_num(col, nan=0.0, posinf=0.0, neginf=0.0)
+                            self.main_window.recording_buffer[ch].extend(col.tolist())
+                elif n == 0:
+                    time.sleep(LSL_PULL_POLL_S)
+            except Exception:
+                break
+
+def _create_inlet(info: StreamInfo) -> StreamInlet:
+    try:
+        inlet = StreamInlet(info, max_buffered=LSL_MAX_BUFFERED_SEC)
+    except TypeError:
+        inlet = StreamInlet(info)
+    try:
+        inlet.open_stream(timeout=1.0)
+    except Exception:
+        pass
+    return inlet
+
+def get_channel_names(info: StreamInfo, n_channels: int) -> List[str]:
+    xml_names: List[Optional[str]] = []
+    try:
+        desc = info.desc()
+        ch = desc.child('channels').child('channel') if desc is not None else None
+        while ch is not None and len(xml_names) < n_channels:
+            try:
+                name = ch.child_value('label') or ch.child_value('name') or ch.child_value('type')
+            except Exception:
+                name = None
+            if isinstance(name, str):
+                name = name.strip() or None
+            xml_names.append(name)
+            next_ch = ch.next_sibling()
+            if next_ch is None or next_ch is ch:
+                break
+            ch = next_ch
+    except Exception:
+        xml_names = []
+    result: List[str] = []
+    for i in range(n_channels):
+        name = xml_names[i] if i < len(xml_names) else None
+        if not name and i < len(DEFAULT_CHANNEL_NAMES):
+            name = DEFAULT_CHANNEL_NAMES[i]
+        if not name:
+            name = f'Ch {i + 1}'
+        result.append(name)
+    return result
+
+class ChannelWidget(QFrame):
+
+    def __init__(self, channel_id: int, channel_name: str, sampling_rate: float):
+        super().__init__()
+        self.channel_id = channel_id
+        self.channel_name = channel_name
+        self.sampling_rate = sampling_rate
+        self.buffer_size = int(WINDOW_SEC * sampling_rate)
+        self.y_data = np.zeros(self.buffer_size, dtype=np.float32)
+        self.x_data = np.linspace(-WINDOW_SEC, 0, self.buffer_size, dtype=np.float32)
+        self.filled = 0
+        self.full_data = []
+        self.current_y_min = -10.0
+        self.current_y_max = 10.0
+        self.is_active = True
+        self._setup_ui()
+
+    def _setup_ui(self):
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet('QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 4px; }')
+        layout = QVBoxLayout()
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(1)
+        header = QLabel(f'[{self.channel_id + 1}] {self.channel_name}')
+        header.setFont(QFont('Arial', 8, QFont.Bold))
+        header.setStyleSheet('color: white; background-color: transparent; border: none; padding: 2px;')
+        layout.addWidget(header)
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setDownsampling(mode=None)
+        self.plot_widget.setClipToView(True)
+        self.plot_widget.setMouseEnabled(x=False, y=True)
+        self.plot_widget.setMenuEnabled(True)
+        self.plot_widget.getViewBox().setLimits(yMin=-1000000, yMax=1000000)
+        self.plot_widget.setLabel('left', 'мкВ', color='white', fontsize=6)
+        self.plot_widget.setBackground('#000000')
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
+        self.plot_widget.setMinimumHeight(80)
+        self.plot_widget.setXRange(-WINDOW_SEC, 0, padding=0)
+        colors = pg.intColor(self.channel_id, hues=15, values=1, maxValue=255, minValue=150)
+        self.signal_line = self.plot_widget.plot(self.x_data, self.y_data, pen=pg.mkPen(colors, width=1.0), autoDownsample=False)
+        layout.addWidget(self.plot_widget)
+        self.stats_label = QLabel('Ожидание...')
+        self.stats_label.setFont(QFont('Courier', 7))
+        self.stats_label.setStyleSheet('color: #a8ff9e; background-color: transparent; border: none;')
+        layout.addWidget(self.stats_label)
+        self.setLayout(layout)
+
+    def push_chunk(self, new_data: np.ndarray):
+        if not self.is_active:
+            return
+        n = len(new_data)
+        if n == 0:
+            return
+        try:
+            clean_data = np.nan_to_num(new_data, nan=0.0, posinf=0.0, neginf=0.0)
+            clean_data = np.clip(clean_data, -250000.0, 250000.0)
+            self.full_data.extend(clean_data.tolist())
+        except Exception:
+            clean_data = np.zeros(n, dtype=np.float32)
+        self.filled = min(self.buffer_size, self.filled + n)
+        if n >= self.buffer_size:
+            self.y_data[:] = clean_data[-self.buffer_size:]
+        else:
+            self.y_data[:-n] = self.y_data[n:]
+            self.y_data[-n:] = clean_data
+
+    def clear_saved_data(self):
+        self.full_data = []
+        log.info(f'Канал {self.channel_name}: данные очищены')
+
+    def update_plot(self, auto_scale: bool):
+        if not self.is_active or self.filled == 0 or (not self.isVisible()):
+            return
+        try:
+            self.signal_line.setData(self.x_data, self.y_data, skipFiniteCheck=True)
+            if auto_scale:
+                (y_min, y_max) = (float(np.min(self.y_data)), float(np.max(self.y_data)))
+                span = y_max - y_min
+                if span < 20.0:
+                    center = (y_max + y_min) / 2.0
+                    (target_min, target_max) = (center - 10.0, center + 10.0)
+                else:
+                    margin = span * 0.15
+                    (target_min, target_max) = (y_min - margin, y_max + margin)
+                if abs(target_min - self.current_y_min) > 2.0 or abs(target_max - self.current_y_max) > 2.0:
+                    (self.current_y_min, self.current_y_max) = (target_min, target_max)
+                    self.plot_widget.setYRange(self.current_y_min, self.current_y_max, padding=0, update=False)
+        except Exception:
+            pass
+
+    def set_y_range(self, y_min: float, y_max: float):
+        if y_min >= y_max:
+            return
+        self.current_y_min = float(y_min)
+        self.current_y_max = float(y_max)
+        self.plot_widget.setYRange(self.current_y_min, self.current_y_max, padding=0, update=False)
+
+    def set_time_window(self, sec: float):
+        if sec <= 0:
+            return
+        new_size = max(1, int(sec * self.sampling_rate))
+        old_size = len(self.y_data)
+        new_y = np.zeros(new_size, dtype=np.float32)
+        if new_size <= old_size:
+            new_y[:] = self.y_data[-new_size:]
+        else:
+            new_y[-old_size:] = self.y_data[:]
+        self.y_data = new_y
+        self.x_data = np.linspace(-sec, 0, new_size, dtype=np.float32)
+        self.buffer_size = new_size
+        self.filled = min(self.filled, new_size)
+        self.plot_widget.setXRange(-sec, 0, padding=0)
+
+    def update_stats(self):
+        if not self.is_active or self.filled < 10 or (not self.isVisible()):
+            return
+        try:
+            data = self.y_data[-self.filled:]
+            (mean_val, std_val) = (float(np.mean(data)), float(np.std(data)))
+            rms_val = float(np.sqrt(np.mean(data ** 2)))
+            p2p = float(np.max(data) - np.min(data))
+            if p2p > 200000:
+                self.stats_label.setStyleSheet('color: #ff4d4d; font-weight: bold; border: none;')
+                self.stats_label.setText('ОШИБКА КОНТАКТА')
+            else:
+                self.stats_label.setStyleSheet('color: #a8ff9e; border: none;')
+                self.stats_label.setText(f'Mean:{mean_val:6.1f} | STD:{std_val:6.1f} | RMS:{rms_val:6.1f} | P2P:{p2p:6.1f}')
+        except Exception:
+            pass
+
+class HardwareValidationWindow(QMainWindow):
+
+    def __init__(self, inlet: Optional[StreamInlet]=None, full_info: Optional[StreamInfo]=None, channel_names: Optional[List[str]]=None):
+        super().__init__()
+        self.inlet = inlet
+        if full_info is not None:
+            self.stream_name = full_info.name() or 'EEG'
+            self.n_channels = full_info.channel_count()
+            self.channel_names = channel_names or get_channel_names(full_info, self.n_channels)
+            self.sampling_rate = full_info.nominal_srate()
+            self._has_stream = inlet is not None
+        else:
+            self.stream_name = '—'
+            self.n_channels = DEFAULT_N_CHANNELS
+            self.channel_names = channel_names or list(DEFAULT_CHANNEL_NAMES)
+            self.sampling_rate = 0
+            self._has_stream = False
+        self.channel_widgets: List[ChannelWidget] = []
+        self.checkboxes: List[QCheckBox] = []
+        self.info_panel: Optional[QWidget] = None
+        self.grid_widget: Optional[QWidget] = None
+        self.placeholder_widget: Optional[QWidget] = None
+        self.start_time = time.time()
+        self.last_cov_time = self.start_time
+        self.sample_count = 0
+        self.recording = False
+        self.save_folder = 'saved_data'
+        n_ch = self.n_channels
+        self.record_channel_checked = [True] * n_ch if n_ch else []
+        self.record_checkboxes = []
+        self.recording_buffer = [[] for _ in range(n_ch)] if n_ch else []
+        if not os.path.exists(self.save_folder):
+            os.makedirs(self.save_folder)
+        self._search_thread: Optional[StreamSearchThread] = None
+        self._searching = False
+        self._pull_queue: queue.Queue = queue.Queue()
+        self._pull_stop: List[bool] = [False]
+        self._pull_thread: Optional[LSLPullThread] = None
+        self._setup_ui()
+        if self._has_stream:
+            self._setup_timers()
+            self._pull_stop[0] = False
+            self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
+            self._pull_thread.start()
+            log.info('GUI готово. Режим DYNAMIC GRID активирован. Фоновое чтение LSL запущено.')
+        else:
+            log.info('GUI готово. Поток не подключён — нажмите «Поиск потока».')
+
+    def _setup_ui(self):
+        self.setWindowTitle(f'LSL Validation — {self.stream_name}')
+        self.setStyleSheet('\n            QMainWindow { background-color: #0a0a0a; color: white; }\n            QLabel { color: white; }\n            QCheckBox { color: white; spacing: 5px; font-size: 13px; }\n            QCheckBox::indicator { width: 16px; height: 16px; }\n            QPushButton { background-color: #333; color: white; border-radius: 3px; padding: 5px; }\n            QPushButton:hover { background-color: #444; }\n        ')
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        sidebar = QWidget()
+        sidebar.setFixedWidth(200)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        self.btn_search_stream = QPushButton('Поиск потока')
+        self.btn_search_stream.setStyleSheet('QPushButton { background-color: #007bff; font-weight: bold; }')
+        self.btn_search_stream.clicked.connect(self._on_search_or_stop_stream)
+        sidebar_layout.addWidget(self.btn_search_stream)
+        self.cb_autoscale = QCheckBox('Автомасштаб Y')
+        self.cb_autoscale.setChecked(True)
+        self.cb_autoscale.setStyleSheet('QCheckBox { color: #5bc0be; font-weight: bold; margin-bottom: 10px; }')
+        sidebar_layout.addWidget(self.cb_autoscale)
+        scale_group = QGroupBox('Масштаб Y (мкВ)')
+        scale_group.setStyleSheet('QGroupBox { color: white; margin-top: 6px; } QDoubleSpinBox { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; padding: 4px; min-width: 72px; selection-background-color: #007bff; } QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { background-color: #3d3d3d; border: none; } QLabel { color: #ccc; }')
+        scale_layout = QVBoxLayout()
+        scale_row = QHBoxLayout()
+        scale_row.addWidget(QLabel('Мин:'))
+        self.spin_y_min = QDoubleSpinBox()
+        self.spin_y_min.setRange(-500000, 500000)
+        self.spin_y_min.setValue(-100)
+        self.spin_y_min.setDecimals(1)
+        self.spin_y_min.setSingleStep(10)
+        self.spin_y_min.valueChanged.connect(self._apply_manual_scale)
+        scale_row.addWidget(self.spin_y_min)
+        scale_layout.addLayout(scale_row)
+        scale_row2 = QHBoxLayout()
+        scale_row2.addWidget(QLabel('Макс:'))
+        self.spin_y_max = QDoubleSpinBox()
+        self.spin_y_max.setRange(-500000, 500000)
+        self.spin_y_max.setValue(100)
+        self.spin_y_max.setDecimals(1)
+        self.spin_y_max.setSingleStep(10)
+        self.spin_y_max.valueChanged.connect(self._apply_manual_scale)
+        scale_row2.addWidget(self.spin_y_max)
+        scale_layout.addLayout(scale_row2)
+        scale_group.setLayout(scale_layout)
+        sidebar_layout.addWidget(scale_group)
+        scale_x_group = QGroupBox('Масштаб X (с)')
+        scale_x_group.setStyleSheet('QGroupBox { color: white; margin-top: 6px; } QDoubleSpinBox { background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; padding: 4px; min-width: 72px; selection-background-color: #007bff; } QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { background-color: #3d3d3d; border: none; } QLabel { color: #ccc; }')
+        scale_x_layout = QVBoxLayout()
+        scale_x_row = QHBoxLayout()
+        scale_x_row.addWidget(QLabel('Окно:'))
+        self.spin_x_window = QDoubleSpinBox()
+        self.spin_x_window.setRange(0.05, 60.0)
+        self.spin_x_window.setValue(WINDOW_SEC)
+        self.spin_x_window.setDecimals(2)
+        self.spin_x_window.setSingleStep(0.1)
+        self.spin_x_window.setSuffix(' с')
+        self.spin_x_window.valueChanged.connect(self._apply_x_window)
+        scale_x_row.addWidget(self.spin_x_window)
+        scale_x_layout.addLayout(scale_x_row)
+        scale_x_group.setLayout(scale_x_layout)
+        sidebar_layout.addWidget(scale_x_group)
+        record_channels_group = QGroupBox('Каналы для записи')
+        record_channels_group.setStyleSheet('QGroupBox { color: #5bc0be; margin-top: 10px; font-weight: bold; }')
+        record_channels_layout = QVBoxLayout()
+        record_btn_row = QHBoxLayout()
+        btn_record_all = QPushButton('Все')
+        btn_record_none = QPushButton('Сброс')
+        btn_record_all.clicked.connect(self._set_all_record_channels)
+        btn_record_none.clicked.connect(lambda : self._set_all_record_channels(False))
+        record_btn_row.addWidget(btn_record_all)
+        record_btn_row.addWidget(btn_record_none)
+        record_channels_layout.addLayout(record_btn_row)
+        scroll_record = QScrollArea()
+        scroll_record.setWidgetResizable(True)
+        scroll_record.setMaximumHeight(180)
+        scroll_record.setStyleSheet('QScrollArea { border: none; background-color: transparent; }')
+        record_cb_container = QWidget()
+        record_cb_container.setStyleSheet('background-color: transparent;')
+        self.record_cb_layout = QVBoxLayout(record_cb_container)
+        self.record_cb_layout.setSpacing(2)
+        self._rebuild_record_checkboxes()
+        scroll_record.setWidget(record_cb_container)
+        record_channels_layout.addWidget(scroll_record)
+        record_channels_group.setLayout(record_channels_layout)
+        sidebar_layout.addWidget(record_channels_group)
+        save_group = QGroupBox('Сохранение данных')
+        save_group.setStyleSheet('QGroupBox { color: white; margin-top: 10px; }')
+        save_layout = QVBoxLayout()
+        self.btn_record = QPushButton('Начать запись')
+        self.btn_record.setStyleSheet('QPushButton { background-color: #28a745; font-weight: bold; }')
+        self.btn_record.clicked.connect(self.toggle_recording)
+        save_layout.addWidget(self.btn_record)
+        self.btn_save = QPushButton('Сохранить в файл')
+        self.btn_save.setStyleSheet('QPushButton { background-color: #007bff; }')
+        self.btn_save.clicked.connect(self.save_data_to_file)
+        save_layout.addWidget(self.btn_save)
+        self.btn_clear = QPushButton('Очистить буфер записи')
+        self.btn_clear.setStyleSheet('QPushButton { background-color: #dc3545; }')
+        self.btn_clear.clicked.connect(self.clear_saved_data)
+        save_layout.addWidget(self.btn_clear)
+        self.recording_label = QLabel('Запись остановлена')
+        self.recording_label.setStyleSheet('color: #dc3545; font-weight: bold;')
+        save_layout.addWidget(self.recording_label)
+        save_group.setLayout(save_layout)
+        sidebar_layout.addWidget(save_group)
+        lbl = QLabel('ОТОБРАЖЕНИЕ:')
+        lbl.setFont(QFont('Arial', 10, QFont.Bold))
+        sidebar_layout.addWidget(lbl)
+        btn_layout = QHBoxLayout()
+        btn_all = QPushButton('Все')
+        btn_all.clicked.connect(lambda : self._set_all_channels(True))
+        btn_none = QPushButton('Сброс')
+        btn_none.clicked.connect(lambda : self._set_all_channels(False))
+        btn_layout.addWidget(btn_all)
+        btn_layout.addWidget(btn_none)
+        sidebar_layout.addLayout(btn_layout)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet('QScrollArea { border: none; background-color: transparent; }')
+        cb_container = QWidget()
+        cb_container.setStyleSheet('background-color: transparent;')
+        self.cb_layout = QVBoxLayout(cb_container)
+        self.cb_layout.setSpacing(6)
+        for (i, name) in enumerate(self.channel_names):
+            cb = QCheckBox(f'[{i + 1}] {name}')
+            cb.setChecked(True)
+            cb.stateChanged.connect(self._rebuild_grid)
+            self.checkboxes.append(cb)
+            self.cb_layout.addWidget(cb)
+        self.cb_layout.addStretch()
+        scroll.setWidget(cb_container)
+        sidebar_layout.addWidget(scroll)
+        self.right_panel = QWidget()
+        self.right_layout = QVBoxLayout(self.right_panel)
+        self.right_layout.setContentsMargins(0, 0, 0, 0)
+        if self._has_stream:
+            self._build_stream_content()
+        else:
+            self._build_placeholder()
+        main_layout.addWidget(sidebar)
+        main_layout.addWidget(self.right_panel, stretch=1)
+        self.resize(1600, 1000)
+
+    def _build_placeholder(self):
+        self.placeholder_widget = QWidget()
+        pl_layout = QVBoxLayout(self.placeholder_widget)
+        pl_layout.setAlignment(Qt.AlignCenter)
+        pl_layout.setSpacing(20)
+        lbl = QLabel('Поток ЭЭГ не подключён.\nЗапустите нейроспектр или симулятор и нажмите «Поиск потока» в боковой панели.')
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet('color: #888; font-size: 14px;')
+        lbl.setWordWrap(True)
+        pl_layout.addWidget(lbl)
+        self.right_layout.addWidget(self.placeholder_widget, stretch=1)
+
+    def _build_stream_content(self):
+        if self.placeholder_widget:
+            self.right_layout.removeWidget(self.placeholder_widget)
+            self.placeholder_widget.setParent(None)
+            self.placeholder_widget = None
+        self.info_panel = QHBoxLayout()
+        self.info_panel.addWidget(QLabel(f'<b>Поток:</b> {self.stream_name}'))
+        self.info_panel.addWidget(QLabel(f'<b>Частота:</b> {self.sampling_rate} Гц'))
+        self.samples_label = QLabel(f'<b>Сэмплов:</b> {self.sample_count}')
+        self.info_panel.addWidget(self.samples_label)
+        self.info_panel.addStretch()
+        self.right_layout.addLayout(self.info_panel)
+        self.grid_widget = QWidget()
+        self.grid_layout = QGridLayout(self.grid_widget)
+        self.grid_layout.setSpacing(4)
+        self.grid_layout.setContentsMargins(0, 0, 0, 0)
+        for ch in range(self.n_channels):
+            cw = ChannelWidget(ch, self.channel_names[ch], self.sampling_rate)
+            self.channel_widgets.append(cw)
+        self.right_layout.addWidget(self.grid_widget, stretch=1)
+        self._rebuild_grid()
+
+    def toggle_recording(self):
+        self.recording = not self.recording
+        if self.recording:
+            self.btn_record.setText('Остановить запись')
+            self.btn_record.setStyleSheet('QPushButton { background-color: #dc3545; font-weight: bold; }')
+            self.recording_label.setText('ИДЕТ ЗАПИСЬ')
+            self.recording_label.setStyleSheet('color: #28a745; font-weight: bold;')
+            log.info('Начало непрерывной записи данных')
+        else:
+            self.btn_record.setText('Начать запись')
+            self.btn_record.setStyleSheet('QPushButton { background-color: #28a745; font-weight: bold; }')
+            self.recording_label.setText('Запись остановлена')
+            self.recording_label.setStyleSheet('color: #dc3545; font-weight: bold;')
+            log.info('Остановка записи данных')
+
+    def save_data_to_file(self):
+        try:
+            channels_to_save = [i for i in range(len(self.record_channel_checked)) if self.record_channel_checked[i]]
+            if not channels_to_save:
+                QMessageBox.warning(self, 'Нет каналов', 'Выберите хотя бы один канал для записи в блоке «Каналы для записи».')
+                return
+            max_len = max((len(self.recording_buffer[i]) for i in channels_to_save))
+            if max_len == 0:
+                QMessageBox.warning(self, 'Нет данных', 'Буфер записи пуст. Запустите запись и дождитесь поступления данных.')
+                return
+            dt = datetime.now()
+            timestamp = dt.strftime('%Y-%m-%d_%H-%M-%S')
+            default_name = os.path.join(self.save_folder, f'eeg_{timestamp}.csv')
+            options = QFileDialog.Options()
+            (file_path, _) = QFileDialog.getSaveFileName(self, 'Сохранить запись ЭЭГ', default_name, 'CSV (*.csv);;Текстовый файл (*.txt);;Все файлы (*.*)', options=options)
+            if not file_path:
+                return
+            self._write_recording_buffer_to_file(file_path, channels_to_save, max_len)
+            srate = self.sampling_rate if self._has_stream else 0
+            log.info(f'Запись сохранена: {file_path}, каналы по порядку, sampling_rate={srate}')
+            QMessageBox.information(self, 'Успех', f'Данные сохранены:\n{file_path}\n\nКаналы по порядку, точность 3 знака. Частота дискретизации: {srate} Гц.')
+        except Exception as e:
+            log.error(f'Ошибка при сохранении данных: {e}')
+            QMessageBox.critical(self, 'Ошибка', f'Не удалось сохранить данные:\n{str(e)}')
+
+    def clear_saved_data(self):
+        reply = QMessageBox.question(self, 'Очистка буфера записи', 'Очистить буфер записи (и данные по каналам отображения)?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            for i in range(len(self.recording_buffer)):
+                self.recording_buffer[i] = []
+            for cw in self.channel_widgets:
+                cw.clear_saved_data()
+            log.info('Буфер записи и данные каналов очищены')
+            QMessageBox.information(self, 'Готово', 'Буфер записи очищен')
+
+    def _apply_manual_scale(self):
+        if not self._has_stream or not self.channel_widgets:
+            return
+        y_min = self.spin_y_min.value()
+        y_max = self.spin_y_max.value()
+        if y_min >= y_max:
+            return
+        self.cb_autoscale.setChecked(False)
+        for cw in self.channel_widgets:
+            cw.set_y_range(y_min, y_max)
+
+    def _apply_x_window(self):
+        if not self._has_stream or not self.channel_widgets:
+            return
+        sec = self.spin_x_window.value()
+        if sec <= 0:
+            return
+        for cw in self.channel_widgets:
+            cw.set_time_window(sec)
+
+    def _set_all_record_channels(self, checked: bool=True):
+        for (i, cb) in enumerate(self.record_checkboxes):
+            cb.blockSignals(True)
+            cb.setChecked(checked)
+            cb.blockSignals(False)
+            if i < len(self.record_channel_checked):
+                self.record_channel_checked[i] = checked
+
+    def _rebuild_record_checkboxes(self):
+        while self.record_cb_layout.count():
+            item = self.record_cb_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.record_checkboxes.clear()
+        for i in range(len(self.channel_names)):
+            name = self.channel_names[i]
+            cb = QCheckBox(f'[{i + 1}] {name}')
+            cb.setChecked(i < len(self.record_channel_checked) and self.record_channel_checked[i])
+            cb.setProperty('channel_index', i)
+            cb.stateChanged.connect(lambda state, idx=i: self._on_record_channel_toggled(idx, state))
+            self.record_checkboxes.append(cb)
+            self.record_cb_layout.addWidget(cb)
+        if not self.channel_names:
+            lbl = QLabel('Подключите поток для выбора каналов')
+            lbl.setStyleSheet('color: #888; font-size: 11px;')
+            self.record_cb_layout.addWidget(lbl)
+        self.record_cb_layout.addStretch()
+
+    def _on_record_channel_toggled(self, idx: int, state: int):
+        if idx < len(self.record_channel_checked):
+            self.record_channel_checked[idx] = bool(state)
+
+    def _set_all_channels(self, state: bool):
+        for cb in self.checkboxes:
+            cb.blockSignals(True)
+            cb.setChecked(state)
+            cb.blockSignals(False)
+        self._rebuild_grid()
+
+    def _rebuild_grid(self):
+        if not self._has_stream or not self.channel_widgets:
+            return
+        for cw in self.channel_widgets:
+            self.grid_layout.removeWidget(cw)
+            cw.setVisible(False)
+            cw.is_active = False
+        active_indices = [i for (i, cb) in enumerate(self.checkboxes) if cb.isChecked()]
+        n_active = len(active_indices)
+        if n_active == 0:
+            return
+        n_cols = 1 if n_active == 1 else 2 if n_active <= 4 else 3
+        for (grid_idx, ch_idx) in enumerate(active_indices):
+            cw = self.channel_widgets[ch_idx]
+            cw.is_active = True
+            cw.setVisible(True)
+            (row, col) = (grid_idx // n_cols, grid_idx % n_cols)
+            self.grid_layout.addWidget(cw, row, col)
+
+    def _setup_timers(self):
+        self.plot_timer = QTimer()
+        self.plot_timer.setTimerType(Qt.PreciseTimer)
+        self.plot_timer.timeout.connect(self._pull_and_plot)
+        self.plot_timer.start(UPDATE_INTERVAL_MS)
+        self.stats_timer = QTimer()
+        self.stats_timer.timeout.connect(self._update_text_stats)
+        self.stats_timer.start(STATS_INTERVAL_MS)
+        self.save_timer = QTimer()
+        self.save_timer.timeout.connect(self._auto_save)
+        self.save_timer.start(SAVE_INTERVAL_MS)
+
+    def _auto_save(self):
+        if not self.recording:
+            return
+        channels_to_save = [i for i in range(len(self.record_channel_checked)) if self.record_channel_checked[i]]
+        if not channels_to_save:
+            return
+        max_len = max((len(self.recording_buffer[i]) for i in channels_to_save))
+        if max_len == 0:
+            return
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        filepath = os.path.join(self.save_folder, f'eeg_{timestamp}.csv')
+        self._write_recording_buffer_to_file(filepath, channels_to_save, max_len)
+        log.info(f'Автосохранение: {filepath}')
+
+    def _write_recording_buffer_to_file(self, filepath: str, channels_to_save: List[int], max_len: int):
+        try:
+            srate = self.sampling_rate if self._has_stream else 0
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f'# sampling_rate={srate}\n')
+                header_names = [self.channel_names[i] if i < len(self.channel_names) else f'Ch{i + 1}' for i in channels_to_save]
+                f.write(','.join(header_names) + '\n')
+                for row_idx in range(max_len):
+                    row_vals = []
+                    for ch in channels_to_save:
+                        buf = self.recording_buffer[ch]
+                        val = buf[row_idx] if row_idx < len(buf) else 0.0
+                        row_vals.append(f'{val:.3f}'.replace('.', ','))
+                    f.write(' '.join(row_vals) + '\n')
+        except Exception as e:
+            log.error(f'Ошибка записи в файл: {e}')
+
+    def _on_search_or_stop_stream(self):
+        if self._searching:
+            self._stop_stream_search()
+            return
+        self._start_stream_search()
+
+    def _start_stream_search(self):
+        if self._search_thread is not None and self._search_thread.isRunning():
+            return
+        self._searching = True
+        self.btn_search_stream.setText('Остановить поиск')
+        self.btn_search_stream.setStyleSheet('QPushButton { background-color: #dc3545; font-weight: bold; }')
+        self._search_thread = StreamSearchThread(self)
+        self._search_thread.stream_hooked.connect(self._on_stream_hooked)
+        self._search_thread.finished.connect(self._on_search_thread_finished)
+        self._search_thread.start()
+        log.info('Поиск потока запущен (остановить — кнопкой «Остановить поиск»).')
+
+    def _stop_stream_search(self):
+        self._searching = False
+        if self._search_thread is not None and self._search_thread.isRunning():
+            self._search_thread.request_stop()
+            self._search_thread.wait(5000)
+        self._search_thread = None
+        self.btn_search_stream.setText('Поиск потока')
+        self.btn_search_stream.setStyleSheet('QPushButton { background-color: #007bff; font-weight: bold; }')
+        log.info('Поиск потока остановлен.')
+
+    def _on_search_thread_finished(self):
+        if not self._searching:
+            return
+        self._searching = False
+        self.btn_search_stream.setText('Поиск потока')
+        self.btn_search_stream.setStyleSheet('QPushButton { background-color: #007bff; font-weight: bold; }')
+        self._search_thread = None
+
+    def _on_stream_hooked(self, eeg_info: StreamInfo, pre_opened_inlet: StreamInlet):
+        self.inlet = pre_opened_inlet
+        try:
+            full_info = self.inlet.info()
+        except Exception:
+            full_info = eeg_info
+        self.n_channels = full_info.channel_count()
+        if not (getattr(self, '_pull_thread', None) and self._pull_thread.isRunning()):
+            self._pull_stop[0] = False
+            self._pull_queue = queue.Queue()
+            self._pull_thread = LSLPullThread(self.inlet, self._pull_queue, self._pull_stop, self, self)
+            self._pull_thread.start()
+            log.info('Фоновое чтение запущено из GUI (fallback).')
+        self._search_thread.request_stop()
+        self._on_search_thread_finished()
+        self.sampling_rate = full_info.nominal_srate()
+        self.stream_name = full_info.name() or 'EEG'
+        self._has_stream = True
+        self.channel_names = get_channel_names(full_info, self.n_channels)
+        old_checked = list(self.record_channel_checked) if self.record_channel_checked else []
+        self.record_channel_checked = [old_checked[i] if i < len(old_checked) else True for i in range(self.n_channels)]
+        self.recording_buffer = [[] for _ in range(self.n_channels)]
+        self.setWindowTitle(f'LSL Validation — {self.stream_name}')
+        self._rebuild_record_checkboxes()
+        self._show_recording_placeholder()
+
+    def _show_recording_placeholder(self):
+        if getattr(self, 'placeholder_widget', None):
+            self.right_layout.removeWidget(self.placeholder_widget)
+            self.placeholder_widget.setParent(None)
+            self.placeholder_widget = None
+        self.placeholder_widget = QWidget()
+        pl_layout = QVBoxLayout(self.placeholder_widget)
+        pl_layout.setAlignment(Qt.AlignCenter)
+        pl_layout.setSpacing(24)
+        lbl = QLabel('Поток подключён. Запись идёт без потерь.\nНажмите «Показать графики» для отображения каналов.')
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet('color: #5bc0be; font-size: 14px;')
+        lbl.setWordWrap(True)
+        pl_layout.addWidget(lbl)
+        btn_show = QPushButton('Показать графики')
+        btn_show.setStyleSheet('QPushButton { background-color: #28a745; color: white; font-weight: bold; padding: 12px 24px; border-radius: 6px; font-size: 14px; } QPushButton:hover { background-color: #218838; }')
+        btn_show.clicked.connect(self._delayed_ui_build)
+        pl_layout.addWidget(btn_show, alignment=Qt.AlignCenter)
+        self.right_layout.addWidget(self.placeholder_widget, stretch=1)
+
+    def _delayed_ui_build(self):
+        while self.cb_layout.count():
+            item = self.cb_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.checkboxes.clear()
+        for (i, name) in enumerate(self.channel_names):
+            cb = QCheckBox(f'[{i + 1}] {name}')
+            cb.setChecked(True)
+            cb.stateChanged.connect(self._rebuild_grid)
+            self.checkboxes.append(cb)
+            self.cb_layout.addWidget(cb)
+        self.cb_layout.addStretch()
+        self._rebuild_record_checkboxes()
+        self._build_stream_content()
+        self._apply_x_window()
+        self._setup_timers()
+
+    def _pull_and_plot(self):
+        if not self.inlet:
+            return
+        try:
+            while True:
+                try:
+                    (chunk, timestamps) = self._pull_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if not chunk:
+                    continue
+                arr = np.array(chunk)
+                if arr.shape[1] != self.n_channels and arr.shape[0] == self.n_channels:
+                    arr = arr.T
+                self.sample_count += len(arr)
+                if hasattr(self, 'samples_label') and self.samples_label:
+                    self.samples_label.setText(f'<b>Сэмплов:</b> {self.sample_count}')
+                for ch in range(self.n_channels):
+                    self.channel_widgets[ch].push_chunk(arr[:, ch])
+            auto_scale_enabled = self.cb_autoscale.isChecked()
+            for cw in self.channel_widgets:
+                cw.update_plot(auto_scale_enabled)
+            if auto_scale_enabled and self.channel_widgets:
+                cw = next((c for c in self.channel_widgets if c.is_active), self.channel_widgets[0])
+                if hasattr(self, 'spin_y_min') and hasattr(self, 'spin_y_max'):
+                    self.spin_y_min.blockSignals(True)
+                    self.spin_y_max.blockSignals(True)
+                    self.spin_y_min.setValue(cw.current_y_min)
+                    self.spin_y_max.setValue(cw.current_y_max)
+                    self.spin_y_min.blockSignals(False)
+                    self.spin_y_max.blockSignals(False)
+            now = time.time()
+            if now - self.last_cov_time >= COV_UPDATE_INTERVAL:
+                self.last_cov_time = now
+                self._calculate_covariance()
+        except Exception:
+            pass
+
+    def _update_text_stats(self):
+        for cw in self.channel_widgets:
+            cw.update_stats()
+
+    def _calculate_covariance(self):
+        try:
+            active_cws = [cw for cw in self.channel_widgets if cw.is_active]
+            if len(active_cws) < 2:
+                return
+            data_matrix = np.column_stack([cw.y_data for cw in active_cws])
+            data_matrix = np.nan_to_num(data_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+            data_matrix = data_matrix - np.mean(data_matrix, axis=0)
+            cov_matrix = np.cov(data_matrix.T)
+            names = [cw.channel_name for cw in active_cws]
+            n_active = len(names)
+            log.info(f'--- МАТРИЦА КОВАРИАЦИЙ ({n_active} активных, сэмплов: {self.sample_count}) ---')
+            col_w = 10
+            header = ' ' * col_w + ''.join([f'{name[:col_w]:>{col_w}}' for name in names])
+            log.info(header)
+            for i in range(n_active):
+                row_str = f'{names[i][:col_w]:>{col_w}}'
+                for j in range(n_active):
+                    val = cov_matrix[i, j]
+                    if np.isnan(val) or np.isinf(val):
+                        val = 0.0
+                    row_str += f'{val:{col_w}.2f}'
+                log.info(row_str)
+            np.fill_diagonal(cov_matrix, 0)
+            max_idx = np.unravel_index(np.argmax(np.abs(cov_matrix)), cov_matrix.shape)
+            max_val = cov_matrix[max_idx]
+            (ch1, ch2) = (names[max_idx[0]], names[max_idx[1]])
+            log.info(f'Макс. наводка: {ch1} ↔ {ch2} = {max_val:.2f}\n')
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self._pull_stop[0] = True
+        if self._pull_thread is not None and self._pull_thread.isRunning():
+            self._pull_thread.wait(2000)
+        super().closeEvent(event)
+
+def select_stream_gui(streams: List[StreamInfo], parent=None):
+    items = []
+    for info in streams:
+        name = info.name() or 'Unknown'
+        stype = info.type() or 'EEG'
+        items.append(f'{name} (type={stype}, ch={info.channel_count()})')
+    (item, ok) = QInputDialog.getItem(parent, 'Выбор LSL‑потока', 'Выберите поток:', items, 0, False)
+    return streams[items.index(item)] if ok else None
+
+def main():
+    log.info('=== СТАРТ АППАРАТНОЙ ВАЛИДАЦИИ ===')
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    inlet = None
+    stream_info_light = None
+    channel_names = None
+    try:
+        streams = find_eeg_streams()
+        if streams:
+            eeg_info = streams[0] if len(streams) == 1 else select_stream_gui(streams, None)
+            if eeg_info:
+                inlet = _create_inlet(eeg_info)
+                try:
+                    full_info = inlet.info()
+                except Exception:
+                    full_info = eeg_info
+                stream_info_light = full_info
+                n_ch = full_info.channel_count()
+                channel_names = get_channel_names(full_info, n_ch)
+    except Exception as e:
+        log.warning('Поток при старте не найден или ошибка: %s. Окно откроется без потока.', e)
+    window = HardwareValidationWindow(inlet=inlet, full_info=stream_info_light, channel_names=channel_names)
+    window.show()
+    sys.exit(app.exec_())
+if __name__ == '__main__':
+    main()
+</file>
+
+</files>
