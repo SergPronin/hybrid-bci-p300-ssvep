@@ -40,6 +40,11 @@ EEG_KEEP_SECONDS = 10.0
 MARKERS_PULL_MAX_SAMPLES = 256
 EEG_PULL_MAX_SAMPLES = 2048
 
+WINNER_LABEL_STYLE_IDLE = (
+    "QLabel { background-color: #1a1a1a; color: #4dff88; font-size: 18px; "
+    "font-weight: bold; padding: 15px; border: 2px solid #333; border-radius: 5px; }"
+)
+
 # Как в scripts/hardware_validation.py — фильтр «разрешённых» потоков ЭЭГ
 SIMULATOR_NAME = "EEG_Simulator"
 SIMULATOR_SOURCE_ID = "eeg-simulator-neurospectr"
@@ -453,6 +458,13 @@ class P300AnalyzerWindow(QMainWindow):
 
         sidebar_layout.addSpacing(10)
         sidebar_layout.addWidget(self._status_label)
+
+        self.winner_label = QLabel("ПОБЕДИТЕЛЬ: ?")
+        self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
+        self.winner_label.setAlignment(Qt.AlignCenter)
+
+        sidebar_layout.addSpacing(20)
+        sidebar_layout.addWidget(self.winner_label)
         sidebar_layout.addStretch(1)
 
         # Right plots
@@ -759,6 +771,8 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
         self._set_status("Остановлено. Обновите список 🔄 и снова «Подключиться к LSL».")
         self._clear_plots()
+        self.winner_label.setText("ПОБЕДИТЕЛЬ: ?")
+        self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
         self._reset_monitor_windows_disconnected()
         LOG.info("Сессия LSL остановлена пользователем")
 
@@ -829,6 +843,8 @@ class P300AnalyzerWindow(QMainWindow):
         stim_keys = [k for k, v in self.epochs_data.items() if v]
         if not stim_keys:
             self._clear_plots()
+            self.winner_label.setText("ПОБЕДИТЕЛЬ: ?")
+            self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
             return
 
         stim_keys.sort(key=stim_key_sort_key)
@@ -858,6 +874,33 @@ class P300AnalyzerWindow(QMainWindow):
             window_x_ms=window_x_ms,
             window_y_ms=window_y_ms,
         )
+
+        # === Логика выбора победителя ===
+        MIN_EPOCHS_TO_DECIDE = 5
+
+        can_decide = True
+        for key in stim_keys:
+            if len(self.epochs_data.get(key, [])) < MIN_EPOCHS_TO_DECIDE:
+                can_decide = False
+                break
+
+        if not can_decide or integrated.size == 0:
+            self.winner_label.setText("Сбор данных...")
+            self.winner_label.setStyleSheet(
+                "QLabel { background-color: #1a1a1a; color: #ffcc33; font-size: 16px; font-weight: bold; padding: 15px; border: 2px solid #333; border-radius: 5px; }"
+            )
+        else:
+            final_auc_values = integrated[:, -1]
+            winner_idx = int(np.argmax(final_auc_values))
+            winner_key = stim_keys[winner_idx]
+
+            m = re.search(r"(\d+)", winner_key)
+            display_name = f"ПЛИТКА {m.group(1)}" if m else winner_key.upper()
+
+            self.winner_label.setText(f"ПОБЕДИТЕЛЬ:\n{display_name}")
+            self.winner_label.setStyleSheet(
+                "QLabel { background-color: #0d2614; color: #4dff88; font-size: 20px; font-weight: bold; padding: 15px; border: 2px solid #28a745; border-radius: 5px; }"
+            )
 
         self._plot_all(
             raw_averaged,
