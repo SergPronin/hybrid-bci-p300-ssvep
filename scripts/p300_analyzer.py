@@ -67,6 +67,36 @@ def find_allowed_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
     return [s for s in all_streams if _is_allowed_stream(s)]
 
 
+def _unwrap_combo_userdata(data: Any) -> Any:
+    """QComboBox.itemData иногда отдаёт QVariant; pylsl ждёт «сырой» StreamInfo."""
+    if data is None:
+        return None
+    try:
+        from PyQt5.QtCore import QVariant
+
+        if isinstance(data, QVariant):
+            return data.value()
+    except Exception:
+        pass
+    return data
+
+
+def _stream_inlet_with_buffer(info: StreamInfo, buffer_seconds: int) -> StreamInlet:
+    """
+    pylsl: второй параметр должен быть int; часть сборок знает только max_buffered,
+    часть — max_buflen. Float (например 10.0) даёт «Don't know how to convert parameter 2».
+    """
+    try:
+        return StreamInlet(info, max_buffered=buffer_seconds)
+    except TypeError:
+        pass
+    try:
+        return StreamInlet(info, max_buflen=buffer_seconds)
+    except TypeError:
+        pass
+    return StreamInlet(info)
+
+
 def marker_value_to_stim_key(marker_value: Any) -> str:
     """
     Convert marker value to dict key like "стимул_1".
@@ -437,7 +467,16 @@ class P300AnalyzerWindow(QMainWindow):
             )
             return
 
-        eeg_info = self.combo_streams.itemData(idx)
+        eeg_raw = _unwrap_combo_userdata(self.combo_streams.itemData(idx))
+        if not isinstance(eeg_raw, StreamInfo):
+            QMessageBox.warning(
+                self,
+                "Ошибка",
+                "Некорректные данные потока в списке. Нажмите 🔄 и выберите поток снова.",
+            )
+            return
+        eeg_info = eeg_raw
+
         self._set_status("Подключение к маркерам...")
         QApplication.processEvents()
 
@@ -467,18 +506,13 @@ class P300AnalyzerWindow(QMainWindow):
         except Exception:
             pass
 
-        # Открываем новые
+        # Открываем новые (int для буфера; сначала max_buffered — как в hardware_validation)
         try:
-            try:
-                self._inlet_eeg = StreamInlet(eeg_info, max_buflen=EEG_KEEP_SECONDS)
-            except TypeError:
-                self._inlet_eeg = StreamInlet(eeg_info)
+            eeg_buf_s = int(round(float(EEG_KEEP_SECONDS)))
+            self._inlet_eeg = _stream_inlet_with_buffer(eeg_info, eeg_buf_s)
             self._inlet_eeg.open_stream(timeout=1.0)
 
-            try:
-                self._inlet_markers = StreamInlet(marker_streams[0], max_buflen=20)
-            except TypeError:
-                self._inlet_markers = StreamInlet(marker_streams[0])
+            self._inlet_markers = _stream_inlet_with_buffer(marker_streams[0], 20)
             self._inlet_markers.open_stream(timeout=1.0)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка LSL", f"Не удалось открыть потоки:\n{e}")
