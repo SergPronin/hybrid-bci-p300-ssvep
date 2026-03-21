@@ -1012,15 +1012,22 @@ class P300AnalyzerWindow(QMainWindow):
                     new_pending.append((marker_ts, stim_key))
                     continue
 
-                end_time = time_arr[end_idx - 1]
-                target_end_time = marker_ts + target_end_s
-                if end_time < target_end_time - 0.01 or end_time > target_end_time + reserve_s:
-                    new_pending.append((marker_ts, stim_key))
-                    continue
+                start_t = float(time_arr[start_idx])
+                end_t = float(time_arr[end_idx - 1])
+                span_s = end_t - start_t
+                # Раньше здесь сравнивали end_t с marker+800ms в узком окне (~60ms) — на практике эпохи
+                # никогда не проходили. Достаточно: есть epoch_len сэмплов после маркера и буфер по времени.
 
                 epoch = buf_arr[start_idx:end_idx]
                 if epoch.shape[0] == self._epoch_len:
+                    n_epochs_before = sum(len(v) for v in self.epochs_data.values())
                     self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
+                    if n_epochs_before == 0:
+                        LOG.info(
+                            "Первая эпоха ERP: %s, span по LSL=%.4f с (ось графика — nominal srate)",
+                            stim_key,
+                            span_s,
+                        )
                     # Basic cap: keep most recent epochs per stimulus
                     if len(self.epochs_data[stim_key]) > 300:
                         self.epochs_data[stim_key] = self.epochs_data[stim_key][-300:]
