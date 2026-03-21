@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import logging
 import sys
 import re
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from collections import deque
+from pathlib import Path
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 from PyQt5.QtCore import QTimer, Qt
@@ -42,6 +46,31 @@ SIMULATOR_SOURCE_ID = "eeg-simulator-neurospectr"
 NEUROSPECTR_MARKER = "neuro"
 EEG_STREAM_TYPES = ("EEG", "Signal")
 
+LOG = logging.getLogger("p300_analyzer")
+MONITOR_EEG_PLOT_MAX = 2500
+MONITOR_MARKER_EVENTS_MAX = 120
+MONITOR_LOG_INTERVAL_S = 2.0
+
+
+def configure_logging() -> Path:
+    """Файл рядом со скриптом + stderr; только логгер p300_analyzer."""
+    log_path = Path(__file__).resolve().parent / "p300_analyzer.log"
+    lg = logging.getLogger("p300_analyzer")
+    if lg.handlers:
+        return log_path
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(fmt)
+    fh.setLevel(logging.DEBUG)
+    sh = logging.StreamHandler(sys.stderr)
+    sh.setFormatter(fmt)
+    sh.setLevel(logging.INFO)
+    lg.addHandler(fh)
+    lg.addHandler(sh)
+    lg.setLevel(logging.DEBUG)
+    lg.propagate = False
+    return log_path
+
 
 def _is_allowed_stream(info: StreamInfo) -> bool:
     try:
@@ -65,6 +94,13 @@ def find_allowed_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
         except Exception:
             pass
     return [s for s in all_streams if _is_allowed_stream(s)]
+
+
+def resolve_marker_streams(timeout: float = 0.5) -> List[StreamInfo]:
+    try:
+        return list(resolve_byprop("type", "Markers", timeout=timeout))
+    except Exception:
+        return []
 
 
 def _unwrap_combo_userdata(data: Any) -> Any:
@@ -209,11 +245,73 @@ class P300AnalyzerWindow(QMainWindow):
 
         self._need_redraw_params: bool = False
 
+        self._eeg_monitor_buf: Deque[float] = deque(maxlen=MONITOR_EEG_PLOT_MAX)
+        self._marker_mono_buf: Deque[float] = deque(maxlen=MONITOR_MARKER_EVENTS_MAX)
+        self._last_monitor_log_t: float = 0.0
+        self._curve_eeg_monitor: Optional[Any] = None
+        self._curve_marker_monitor: Optional[Any] = None
+
+        self._monitor_eeg_win: Optional[QWidget] = None
+        self._monitor_markers_win: Optional[QWidget] = None
+        self._monitor_eeg_status: Optional[QLabel] = None
+        self._monitor_markers_status: Optional[QLabel] = None
+        self._plot_eeg_monitor: Optional[pg.PlotWidget] = None
+        self._plot_marker_monitor: Optional[pg.PlotWidget] = None
+
         self._timer = QTimer(self)
         self._timer.setInterval(50)
         self._timer.timeout.connect(self._update_loop)
 
         self._setup_ui()
+        self._setup_stream_monitor_windows()
+
+    def _setup_stream_monitor_windows(self) -> None:
+        """Два отдельных окна: ЭЭГ (нейроспектр) и маркеры плиток (PsychoPy)."""
+        def _make(title: str) -> Tuple[QWidget, QLabel, pg.PlotWidget]:
+            w = QWidget(None, Qt.Tool)
+            w.setWindowTitle(title)
+            w.setFixedSize(440, 220)
+            w.setAttribute(Qt.WA_QuitOnClose, False)
+            w.setStyleSheet("background-color: #121212; color: #e0e0e0;")
+            lay = QVBoxLayout(w)
+            lay.setContentsMargins(8, 8, 8, 8)
+            st = QLabel("Нет подключения к LSL.")
+            st.setWordWrap(True)
+            st.setStyleSheet("color: #aaa; font-size: 11px;")
+            plot = pg.PlotWidget()
+            plot.setBackground("#0a0a0a")
+            plot.setFixedHeight(130)
+            plot.showGrid(x=True, y=True, alpha=0.25)
+            plot.setLabel("bottom", "Время, с")
+            lay.addWidget(st)
+            lay.addWidget(plot)
+            return w, st, plot
+
+        self._monitor_eeg_win, self._monitor_eeg_status, self._plot_eeg_monitor = _make(
+            "Монитор: ЭЭГ (нейроспектр / симулятор)"
+        )
+        self._plot_eeg_monitor.setLabel("left", "Ампл.")
+        self._curve_eeg_monitor = self._plot_eeg_monitor.plot(pen=pg.mkPen("#7cfc00", width=1))
+
+        self._monitor_markers_win, self._monitor_markers_status, self._plot_marker_monitor = _make(
+            "Монитор: маркеры плиток (LSL Markers)"
+        )
+        self._plot_marker_monitor.setLabel("left", "события")
+        self._curve_marker_monitor = self._plot_marker_monitor.plot(
+            pen=None, symbol="o", symbolBrush="#ff6b6b", symbolSize=6
+        )
+
+        self._monitor_eeg_win.show()
+        self._monitor_markers_win.show()
+
+    def showEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().showEvent(event)
+        if self._monitor_eeg_win and self._monitor_markers_win:
+            g = self.geometry()
+            self._monitor_eeg_win.move(g.right() + 10, g.top())
+            self._monitor_markers_win.move(
+                g.right() + 10, g.top() + self._monitor_eeg_win.height() + 12
+            )
 
     def _setup_ui(self) -> None:
         self.setStyleSheet(
@@ -267,6 +365,11 @@ class P300AnalyzerWindow(QMainWindow):
 
         sidebar_layout.addWidget(QLabel("Поток ЭЭГ:"))
         sidebar_layout.addLayout(stream_layout)
+
+        self._markers_presence_label = QLabel("Поток плиток (Markers): не проверен — нажмите 🔄")
+        self._markers_presence_label.setWordWrap(True)
+        self._markers_presence_label.setStyleSheet("color: #888; font-size: 11px;")
+        sidebar_layout.addWidget(self._markers_presence_label)
 
         self.btn_connect = QPushButton("Подключиться к LSL")
         self.btn_connect.setStyleSheet(
@@ -392,6 +495,99 @@ class P300AnalyzerWindow(QMainWindow):
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)
 
+    def _update_markers_presence_label(self) -> None:
+        streams = resolve_marker_streams(timeout=0.6)
+        if streams:
+            info0 = streams[0]
+            name = info0.name() or "Markers"
+            nch = info0.channel_count()
+            self._markers_presence_label.setText(
+                f"Поток плиток (Markers): есть — «{name}», {nch} ch"
+            )
+            self._markers_presence_label.setStyleSheet("color: #5cb85c; font-size: 11px;")
+            LOG.info("Обнаружен поток Markers: name=%r channels=%s", name, nch)
+        else:
+            self._markers_presence_label.setText(
+                "Поток плиток (Markers): не найден (запустите стимуляцию PsychoPy)"
+            )
+            self._markers_presence_label.setStyleSheet("color: #d9534f; font-size: 11px;")
+            LOG.info("Поток Markers не найден (resolve timeout)")
+
+    def _reset_monitor_windows_disconnected(self) -> None:
+        self._eeg_monitor_buf.clear()
+        self._marker_mono_buf.clear()
+        if self._monitor_eeg_status:
+            self._monitor_eeg_status.setText("Нет подключения к LSL. Подключитесь для потока ЭЭГ.")
+        if self._monitor_markers_status:
+            self._monitor_markers_status.setText(
+                "Нет подключения к LSL. Подключитесь для потока маркеров плиток."
+            )
+        if self._curve_eeg_monitor:
+            self._curve_eeg_monitor.setData([], [])
+        if self._curve_marker_monitor:
+            self._curve_marker_monitor.setData([], [])
+
+    def _append_eeg_monitor_samples(self, ch0: np.ndarray) -> None:
+        if ch0.size == 0:
+            return
+        flat = np.asarray(ch0, dtype=np.float64).ravel()
+        self._eeg_monitor_buf.extend(flat.tolist())
+
+    def _append_marker_monitor_events(self, n_markers: int) -> None:
+        now = time.monotonic()
+        for _ in range(n_markers):
+            self._marker_mono_buf.append(now)
+
+    def _refresh_monitor_ui(
+        self,
+        *,
+        eeg_samples_this_tick: int,
+        marker_samples_this_tick: int,
+        connected: bool,
+    ) -> None:
+        if not connected:
+            return
+        if self._monitor_eeg_status:
+            buf_len = len(self._eeg_monitor_buf)
+            rate_txt = f"+{eeg_samples_this_tick} сэмплов за тик" if eeg_samples_this_tick else "нет новых сэмплов"
+            self._monitor_eeg_status.setText(
+                f"ЭЭГ: данные идут — в буфере графика {buf_len} отсчётов. {rate_txt}"
+            )
+            self._monitor_eeg_status.setStyleSheet("color: #7cfc00; font-size: 11px;")
+        if self._curve_eeg_monitor and self._eeg_monitor_buf:
+            y = np.asarray(self._eeg_monitor_buf, dtype=np.float64)
+            self._curve_eeg_monitor.setData(np.arange(len(y), dtype=np.float64), y)
+            if self._plot_eeg_monitor:
+                self._plot_eeg_monitor.setLabel("bottom", "Сэмпл (последние в окне)")
+                self._plot_eeg_monitor.enableAutoRange("y", True)
+
+        if self._monitor_markers_status:
+            nbuf = len(self._marker_mono_buf)
+            self._monitor_markers_status.setText(
+                f"Маркеры: +{marker_samples_this_tick} за тик, всего в окне {nbuf} событий"
+            )
+            mk_style = "#ff6b6b;" if marker_samples_this_tick else "#aaaaaa;"
+            self._monitor_markers_status.setStyleSheet(f"color: {mk_style} font-size: 11px;")
+        if self._curve_marker_monitor and self._marker_mono_buf:
+            arr = np.asarray(self._marker_mono_buf, dtype=np.float64)
+            xs = arr - arr[0]
+            ys = np.ones_like(arr)
+            self._curve_marker_monitor.setData(xs, ys)
+            if self._plot_marker_monitor:
+                span = float(xs[-1]) if xs.size else 1.0
+                self._plot_marker_monitor.setXRange(0, max(span, 0.5))
+
+        now = time.monotonic()
+        if now - self._last_monitor_log_t >= MONITOR_LOG_INTERVAL_S:
+            self._last_monitor_log_t = now
+            LOG.info(
+                "LSL тик: ЭЭГ +%s сэмплов, маркеры +%s; буфер ЭЭГ_plot=%s, маркеров=%s",
+                eeg_samples_this_tick,
+                marker_samples_this_tick,
+                len(self._eeg_monitor_buf),
+                len(self._marker_mono_buf),
+            )
+
     def _on_params_changed(self) -> None:
         self._need_redraw_params = True
 
@@ -412,6 +608,7 @@ class P300AnalyzerWindow(QMainWindow):
             self.combo_streams.addItem(display_text, userData=info)
 
         self._set_status(f"Найдено потоков: {len(eeg_candidates)}")
+        self._update_markers_presence_label()
 
     def _build_channel_checkboxes(self, count: int) -> None:
         while self.channels_cb_layout.count():
@@ -447,12 +644,21 @@ class P300AnalyzerWindow(QMainWindow):
         self._epoch_len = None
         self._dt_ms = None
         self._need_redraw_params = False
+        self._eeg_monitor_buf.clear()
+        self._marker_mono_buf.clear()
+        self._last_monitor_log_t = 0.0
         self._clear_plots()
         if not self._timer.isActive():
             self._timer.start()
         self.btn_connect.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self._set_status("Подключено. Ожидаю данные...")
+        try:
+            nch = self._inlet_eeg.info().channel_count()
+            ename = self._inlet_eeg.info().name() or "EEG"
+        except Exception:
+            nch, ename = -1, "EEG"
+        LOG.info("Начата сессия LSL: ЭЭГ «%s», каналов=%s", ename, nch)
 
     def _on_connect_clicked(self) -> None:
         if self._timer.isActive():
@@ -480,10 +686,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._set_status("Подключение к маркерам...")
         QApplication.processEvents()
 
-        try:
-            marker_streams = resolve_byprop("type", "Markers", timeout=2.0)
-        except Exception:
-            marker_streams = []
+        marker_streams = resolve_marker_streams(timeout=2.0)
 
         if not marker_streams:
             QMessageBox.warning(
@@ -515,11 +718,13 @@ class P300AnalyzerWindow(QMainWindow):
             self._inlet_markers = _stream_inlet_with_buffer(marker_streams[0], 20)
             self._inlet_markers.open_stream(timeout=1.0)
         except Exception as e:
+            LOG.exception("Ошибка открытия LSL: %s", e)
             QMessageBox.critical(self, "Ошибка LSL", f"Не удалось открыть потоки:\n{e}")
             return
 
         # Генерируем чекбоксы каналов по количеству каналов в ЭЭГ
         self._build_channel_checkboxes(eeg_info.channel_count())
+        LOG.info("Inlet открыты: ЭЭГ + Markers")
         self._begin_data_session()
 
     def _on_stop_clicked(self) -> None:
@@ -554,6 +759,8 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
         self._set_status("Остановлено. Обновите список 🔄 и снова «Подключиться к LSL».")
         self._clear_plots()
+        self._reset_monitor_windows_disconnected()
+        LOG.info("Сессия LSL остановлена пользователем")
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         if self._timer.isActive():
@@ -568,6 +775,11 @@ class P300AnalyzerWindow(QMainWindow):
                 self._inlet_markers.close_stream()
         except Exception:
             pass
+        if self._monitor_eeg_win is not None:
+            self._monitor_eeg_win.close()
+        if self._monitor_markers_win is not None:
+            self._monitor_markers_win.close()
+        LOG.info("Окно анализатора закрыто")
         super().closeEvent(event)
 
     def _clear_plots(self) -> None:
@@ -722,6 +934,9 @@ class P300AnalyzerWindow(QMainWindow):
         if self._inlet_eeg is None or self._inlet_markers is None:
             return
 
+        eeg_samples_this_tick = 0
+        marker_samples_this_tick = 0
+
         # 1) Pull markers and enqueue them
         try:
             marker_chunk, marker_ts = self._inlet_markers.pull_chunk(
@@ -731,6 +946,8 @@ class P300AnalyzerWindow(QMainWindow):
             marker_chunk, marker_ts = self._inlet_markers.pull_chunk(timeout=0.0)
 
         if marker_ts:
+            marker_samples_this_tick = len(marker_ts)
+            self._append_marker_monitor_events(marker_samples_this_tick)
             for sample, ts in zip(marker_chunk, marker_ts):
                 stim_key = marker_value_to_stim_key(sample)
                 self.pending_markers.append((float(ts), stim_key))
@@ -747,6 +964,7 @@ class P300AnalyzerWindow(QMainWindow):
             eeg_chunk, eeg_ts = self._inlet_eeg.pull_chunk(timeout=0.0)
 
         if eeg_ts:
+            eeg_samples_this_tick = len(eeg_ts)
             arr = np.asarray(eeg_chunk, dtype=np.float64)
             if arr.size:
                 if arr.ndim == 1:
@@ -767,6 +985,7 @@ class P300AnalyzerWindow(QMainWindow):
                 else:
                     ch0 = arr.reshape(-1)
 
+                self._append_eeg_monitor_samples(ch0)
                 self.eeg_buffer.extend(ch0.tolist())
                 self.eeg_times.extend([float(t) for t in eeg_ts])
 
@@ -837,8 +1056,17 @@ class P300AnalyzerWindow(QMainWindow):
         if need_redraw:
             self._redraw_from_epochs()
 
+        self._refresh_monitor_ui(
+            eeg_samples_this_tick=eeg_samples_this_tick,
+            marker_samples_this_tick=marker_samples_this_tick,
+            connected=True,
+        )
+
 
 def main() -> None:
+    log_path = configure_logging()
+    LOG.info("Старт P300 Analyzer, лог: %s", log_path)
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
