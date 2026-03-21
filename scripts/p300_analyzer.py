@@ -6,16 +6,17 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from PyQt5.QtCore import QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QLineEdit,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -36,7 +37,6 @@ MARKERS_PULL_MAX_SAMPLES = 256
 EEG_PULL_MAX_SAMPLES = 2048
 
 # Как в scripts/hardware_validation.py — фильтр «разрешённых» потоков ЭЭГ
-LSL_MAX_BUFFERED_SEC = 600
 SIMULATOR_NAME = "EEG_Simulator"
 SIMULATOR_SOURCE_ID = "eeg-simulator-neurospectr"
 NEUROSPECTR_MARKER = "neuro"
@@ -65,90 +65,6 @@ def find_allowed_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
         except Exception:
             pass
     return [s for s in all_streams if _is_allowed_stream(s)]
-
-
-class P300EEGStreamSearchThread(QThread):
-    """Фоновый поиск потока ЭЭГ (EEG/Signal) с фильтром как в hardware_validation."""
-
-    stream_hooked = pyqtSignal(object, object)  # StreamInfo, StreamInlet
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._stop_requested = False
-
-    def request_stop(self) -> None:
-        self._stop_requested = True
-
-    def run(self) -> None:
-        self.setPriority(QThread.TimeCriticalPriority)
-        while not self._stop_requested:
-            try:
-                try:
-                    streams = resolve_byprop("type", "EEG", minimum=1, timeout=0.1)
-                except TypeError:
-                    streams = resolve_byprop("type", "EEG", timeout=0.1)
-                if not streams:
-                    try:
-                        streams = resolve_byprop("type", "Signal", minimum=1, timeout=0.1)
-                    except TypeError:
-                        streams = resolve_byprop("type", "Signal", timeout=0.1)
-                if streams:
-                    valid_stream = next((s for s in streams if _is_allowed_stream(s)), None)
-                    if valid_stream:
-                        try:
-                            try:
-                                inlet = StreamInlet(valid_stream, max_buffered=LSL_MAX_BUFFERED_SEC)
-                            except TypeError:
-                                inlet = StreamInlet(valid_stream)
-                            try:
-                                inlet.open_stream(timeout=1.0)
-                            except Exception:
-                                pass
-                            self.stream_hooked.emit(valid_stream, inlet)
-                            break
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-
-class P300MarkerStreamSearchThread(QThread):
-    """Фоновый поиск потока маркеров (type=Markers) после подключения ЭЭГ."""
-
-    stream_hooked = pyqtSignal(object, object)  # StreamInfo, StreamInlet
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._stop_requested = False
-
-    def request_stop(self) -> None:
-        self._stop_requested = True
-
-    def run(self) -> None:
-        self.setPriority(QThread.TimeCriticalPriority)
-        while not self._stop_requested:
-            try:
-                try:
-                    streams = resolve_byprop("type", "Markers", minimum=1, timeout=0.1)
-                except TypeError:
-                    streams = resolve_byprop("type", "Markers", timeout=0.1)
-                if streams:
-                    info = streams[0]
-                    try:
-                        inlet = StreamInlet(info, max_buflen=20)
-                    except TypeError:
-                        try:
-                            inlet = StreamInlet(info, max_buffered=20)
-                        except TypeError:
-                            inlet = StreamInlet(info)
-                    try:
-                        inlet.open_stream(timeout=1.0)
-                    except Exception:
-                        pass
-                    self.stream_hooked.emit(info, inlet)
-                    break
-            except Exception:
-                pass
 
 
 def marker_value_to_stim_key(marker_value: Any) -> str:
@@ -263,9 +179,6 @@ class P300AnalyzerWindow(QMainWindow):
 
         self._need_redraw_params: bool = False
 
-        self._eeg_search_thread: Optional[P300EEGStreamSearchThread] = None
-        self._marker_search_thread: Optional[P300MarkerStreamSearchThread] = None
-
         self._timer = QTimer(self)
         self._timer.setInterval(50)
         self._timer.timeout.connect(self._update_loop)
@@ -310,12 +223,20 @@ class P300AnalyzerWindow(QMainWindow):
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar.setFixedWidth(270)
 
-        self.btn_search_stream = QPushButton("Поиск потока")
-        self.btn_search_stream.setStyleSheet(
-            "QPushButton { background-color: #007bff; font-weight: bold; }"
+        # Выбор потока
+        stream_layout = QHBoxLayout()
+        self.combo_streams = QComboBox()
+        self.combo_streams.setStyleSheet(
+            "background-color: #2d2d2d; color: white; padding: 5px; border: 1px solid #555; border-radius: 3px;"
         )
-        self.btn_search_stream.clicked.connect(self._on_search_or_stop_stream)
-        sidebar_layout.addWidget(self.btn_search_stream)
+        self.btn_refresh_streams = QPushButton("🔄")
+        self.btn_refresh_streams.setFixedWidth(40)
+        self.btn_refresh_streams.clicked.connect(self._on_refresh_streams_clicked)
+        stream_layout.addWidget(self.combo_streams)
+        stream_layout.addWidget(self.btn_refresh_streams)
+
+        sidebar_layout.addWidget(QLabel("Поток ЭЭГ:"))
+        sidebar_layout.addLayout(stream_layout)
 
         self.btn_connect = QPushButton("Подключиться к LSL")
         self.btn_connect.setStyleSheet(
@@ -344,12 +265,29 @@ class P300AnalyzerWindow(QMainWindow):
         self.spin_baseline.setKeyboardTracking(False)
         self.spin_baseline.valueChanged.connect(self._on_params_changed)
 
-        self.line_channels = QLineEdit()
-        self.line_channels.setText("19, 20, 21")  # Pz, Cz, Oz по умолчанию для 21-канальной
-        self.line_channels.setStyleSheet(
-            "background-color: #2d2d2d; color: #e0e0e0; border: 1px solid #555; border-radius: 3px; padding: 4px;"
+        # Блок выбора каналов (ROI)
+        btn_ch_layout = QHBoxLayout()
+        btn_all_ch = QPushButton("Все")
+        btn_clear_ch = QPushButton("Сброс")
+        btn_all_ch.clicked.connect(lambda: self._set_all_channels(True))
+        btn_clear_ch.clicked.connect(lambda: self._set_all_channels(False))
+        btn_ch_layout.addWidget(btn_all_ch)
+        btn_ch_layout.addWidget(btn_clear_ch)
+
+        self.scroll_channels = QScrollArea()
+        self.scroll_channels.setWidgetResizable(True)
+        self.scroll_channels.setMaximumHeight(180)
+        self.scroll_channels.setStyleSheet(
+            "QScrollArea { border: 1px solid #333; background-color: #1a1a1a; }"
         )
-        self.line_channels.textChanged.connect(self._on_params_changed)
+
+        self.channels_container = QWidget()
+        self.channels_container.setStyleSheet("background-color: transparent;")
+        self.channels_cb_layout = QVBoxLayout(self.channels_container)
+        self.channels_cb_layout.setSpacing(2)
+        self.scroll_channels.setWidget(self.channels_container)
+
+        self.channel_checkboxes: List[QCheckBox] = []
 
         self.spin_x = QSpinBox()
         self.spin_x.setRange(0, 799)
@@ -365,15 +303,16 @@ class P300AnalyzerWindow(QMainWindow):
         self.spin_y.valueChanged.connect(self._on_params_changed)
 
         self._status_label = QLabel(
-            "Отключено. Запустите симулятор/нейроспектр и нажмите «Поиск потока» или «Подключиться к LSL»."
+            "Отключено. Запустите источник ЭЭГ, нажмите 🔄 для списка потоков, выберите поток и «Подключиться к LSL»."
         )
         self._status_label.setWordWrap(True)
 
         sidebar_layout.addSpacing(10)
         sidebar_layout.addWidget(QLabel("Baseline (мс):"))
         sidebar_layout.addWidget(self.spin_baseline)
-        sidebar_layout.addWidget(QLabel("Каналы ROI (через запятую, с 1):"))
-        sidebar_layout.addWidget(self.line_channels)
+        sidebar_layout.addWidget(QLabel("Каналы ROI:"))
+        sidebar_layout.addLayout(btn_ch_layout)
+        sidebar_layout.addWidget(self.scroll_channels)
         sidebar_layout.addWidget(QLabel("Начало окна X (мс):"))
         sidebar_layout.addWidget(self.spin_x)
         sidebar_layout.addWidget(QLabel("Конец окна Y (мс):"))
@@ -426,110 +365,46 @@ class P300AnalyzerWindow(QMainWindow):
     def _on_params_changed(self) -> None:
         self._need_redraw_params = True
 
-    def _set_search_button_idle(self) -> None:
-        self.btn_search_stream.setText("Поиск потока")
-        self.btn_search_stream.setStyleSheet(
-            "QPushButton { background-color: #007bff; font-weight: bold; }"
-        )
+    def _on_refresh_streams_clicked(self) -> None:
+        self.combo_streams.clear()
+        self._set_status("Поиск потоков ЭЭГ...")
+        QApplication.processEvents()
 
-    def _set_search_button_searching(self) -> None:
-        self.btn_search_stream.setText("Остановить поиск")
-        self.btn_search_stream.setStyleSheet(
-            "QPushButton { background-color: #dc3545; font-weight: bold; }"
-        )
+        eeg_candidates = find_allowed_eeg_streams(timeout=1.0)
+        if not eeg_candidates:
+            self._set_status("Потоки ЭЭГ не найдены.")
+            return
 
-    def _stop_stream_search_threads(self) -> None:
-        if self._eeg_search_thread is not None:
-            self._eeg_search_thread.request_stop()
-            self._eeg_search_thread.wait(5000)
-            self._eeg_search_thread = None
-        if self._marker_search_thread is not None:
-            self._marker_search_thread.request_stop()
-            self._marker_search_thread.wait(5000)
-            self._marker_search_thread = None
-        self._set_search_button_idle()
-
-    def _select_eeg_stream_gui(self, streams: List[StreamInfo]) -> Optional[StreamInfo]:
-        items: List[str] = []
-        for info in streams:
+        for info in eeg_candidates:
             name = info.name() or "Unknown"
-            stype = info.type() or "?"
-            items.append(f"{name} (type={stype}, ch={info.channel_count()})")
-        item, ok = QInputDialog.getItem(
-            self, "Выбор LSL‑потока", "Выберите поток ЭЭГ:", items, 0, False
-        )
-        return streams[items.index(item)] if ok else None
+            ch_count = info.channel_count()
+            display_text = f"{name} ({ch_count} ch)"
+            self.combo_streams.addItem(display_text, userData=info)
 
-    def _on_search_or_stop_stream(self) -> None:
-        eeg_on = self._eeg_search_thread is not None and self._eeg_search_thread.isRunning()
-        marker_on = self._marker_search_thread is not None and self._marker_search_thread.isRunning()
-        if eeg_on or marker_on:
-            self._stop_stream_search_threads()
-            self._set_status("Поиск остановлен.")
-            return
-        self._start_eeg_stream_search()
+        self._set_status(f"Найдено потоков: {len(eeg_candidates)}")
 
-    def _start_eeg_stream_search(self) -> None:
-        if self._eeg_search_thread is not None and self._eeg_search_thread.isRunning():
-            return
-        if self._marker_search_thread is not None and self._marker_search_thread.isRunning():
-            return
-        self._set_search_button_searching()
-        self._set_status("Поиск потока ЭЭГ (как в hardware_validation)...")
-        self._eeg_search_thread = P300EEGStreamSearchThread(self)
-        self._eeg_search_thread.stream_hooked.connect(self._on_eeg_stream_hooked)
-        self._eeg_search_thread.start()
+    def _build_channel_checkboxes(self, count: int) -> None:
+        while self.channels_cb_layout.count():
+            item = self.channels_cb_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.channel_checkboxes.clear()
 
-    def _start_marker_stream_search(self) -> None:
-        if self._marker_search_thread is not None and self._marker_search_thread.isRunning():
-            return
-        self._set_search_button_searching()
-        self._marker_search_thread = P300MarkerStreamSearchThread(self)
-        self._marker_search_thread.stream_hooked.connect(self._on_marker_stream_hooked)
-        self._marker_search_thread.start()
+        for i in range(count):
+            cb = QCheckBox(f"Канал {i + 1}")
+            cb.setChecked(True)
+            cb.setStyleSheet("color: white;")
+            cb.stateChanged.connect(self._on_params_changed)
+            self.channel_checkboxes.append(cb)
+            self.channels_cb_layout.addWidget(cb)
+        self.channels_cb_layout.addStretch()
 
-    def _on_eeg_stream_hooked(self, eeg_info: StreamInfo, inlet: StreamInlet) -> None:
-        try:
-            if self._inlet_eeg is not None:
-                self._inlet_eeg.close_stream()
-        except Exception:
-            pass
-        self._inlet_eeg = inlet
-
-        if self._eeg_search_thread is not None:
-            self._eeg_search_thread.request_stop()
-            self._eeg_search_thread.wait(5000)
-        self._eeg_search_thread = None
-
-        try:
-            eeg_name = eeg_info.name() or "EEG"
-        except Exception:
-            eeg_name = "EEG"
-
-        if self._inlet_markers is not None:
-            self._set_status(f"Подключено: {eeg_name} + маркеры.")
-            self._set_search_button_idle()
-            self._begin_data_session()
-        else:
-            self._set_status(f"ЭЭГ: {eeg_name}. Ищу маркеры (type=Markers)...")
-            self._start_marker_stream_search()
-
-    def _on_marker_stream_hooked(self, _info: StreamInfo, inlet: StreamInlet) -> None:
-        try:
-            if self._inlet_markers is not None:
-                self._inlet_markers.close_stream()
-        except Exception:
-            pass
-        self._inlet_markers = inlet
-
-        if self._marker_search_thread is not None:
-            self._marker_search_thread.request_stop()
-            self._marker_search_thread.wait(5000)
-        self._marker_search_thread = None
-
-        self._set_search_button_idle()
-        if self._inlet_eeg is not None:
-            self._begin_data_session()
+    def _set_all_channels(self, state: bool) -> None:
+        for cb in self.channel_checkboxes:
+            cb.blockSignals(True)
+            cb.setChecked(state)
+            cb.blockSignals(False)
+        self._on_params_changed()
 
     def _begin_data_session(self) -> None:
         if self._inlet_eeg is None or self._inlet_markers is None:
@@ -553,38 +428,34 @@ class P300AnalyzerWindow(QMainWindow):
         if self._timer.isActive():
             return
 
-        self._stop_stream_search_threads()
-
-        self._set_status("Подключение к LSL...")
-        eeg_candidates = find_allowed_eeg_streams(timeout=2.0)
-        if not eeg_candidates:
+        idx = self.combo_streams.currentIndex()
+        if idx < 0:
             QMessageBox.warning(
                 self,
-                "LSL",
-                "Не найден подходящий поток ЭЭГ (симулятор / neurospectr, см. hardware_validation).",
+                "Ошибка",
+                "Сначала выберите поток ЭЭГ из списка (нажмите 🔄).",
             )
-            self._set_status("Нет разрешённых потоков ЭЭГ. Используйте «Поиск потока».")
             return
 
-        eeg_info = (
-            eeg_candidates[0]
-            if len(eeg_candidates) == 1
-            else self._select_eeg_stream_gui(eeg_candidates)
-        )
-        if eeg_info is None:
-            self._set_status("Выбор потока отменён.")
-            return
+        eeg_info = self.combo_streams.itemData(idx)
+        self._set_status("Подключение к маркерам...")
+        QApplication.processEvents()
 
         try:
-            marker_streams = resolve_byprop("type", "Markers", timeout=2)
+            marker_streams = resolve_byprop("type", "Markers", timeout=2.0)
         except Exception:
             marker_streams = []
 
         if not marker_streams:
-            QMessageBox.warning(self, "LSL", "Не найден поток маркеров (type='Markers').")
-            self._set_status("Не найден поток маркеров (type='Markers').")
+            QMessageBox.warning(
+                self,
+                "LSL",
+                "Не найден поток маркеров (type='Markers'). Убедитесь, что стимуляция запущена.",
+            )
+            self._set_status("Не найден поток маркеров.")
             return
 
+        # Закрываем старые
         try:
             if self._inlet_eeg is not None:
                 self._inlet_eeg.close_stream()
@@ -596,35 +467,28 @@ class P300AnalyzerWindow(QMainWindow):
         except Exception:
             pass
 
+        # Открываем новые
         try:
-            self._inlet_eeg = StreamInlet(eeg_info, max_buflen=EEG_KEEP_SECONDS)
-        except TypeError:
             try:
-                self._inlet_eeg = StreamInlet(eeg_info, max_buffered=int(EEG_KEEP_SECONDS))
+                self._inlet_eeg = StreamInlet(eeg_info, max_buflen=EEG_KEEP_SECONDS)
             except TypeError:
                 self._inlet_eeg = StreamInlet(eeg_info)
-        try:
             self._inlet_eeg.open_stream(timeout=1.0)
-        except Exception:
-            pass
 
-        try:
-            self._inlet_markers = StreamInlet(marker_streams[0], max_buflen=20)
-        except TypeError:
             try:
-                self._inlet_markers = StreamInlet(marker_streams[0], max_buffered=20)
+                self._inlet_markers = StreamInlet(marker_streams[0], max_buflen=20)
             except TypeError:
                 self._inlet_markers = StreamInlet(marker_streams[0])
-        try:
             self._inlet_markers.open_stream(timeout=1.0)
-        except Exception:
-            pass
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка LSL", f"Не удалось открыть потоки:\n{e}")
+            return
 
+        # Генерируем чекбоксы каналов по количеству каналов в ЭЭГ
+        self._build_channel_checkboxes(eeg_info.channel_count())
         self._begin_data_session()
 
     def _on_stop_clicked(self) -> None:
-        self._stop_stream_search_threads()
-
         if self._timer.isActive():
             self._timer.stop()
 
@@ -654,11 +518,10 @@ class P300AnalyzerWindow(QMainWindow):
 
         self.btn_connect.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        self._set_status("Остановлено. Нажмите «Поиск потока» или «Подключиться к LSL».")
+        self._set_status("Остановлено. Обновите список 🔄 и снова «Подключиться к LSL».")
         self._clear_plots()
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        self._stop_stream_search_threads()
         if self._timer.isActive():
             self._timer.stop()
         try:
@@ -855,22 +718,8 @@ class P300AnalyzerWindow(QMainWindow):
                 if arr.ndim == 1:
                     ch0 = arr
                 elif arr.ndim == 2:
-                    # Parse ROI channels from UI (1-indexed in UI -> 0-indexed in numpy)
-                    try:
-                        raw_text = str(self.line_channels.text())
-                    except Exception:
-                        raw_text = ""
-
-                    roi_channels: List[int] = []
-                    try:
-                        for x in raw_text.split(","):
-                            x = x.strip()
-                            if x.isdigit():
-                                idx = int(x) - 1
-                                if idx >= 0:
-                                    roi_channels.append(idx)
-                    except Exception:
-                        roi_channels = []
+                    # Собираем индексы включенных каналов (0-indexed)
+                    roi_channels = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
 
                     n_avail_channels = arr.shape[1]
                     valid_channels = [c for c in roi_channels if 0 <= c < n_avail_channels]
