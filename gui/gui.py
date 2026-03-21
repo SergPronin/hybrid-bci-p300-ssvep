@@ -92,11 +92,13 @@ class StimulusApp:
                 else:
                     sequences = config.DEFAULT_SEQUENCES
                 self.show_controls = False
+                self.win.mouseVisible = False
                 self.controller.start_experiment(sequences)
                 core.wait(0.2)
             if self.mouse.isPressedIn(self.stop_button):
                 self.controller.stop()
                 self.show_controls = True
+                self.win.mouseVisible = True
                 core.wait(0.2)
 
     def run(self) -> None:
@@ -123,10 +125,17 @@ class StimulusApp:
                     print('TRIAL END')
                     self.controller.stop()
                     self.show_controls = True
+                    self.win.mouseVisible = True
             self._draw()
             self.win.flip()
-            if 'escape' in event.getKeys():
+            keys = event.getKeys()
+            if 'escape' in keys:
                 break
+            # Экстренная остановка по Пробелу
+            if 'space' in keys and not self.show_controls:
+                self.controller.stop()
+                self.show_controls = True
+                self.win.mouseVisible = True
         self.controller.stop()
         self.win.close()
         core.quit()

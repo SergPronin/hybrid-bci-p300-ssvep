@@ -28,23 +28,6 @@ pip install -r requirements.txt
   ```  
   Окно Qt отображает каналы ЭЭГ, позволяет менять масштаб X/Y и сохранять данные в `saved_data/`.
 
-## Быстрый старт из архива
-
-1. Установите зависимости:
-   ```bash
-   python bootstrap_env.py
-   ```
-2. Запустите GUI:
-   ```bash
-   python run_app.py
-   ```
-3. Запустите валидацию ЭЭГ:
-   ```bash
-   python run_hardware_validation.py
-   ```
-
-`run_app.py` и `run_hardware_validation.py` автоматически используют `.venv`, если он существует в корне проекта.
-
 ## Структура
 
 - `app/` — точка входа `main.py`.
