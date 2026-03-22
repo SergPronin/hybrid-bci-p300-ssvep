@@ -459,7 +459,7 @@ class P300AnalyzerWindow(QMainWindow):
         sidebar_layout.addSpacing(10)
         sidebar_layout.addWidget(self._status_label)
 
-        self.winner_label = QLabel("ПОБЕДИТЕЛЬ: ?")
+        self.winner_label = QLabel("РЕЗУЛЬТАТ: ?")
         self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
         self.winner_label.setAlignment(Qt.AlignCenter)
 
@@ -771,7 +771,7 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
         self._set_status("Остановлено. Обновите список 🔄 и снова «Подключиться к LSL».")
         self._clear_plots()
-        self.winner_label.setText("ПОБЕДИТЕЛЬ: ?")
+        self.winner_label.setText("РЕЗУЛЬТАТ: ?")
         self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
         self._reset_monitor_windows_disconnected()
         LOG.info("Сессия LSL остановлена пользователем")
@@ -843,7 +843,7 @@ class P300AnalyzerWindow(QMainWindow):
         stim_keys = [k for k, v in self.epochs_data.items() if v]
         if not stim_keys:
             self._clear_plots()
-            self.winner_label.setText("ПОБЕДИТЕЛЬ: ?")
+            self.winner_label.setText("РЕЗУЛЬТАТ: ?")
             self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
             return
 
@@ -897,7 +897,7 @@ class P300AnalyzerWindow(QMainWindow):
             m = re.search(r"(\d+)", winner_key)
             display_name = f"ПЛИТКА {m.group(1)}" if m else winner_key.upper()
 
-            self.winner_label.setText(f"ПОБЕДИТЕЛЬ:\n{display_name}")
+            self.winner_label.setText(f"РЕЗУЛЬТАТ:\n{display_name}")
             self.winner_label.setStyleSheet(
                 "QLabel { background-color: #0d2614; color: #4dff88; font-size: 20px; font-weight: bold; padding: 15px; border: 2px solid #28a745; border-radius: 5px; }"
             )
