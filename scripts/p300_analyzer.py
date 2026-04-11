@@ -37,6 +37,7 @@ pg.setConfigOption("foreground", "#E0E0E0")
 EPOCH_DURATION_MS = 800
 EPOCH_RESERVE_MS = 50
 EEG_KEEP_SECONDS = 10.0
+MIN_EPOCHS_TO_DECIDE = 5
 MARKERS_PULL_MAX_SAMPLES = 256
 EEG_PULL_MAX_SAMPLES = 2048
 
@@ -263,6 +264,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._plot_eeg_monitor: Optional[pg.PlotWidget] = None
         self._plot_marker_monitor: Optional[pg.PlotWidget] = None
 
+        self._recording_epochs: bool = False
+
         self._timer = QTimer(self)
         self._timer.setInterval(50)
         self._timer.timeout.connect(self._update_loop)
@@ -384,14 +387,44 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_connect.clicked.connect(self._on_connect_clicked)
         sidebar_layout.addWidget(self.btn_connect)
 
-        self.btn_stop = QPushButton("Остановить")
-        self.btn_stop.setStyleSheet(
+        self.btn_start_analysis = QPushButton("Начать анализ")
+        self.btn_start_analysis.setStyleSheet(
+            "QPushButton { background-color: #007bff; color: white; font-weight: bold; padding: 10px 12px; border-radius: 6px; } "
+            "QPushButton:hover { background-color: #0069d9; } "
+            "QPushButton:disabled { background-color: #444; color: #888; }"
+        )
+        self.btn_start_analysis.setEnabled(False)
+        self.btn_start_analysis.clicked.connect(self._on_start_analysis_clicked)
+        sidebar_layout.addWidget(self.btn_start_analysis)
+
+        self.btn_stop_analysis = QPushButton("Остановить анализ")
+        self.btn_stop_analysis.setStyleSheet(
+            "QPushButton { background-color: #fd7e14; color: white; font-weight: bold; padding: 10px 12px; border-radius: 6px; } "
+            "QPushButton:hover { background-color: #e96b02; } "
+            "QPushButton:disabled { background-color: #444; color: #888; }"
+        )
+        self.btn_stop_analysis.setEnabled(False)
+        self.btn_stop_analysis.clicked.connect(self._on_stop_analysis_clicked)
+        sidebar_layout.addWidget(self.btn_stop_analysis)
+
+        self.btn_reset_analysis = QPushButton("Сброс анализа")
+        self.btn_reset_analysis.setStyleSheet(
+            "QPushButton { background-color: #6c757d; color: white; font-weight: bold; padding: 10px 12px; border-radius: 6px; } "
+            "QPushButton:hover { background-color: #5a6268; } "
+            "QPushButton:disabled { background-color: #444; color: #888; }"
+        )
+        self.btn_reset_analysis.setEnabled(False)
+        self.btn_reset_analysis.clicked.connect(self._on_reset_analysis_clicked)
+        sidebar_layout.addWidget(self.btn_reset_analysis)
+
+        self.btn_disconnect = QPushButton("Отключить LSL")
+        self.btn_disconnect.setStyleSheet(
             "QPushButton { background-color: #dc3545; color: white; font-weight: bold; padding: 10px 12px; border-radius: 6px; } "
             "QPushButton:hover { background-color: #c82333; }"
         )
-        self.btn_stop.setEnabled(False)
-        self.btn_stop.clicked.connect(self._on_stop_clicked)
-        sidebar_layout.addWidget(self.btn_stop)
+        self.btn_disconnect.setEnabled(False)
+        self.btn_disconnect.clicked.connect(self._on_disconnect_clicked)
+        sidebar_layout.addWidget(self.btn_disconnect)
 
         sidebar_layout.addSpacing(10)
         sidebar_layout.addWidget(QLabel("Параметры анализа:"))
@@ -441,7 +474,7 @@ class P300AnalyzerWindow(QMainWindow):
         self.spin_y.valueChanged.connect(self._on_params_changed)
 
         self._status_label = QLabel(
-            "Отключено. Запустите источник ЭЭГ, нажмите 🔄 для списка потоков, выберите поток и «Подключиться к LSL»."
+            "Отключено. Запустите ЭЭГ, нажмите 🔄, выберите поток, «Подключиться к LSL», затем «Начать анализ»."
         )
         self._status_label.setWordWrap(True)
 
@@ -645,9 +678,11 @@ class P300AnalyzerWindow(QMainWindow):
             cb.blockSignals(False)
         self._on_params_changed()
 
-    def _begin_data_session(self) -> None:
+    def _begin_connection_session(self) -> None:
+        """LSL открыт, прогрев: читаем потоки, но эпохи для анализа не накапливаем."""
         if self._inlet_eeg is None or self._inlet_markers is None:
             return
+        self._recording_epochs = False
         self.eeg_buffer = []
         self.eeg_times = []
         self.pending_markers = []
@@ -660,17 +695,89 @@ class P300AnalyzerWindow(QMainWindow):
         self._marker_mono_buf.clear()
         self._last_monitor_log_t = 0.0
         self._clear_plots()
+        self.winner_label.setText("РЕЗУЛЬТАТ: ?")
+        self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
+        self._ensure_epoch_template()
         if not self._timer.isActive():
             self._timer.start()
         self.btn_connect.setEnabled(False)
-        self.btn_stop.setEnabled(True)
-        self._set_status("Подключено. Ожидаю данные...")
+        self.btn_start_analysis.setEnabled(True)
+        self.btn_stop_analysis.setEnabled(False)
+        self.btn_reset_analysis.setEnabled(True)
+        self.btn_disconnect.setEnabled(True)
+        self._set_status(
+            "Подключено (прогрев). Когда стимуляция готова — нажмите «Начать анализ»."
+        )
         try:
             nch = self._inlet_eeg.info().channel_count()
             ename = self._inlet_eeg.info().name() or "EEG"
         except Exception:
             nch, ename = -1, "EEG"
-        LOG.info("Начата сессия LSL: ЭЭГ «%s», каналов=%s", ename, nch)
+        LOG.info("Начата сессия LSL (прогрев): ЭЭГ «%s», каналов=%s", ename, nch)
+
+    def _begin_recording_session(self) -> None:
+        """Сброс буферов и накопление эпох только с этого момента."""
+        if self._inlet_eeg is None or self._inlet_markers is None:
+            return
+        self.eeg_buffer = []
+        self.eeg_times = []
+        self.pending_markers = []
+        self.epochs_data = {}
+        self._time_ms_template = None
+        self._epoch_len = None
+        self._dt_ms = None
+        self._need_redraw_params = False
+        self._recording_epochs = True
+        self._clear_plots()
+        self.winner_label.setText("РЕЗУЛЬТАТ: ?")
+        self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
+        self._ensure_epoch_template()
+        self.btn_start_analysis.setEnabled(False)
+        self.btn_stop_analysis.setEnabled(True)
+        self._set_status(
+            f"Запись эпох. Для выбора победителя нужно ≥{MIN_EPOCHS_TO_DECIDE} эпох по каждому классу с данными."
+        )
+        LOG.info("Начата запись эпох для анализа")
+
+    def _on_start_analysis_clicked(self) -> None:
+        if self._inlet_eeg is None or self._inlet_markers is None:
+            return
+        self._begin_recording_session()
+
+    def _on_stop_analysis_clicked(self) -> None:
+        if not self._recording_epochs:
+            return
+        self._recording_epochs = False
+        self.pending_markers = []
+        self.btn_start_analysis.setEnabled(True)
+        self.btn_stop_analysis.setEnabled(False)
+        self._set_status(
+            "Анализ остановлен (LSL активен). Нажмите «Начать анализ» снова или «Отключить LSL»."
+        )
+        LOG.info("Запись эпох остановлена пользователем")
+
+    def _on_reset_analysis_clicked(self) -> None:
+        if self._inlet_eeg is None or self._inlet_markers is None:
+            return
+        self._recording_epochs = False
+        self.eeg_buffer = []
+        self.eeg_times = []
+        self.pending_markers = []
+        self.epochs_data = {}
+        self._time_ms_template = None
+        self._epoch_len = None
+        self._dt_ms = None
+        self._need_redraw_params = False
+        self._clear_plots()
+        self.winner_label.setText("РЕЗУЛЬТАТ: ?")
+        self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
+        self._ensure_epoch_template()
+        self.btn_start_analysis.setEnabled(True)
+        self.btn_stop_analysis.setEnabled(False)
+        self._set_status(
+            "Анализ сброшен. Нажмите «Начать анализ», чтобы начать новую запись эпох."
+        )
+        LOG.info("Сброс анализа (буферы эпох очищены)")
 
     def _on_connect_clicked(self) -> None:
         if self._timer.isActive():
@@ -737,9 +844,10 @@ class P300AnalyzerWindow(QMainWindow):
         # Генерируем чекбоксы каналов по количеству каналов в ЭЭГ
         self._build_channel_checkboxes(eeg_info.channel_count())
         LOG.info("Inlet открыты: ЭЭГ + Markers")
-        self._begin_data_session()
+        self._begin_connection_session()
 
-    def _on_stop_clicked(self) -> None:
+    def _on_disconnect_clicked(self) -> None:
+        self._recording_epochs = False
         if self._timer.isActive():
             self._timer.stop()
 
@@ -768,7 +876,10 @@ class P300AnalyzerWindow(QMainWindow):
         self._need_redraw_params = False
 
         self.btn_connect.setEnabled(True)
-        self.btn_stop.setEnabled(False)
+        self.btn_start_analysis.setEnabled(False)
+        self.btn_stop_analysis.setEnabled(False)
+        self.btn_reset_analysis.setEnabled(False)
+        self.btn_disconnect.setEnabled(False)
         self._set_status("Остановлено. Обновите список 🔄 и снова «Подключиться к LSL».")
         self._clear_plots()
         self.winner_label.setText("РЕЗУЛЬТАТ: ?")
@@ -876,8 +987,6 @@ class P300AnalyzerWindow(QMainWindow):
         )
 
         # === Логика выбора победителя ===
-        MIN_EPOCHS_TO_DECIDE = 5
-
         can_decide = True
         for key in stim_keys:
             if len(self.epochs_data.get(key, [])) < MIN_EPOCHS_TO_DECIDE:
@@ -885,7 +994,10 @@ class P300AnalyzerWindow(QMainWindow):
                 break
 
         if not can_decide or integrated.size == 0:
-            self.winner_label.setText("Сбор данных...")
+            min_n = min(len(self.epochs_data.get(k, [])) for k in stim_keys) if stim_keys else 0
+            self.winner_label.setText(
+                f"Сбор данных...\n(мин. по классам: {min_n}/{MIN_EPOCHS_TO_DECIDE})"
+            )
             self.winner_label.setStyleSheet(
                 "QLabel { background-color: #1a1a1a; color: #ffcc33; font-size: 16px; font-weight: bold; padding: 15px; border: 2px solid #333; border-radius: 5px; }"
             )
@@ -912,8 +1024,14 @@ class P300AnalyzerWindow(QMainWindow):
         )
 
         counts = ", ".join([f"{k}:{len(self.epochs_data[k])}" for k in stim_keys])
+        need_hint = (
+            f" Нужно ≥{MIN_EPOCHS_TO_DECIDE} эпох на каждый класс с данными."
+            if not can_decide
+            else ""
+        )
         self._set_status(
-            f"Обновлено: baseline={baseline_ms} мс, окно=[{window_x_ms}, {window_y_ms}] мс. Epochs: {counts}"
+            f"Обновлено: baseline={baseline_ms} мс, окно=[{window_x_ms}, {window_y_ms}] мс. "
+            f"Эпохи: {counts}.{need_hint}"
         )
 
     def _plot_all(
@@ -991,12 +1109,13 @@ class P300AnalyzerWindow(QMainWindow):
         if marker_ts:
             marker_samples_this_tick = len(marker_ts)
             self._append_marker_monitor_events(marker_samples_this_tick)
-            for sample, ts in zip(marker_chunk, marker_ts):
-                stim_key = marker_value_to_stim_key(sample)
-                self.pending_markers.append((float(ts), stim_key))
-            # prevent unbounded growth if marker producer is faster than extraction
-            if len(self.pending_markers) > 5000:
-                self.pending_markers = self.pending_markers[-5000:]
+            if self._recording_epochs:
+                for sample, ts in zip(marker_chunk, marker_ts):
+                    stim_key = marker_value_to_stim_key(sample)
+                    self.pending_markers.append((float(ts), stim_key))
+                # prevent unbounded growth if marker producer is faster than extraction
+                if len(self.pending_markers) > 5000:
+                    self.pending_markers = self.pending_markers[-5000:]
 
         # 2) Pull EEG and extend buffers (take only channel 0)
         try:
@@ -1029,13 +1148,18 @@ class P300AnalyzerWindow(QMainWindow):
                     ch0 = arr.reshape(-1)
 
                 self._append_eeg_monitor_samples(ch0)
-                self.eeg_buffer.extend(ch0.tolist())
-                self.eeg_times.extend([float(t) for t in eeg_ts])
-
-                self._ensure_epoch_template()
+                if self._recording_epochs:
+                    self.eeg_buffer.extend(ch0.tolist())
+                    self.eeg_times.extend([float(t) for t in eeg_ts])
+                    self._ensure_epoch_template()
 
         # 3) Extract epochs for pending markers (up to what current buffer allows)
-        if self._epoch_len is not None and self._time_ms_template is not None and self.eeg_times:
+        if (
+            self._recording_epochs
+            and self._epoch_len is not None
+            and self._time_ms_template is not None
+            and self.eeg_times
+        ):
             reserve_s = EPOCH_RESERVE_MS / 1000.0
             target_end_s = EPOCH_DURATION_MS / 1000.0
 
@@ -1081,7 +1205,7 @@ class P300AnalyzerWindow(QMainWindow):
             self.pending_markers = new_pending
 
         # 4) Trim old EEG samples to keep memory bounded
-        if self.eeg_times:
+        if self._recording_epochs and self.eeg_times:
             latest = float(self.eeg_times[-1])
             cutoff = latest - EEG_KEEP_SECONDS
 
