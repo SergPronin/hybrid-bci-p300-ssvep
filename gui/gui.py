@@ -10,7 +10,7 @@ class StimulusApp:
     def __init__(self) -> None:
         self.win = visual.Window(size=config.WINDOW_SIZE, color=config.WINDOW_COLOR, units='pix', fullscr=False)
         self.grid = Grid(size=config.GRID_SIZE)
-        self.controller = StimulusController(self.grid, flash_duration=0.1, isi=0.05, cue_duration=2.0, ready_duration=1.5, cue_color='blue', stim_color='white')
+        self.controller = StimulusController(self.grid, flash_duration=0.1, isi=0.05, cue_duration=2.0, ready_duration=1.5, cue_color='blue', stim_color='black')
         self.show_controls = True
         self._tiles_visual: list = []
         self._active_colors: Dict[int, str] = {}
@@ -39,7 +39,7 @@ class StimulusApp:
         for tile in self.grid.tiles:
             x = (tile.col - offset) * (config.TILE_SIZE_PX + config.TILE_SPACING_PX)
             y = (offset - tile.row) * (config.TILE_SIZE_PX + config.TILE_SPACING_PX)
-            rect = visual.Rect(self.win, width=config.TILE_SIZE_PX, height=config.TILE_SIZE_PX, pos=(x, y), fillColor=config.TILE_DEFAULT_COLOR, lineColor=config.TILE_LINE_COLOR)
+            rect = visual.Rect(self.win, width=config.TILE_SIZE_PX, height=config.TILE_SIZE_PX, pos=(x, y), fillColor='white', lineColor=config.TILE_LINE_COLOR)
             self._tiles_visual.append(rect)
 
     def _draw(self) -> None:
@@ -51,9 +51,9 @@ class StimulusApp:
                     else:
                         rect.fillColor = self.controller.get_stim_color()
                 else:
-                    rect.fillColor = config.TILE_DEFAULT_COLOR
+                    rect.fillColor = 'white'
             else:
-                rect.fillColor = config.TILE_DEFAULT_COLOR
+                rect.fillColor = 'white'
             rect.draw()
         if self.show_controls:
             self.start_button.draw()
