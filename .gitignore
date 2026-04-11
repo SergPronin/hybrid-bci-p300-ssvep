@@ -48,10 +48,6 @@ lsl_report_*.txt
 .DS_Store
 Thumbs.db
 
-# Results data files (binary logs, pickled epochs)
+# Локальные данные / логи
 results/*.pkl
-scripts/results/*.pkl
-
-# Hardware validation saved EEG data
 saved_data/
-scripts/saved_data/

@@ -46,7 +46,7 @@ WINNER_LABEL_STYLE_IDLE = (
     "font-weight: bold; padding: 15px; border: 2px solid #333; border-radius: 5px; }"
 )
 
-# Как в scripts/hardware_validation.py — фильтр «разрешённых» потоков ЭЭГ
+# Фильтр «разрешённых» потоков ЭЭГ (симулятор / NeuroSpectr)
 SIMULATOR_NAME = "EEG_Simulator"
 SIMULATOR_SOURCE_ID = "eeg-simulator-neurospectr"
 NEUROSPECTR_MARKER = "neuro"
@@ -828,7 +828,7 @@ class P300AnalyzerWindow(QMainWindow):
         except Exception:
             pass
 
-        # Открываем новые (int для буфера; сначала max_buffered — как в hardware_validation)
+        # Открываем новые (int для буфера; сначала max_buffered)
         try:
             eeg_buf_s = int(round(float(EEG_KEEP_SECONDS)))
             self._inlet_eeg = _stream_inlet_with_buffer(eeg_info, eeg_buf_s)

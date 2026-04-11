@@ -1,6 +1,8 @@
+# GUI стимуляции (PsychoPy)
 psychopy==2026.1.0
+# Маркеры LSL (gui + p300_analyzer)
 pylsl
 numpy
-scipy
+# Анализатор P300 (Qt + графики)
 pyqtgraph
 PyQt5

@@ -1,19 +1,17 @@
-# Hybrid BCI P300-SSVEP
+# Hybrid BCI — стимуляция P300 + анализатор
 
-Кросс‑платформенное приложение визуальной стимуляции для гибридного BCI (P300) с публикацией маркеров в LSL и отдельным GUI для валидации ЭЭГ.
+Минимальный проект: визуальная сетка плиток с маркерами в LSL и отдельное окно анализа P300.
 
 ## Требования
 
-- Python 3.10 (PsychoPy не поддерживает 3.11+)
+- Python 3.10 (для PsychoPy см. актуальную документацию по версиям)
 - macOS / Linux / Windows
 
 ## Установка
 
 ```bash
-git clone <repository-url>
 cd hybrid-bci-p300-ssvep
-
-python3.10 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate   # macOS/Linux
 # .venv\Scripts\activate    # Windows
 
@@ -22,17 +20,29 @@ pip install -r requirements.txt
 
 ## Запуск
 
-- **Валидация аппаратуры ЭЭГ**  
-  ```bash
-  python scripts/hardware_validation.py
-  ```  
-  Окно Qt отображает каналы ЭЭГ, позволяет менять масштаб X/Y и сохранять данные в `saved_data/`.
+**Стимуляция (PsychoPy, 3×3 плитки, LSL Markers):** из корня репозитория:
+
+```bash
+python run_app.py
+```
+
+**Анализатор P300 (подключение к ЭЭГ и потоку Markers):**
+
+```bash
+python scripts/p300_analyzer.py
+```
+
+Лог анализатора: `scripts/p300_analyzer.log`.
 
 ## Структура
 
-- `app/` — точка входа `main.py`.
-- `core/` — сетка плиток, контроллер стимуляции, отправка LSL‑маркеров.
-- `gui/` — GUI на PsychoPy.
-- `scripts/` — утилиты, в т.ч. `hardware_validation.py`.
+| Путь | Назначение |
+|------|------------|
+| `run_app.py` | Точка входа GUI; при необходимости перезапускает себя из `.venv` |
+| `app/main.py` | Создаёт `StimulusApp` |
+| `gui/gui.py` | Окно PsychoPy, слайдеры, сетка |
+| `config.py` | Размеры окна, сетка, позиции элементов |
+| `core/` | Сетка, плитки, контроллер последовательности, `LslMarkerSender` |
+| `scripts/p300_analyzer.py` | Онлайн-усреднение ERP, выбор «плитки» по метрике |
 
 Лицензия: MIT (см. `LICENSE`).
