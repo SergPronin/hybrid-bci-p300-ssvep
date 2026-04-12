@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import json
 import logging
 import sys
 import re
@@ -39,11 +40,40 @@ EPOCH_RESERVE_MS = 50
 EEG_KEEP_SECONDS = 10.0
 MIN_EPOCHS_TO_DECIDE = 5
 MARKERS_PULL_MAX_SAMPLES = 256
+
+# Режимы выбора класса-победителя (QComboBox userData)
+WINNER_MODE_SIGNED_MEAN = "signed_mean"  # классика P300: среднее corrected в окне [X,Y]
+WINNER_MODE_PEAK_RAW = "peak_raw"
+WINNER_MODE_PEAK_CORRECTED = "peak_corrected"
+WINNER_MODE_AUC = "auc"
+
+
+def pick_winner_by_mode(
+    mode: str,
+    raw_win: np.ndarray,
+    corr_win: np.ndarray,
+    auc_final_per_class: np.ndarray,
+) -> Tuple[int, str]:
+    """Возвращает (индекс класса среди текущей матрицы, имя режима)."""
+    if mode == WINNER_MODE_PEAK_CORRECTED:
+        return int(np.argmax(np.max(corr_win, axis=1))), WINNER_MODE_PEAK_CORRECTED
+    if mode == WINNER_MODE_SIGNED_MEAN:
+        return int(np.argmax(np.mean(corr_win, axis=1))), WINNER_MODE_SIGNED_MEAN
+    if mode == WINNER_MODE_AUC:
+        return int(np.argmax(auc_final_per_class)), WINNER_MODE_AUC
+    return int(np.argmax(np.max(raw_win, axis=1))), WINNER_MODE_PEAK_RAW
+
+
 EEG_PULL_MAX_SAMPLES = 2048
 
 WINNER_LABEL_STYLE_IDLE = (
     "QLabel { background-color: #1a1a1a; color: #4dff88; font-size: 18px; "
     "font-weight: bold; padding: 15px; border: 2px solid #333; border-radius: 5px; }"
+)
+
+WINNER_LABEL_STYLE_MISMATCH = (
+    "QLabel { background-color: #2a1f0a; color: #ffcc66; font-size: 18px; "
+    "font-weight: bold; padding: 15px; border: 2px solid #cc8800; border-radius: 5px; }"
 )
 
 # Фильтр «разрешённых» потоков ЭЭГ (симулятор / NeuroSpectr)
@@ -56,6 +86,23 @@ LOG = logging.getLogger("p300_analyzer")
 MONITOR_EEG_PLOT_MAX = 2500
 MONITOR_MARKER_EVENTS_MAX = 120
 MONITOR_LOG_INTERVAL_S = 2.0
+
+# region agent log
+def _debug_ndjson(payload: Dict[str, Any]) -> None:
+    try:
+        p = Path(__file__).resolve().parent.parent / ".cursor" / "debug-5ea034.log"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(
+            {"sessionId": "5ea034", "timestamp": int(time.time() * 1000), **payload},
+            ensure_ascii=False,
+        ) + "\n"
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
+# endregion
 
 
 def configure_logging() -> Path:
@@ -139,10 +186,17 @@ def _stream_inlet_with_buffer(info: StreamInfo, buffer_seconds: int) -> StreamIn
     return StreamInlet(info)
 
 
-def marker_value_to_stim_key(marker_value: Any) -> str:
+def marker_value_to_stim_key(marker_value: Any) -> Optional[str]:
     """
-    Convert marker value to dict key like "стимул_1".
-    Accepts numeric values or strings containing digits.
+    Ключ класса эпохи, например «стимул_3».
+
+    GUI (`core/lsl.py`) шлёт ``f"{tile_id}|{event}"``: ``5|on``, ``5|off``,
+    а также ``-1|trial_start|target=...``, ``-2|trial_end``.
+
+    Старый разбор по первому ``\\d+`` в строке давал для ``-1|...`` класс
+    ``стимул_1`` (цифра из «-1») — мусорные эпохи и неверный «победитель».
+
+    Для P300 берём только вспышку ``|on``; ``|off`` и служебные id<0 пропускаем.
     """
     mv = marker_value
 
@@ -152,20 +206,58 @@ def marker_value_to_stim_key(marker_value: Any) -> str:
     if isinstance(mv, (bytes, bytearray)):
         mv = mv.decode("utf-8", errors="ignore")
 
-    if isinstance(mv, str):
-        s = mv.strip()
-        m = re.search(r"(\d+)", s)
-        if m:
-            return f"стимул_{int(m.group(1))}"
-        return s
-
     if isinstance(mv, (int, np.integer)):
         return f"стимул_{int(mv)}"
 
     if isinstance(mv, (float, np.floating)):
         return f"стимул_{int(round(float(mv)))}"
 
+    if isinstance(mv, str):
+        s = mv.strip()
+        if not s:
+            return None
+        if "|" in s:
+            left, right = s.split("|", 1)
+            left, right = left.strip(), right.strip()
+            try:
+                tile_id = int(left)
+            except ValueError:
+                tile_id = None
+            if tile_id is not None and tile_id < 0:
+                return None
+            first_seg = right.split("|", 1)[0].strip()
+            if tile_id is not None:
+                if first_seg == "on":
+                    return f"стимул_{tile_id}"
+                if first_seg == "off":
+                    return None
+                if right.startswith("trial_start") or right.startswith("trial_end"):
+                    return None
+                return None
+        m = re.search(r"(\d+)", s)
+        if m:
+            return f"стимул_{int(m.group(1))}"
+        return s
+
     return str(mv)
+
+
+def parse_trial_target_tile_id(marker_value: Any) -> Optional[int]:
+    """Из маркера ``-1|trial_start|target=N`` извлекает N (id плитки 0..8)."""
+    mv = marker_value
+    if isinstance(mv, (list, tuple, np.ndarray)) and len(mv) == 1:
+        mv = mv[0]
+    if isinstance(mv, (bytes, bytearray)):
+        mv = mv.decode("utf-8", errors="ignore")
+    if not isinstance(mv, str):
+        return None
+    s = mv.strip()
+    if "trial_start" not in s:
+        return None
+    m = re.search(r"target[=:](\d+)", s)
+    if not m:
+        return None
+    return int(m.group(1))
 
 
 def stim_key_sort_key(stim_key: str) -> Tuple[int, str]:
@@ -265,6 +357,22 @@ class P300AnalyzerWindow(QMainWindow):
         self._plot_marker_monitor: Optional[pg.PlotWidget] = None
 
         self._recording_epochs: bool = False
+        self._dbg_epoch_lag_n: int = 0
+        self._dbg_winner_n: int = 0
+        self._dbg_cue_n: int = 0
+        # Разные LSL-источники часто дают несовместимые шкалы времени (маркеры vs ЭЭГ).
+        # t_eeg ≈ marker_ts + offset; см. калибровку в _update_loop.
+        self._marker_eeg_ts_offset: Optional[float] = None
+        # Первый маркер вспышки сессии (для offset), пока не сопоставили с ЭЭГ в том же тике.
+        self._calib_first_marker_ts: Optional[float] = None
+        # Целевая плитка из LSL: -1|trial_start|target=N (PsychoPy после cue)
+        self._lsl_cue_target_id: Optional[int] = None
+        # Сводка по прогонам записи (для сравнения нескольких запусков подряд)
+        self._exp_run_seq: int = 0
+        self._exp_trial_targets: List[int] = []
+        self._exp_last_winner_digit: Optional[int] = None
+        # LSL trial_start: отсечь вспышки до cue (см. chk_epochs_after_trial)
+        self._marker_ts_last_trial_start: Optional[float] = None
 
         self._timer = QTimer(self)
         self._timer.setInterval(50)
@@ -489,6 +597,38 @@ class P300AnalyzerWindow(QMainWindow):
         sidebar_layout.addWidget(QLabel("Конец окна Y (мс):"))
         sidebar_layout.addWidget(self.spin_y)
 
+        sidebar_layout.addSpacing(8)
+        sidebar_layout.addWidget(QLabel("Как выбрать победителя:"))
+        self.combo_winner_mode = QComboBox()
+        self.combo_winner_mode.setStyleSheet(
+            "background-color: #2d2d2d; color: white; padding: 5px; border: 1px solid #555; border-radius: 3px;"
+        )
+        self.combo_winner_mode.addItem(
+            "Среднее signed в окне [X–Y] (baseline → P300)", WINNER_MODE_SIGNED_MEAN
+        )
+        self.combo_winner_mode.addItem("Пик сырого ERP в окне [X–Y]", WINNER_MODE_PEAK_RAW)
+        self.combo_winner_mode.addItem(
+            "Пик после baseline в окне [X–Y]", WINNER_MODE_PEAK_CORRECTED
+        )
+        self.combo_winner_mode.addItem(
+            "Макс. AUC (cumsum |corrected| в [X–Y])", WINNER_MODE_AUC
+        )
+        self.combo_winner_mode.setCurrentIndex(0)
+        self.combo_winner_mode.currentIndexChanged.connect(self._on_params_changed)
+        sidebar_layout.addWidget(self.combo_winner_mode)
+
+        self.chk_epochs_after_trial = QCheckBox(
+            "Накапливать эпохи только после trial_start (cue из LSL)"
+        )
+        self.chk_epochs_after_trial.setChecked(False)
+        self.chk_epochs_after_trial.setStyleSheet("color: #aaa; font-size: 11px;")
+        self.chk_epochs_after_trial.setToolTip(
+            "Отсекает вспышки до первого маркера trial_start в этой записи. "
+            "Включите до «Начать анализ» или сделайте сброс после смены режима."
+        )
+        self.chk_epochs_after_trial.stateChanged.connect(self._on_params_changed)
+        sidebar_layout.addWidget(self.chk_epochs_after_trial)
+
         sidebar_layout.addSpacing(10)
         sidebar_layout.addWidget(self._status_label)
 
@@ -691,6 +831,10 @@ class P300AnalyzerWindow(QMainWindow):
         self._epoch_len = None
         self._dt_ms = None
         self._need_redraw_params = False
+        self._marker_eeg_ts_offset = None
+        self._calib_first_marker_ts = None
+        self._lsl_cue_target_id = None
+        self._marker_ts_last_trial_start = None
         self._eeg_monitor_buf.clear()
         self._marker_mono_buf.clear()
         self._last_monitor_log_t = 0.0
@@ -706,7 +850,8 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_reset_analysis.setEnabled(True)
         self.btn_disconnect.setEnabled(True)
         self._set_status(
-            "Подключено (прогрев). Когда стимуляция готова — нажмите «Начать анализ»."
+            "Подключено (прогрев). Можно сначала запустить плитки, затем «Начать анализ» — "
+            "или наоборот; выравнивание времени — по первому маркеру вспышки."
         )
         try:
             nch = self._inlet_eeg.info().channel_count()
@@ -728,6 +873,16 @@ class P300AnalyzerWindow(QMainWindow):
         self._dt_ms = None
         self._need_redraw_params = False
         self._recording_epochs = True
+        self._marker_eeg_ts_offset = None
+        self._calib_first_marker_ts = None
+        self._lsl_cue_target_id = None
+        self._marker_ts_last_trial_start = None
+        self._dbg_epoch_lag_n = 0
+        self._dbg_winner_n = 0
+        self._dbg_cue_n = 0
+        self._exp_run_seq += 1
+        self._exp_trial_targets = []
+        self._exp_last_winner_digit = None
         self._clear_plots()
         self.winner_label.setText("РЕЗУЛЬТАТ: ?")
         self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
@@ -735,9 +890,19 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_start_analysis.setEnabled(False)
         self.btn_stop_analysis.setEnabled(True)
         self._set_status(
-            f"Запись эпох. Для выбора победителя нужно ≥{MIN_EPOCHS_TO_DECIDE} эпох по каждому классу с данными."
+            f"Запись эпох. Для выбора победителя нужно ≥{MIN_EPOCHS_TO_DECIDE} эпох по каждому классу с данными. "
+            "Если нажали «Начать» до запуска плиток — дождитесь первой вспышки (калибровка времени по ней)."
         )
         LOG.info("Начата запись эпох для анализа")
+        # region agent log
+        _debug_ndjson(
+            {
+                "hypothesisId": "H5_experiment",
+                "message": "run_start",
+                "data": {"run_seq": self._exp_run_seq},
+            }
+        )
+        # endregion
 
     def _on_start_analysis_clicked(self) -> None:
         if self._inlet_eeg is None or self._inlet_markers is None:
@@ -755,10 +920,51 @@ class P300AnalyzerWindow(QMainWindow):
             "Анализ остановлен (LSL активен). Нажмите «Начать анализ» снова или «Отключить LSL»."
         )
         LOG.info("Запись эпох остановлена пользователем")
+        # region agent log
+        self._log_experiment_run_end("stop_clicked")
+        # endregion
+
+    def _log_experiment_run_end(self, reason: str) -> None:
+        """Одна строка на прогон записи: цели LSL по порядку vs победитель UI (для сравнения запусков)."""
+        targets = list(self._exp_trial_targets)
+        last_cue = targets[-1] if targets else None
+        win = self._exp_last_winner_digit
+        match_last: Optional[bool] = None
+        if last_cue is not None and win is not None:
+            match_last = last_cue == win
+        counts = {k: len(v) for k, v in self.epochs_data.items()}
+        try:
+            n_lag = self._dbg_epoch_lag_n
+        except Exception:
+            n_lag = 0
+        _debug_ndjson(
+            {
+                "hypothesisId": "H5_experiment",
+                "message": "run_end",
+                "data": {
+                    "reason": reason,
+                    "run_seq": self._exp_run_seq,
+                    "lsl_cue_targets_in_order": targets,
+                    "n_cues": len(targets),
+                    "unique_cues": sorted(set(targets)),
+                    "last_lsl_cue": last_cue,
+                    "ui_winner_tile_id": win,
+                    "match_last_cue_vs_winner": match_last,
+                    "epoch_counts_by_stim": counts,
+                    "n_epoch_align_logs": n_lag,
+                    "marker_eeg_offset": self._marker_eeg_ts_offset,
+                },
+            }
+        )
 
     def _on_reset_analysis_clicked(self) -> None:
         if self._inlet_eeg is None or self._inlet_markers is None:
             return
+        was_recording = self._recording_epochs
+        # region agent log
+        if was_recording:
+            self._log_experiment_run_end("reset_clicked")
+        # endregion
         self._recording_epochs = False
         self.eeg_buffer = []
         self.eeg_times = []
@@ -768,6 +974,10 @@ class P300AnalyzerWindow(QMainWindow):
         self._epoch_len = None
         self._dt_ms = None
         self._need_redraw_params = False
+        self._marker_eeg_ts_offset = None
+        self._calib_first_marker_ts = None
+        self._lsl_cue_target_id = None
+        self._marker_ts_last_trial_start = None
         self._clear_plots()
         self.winner_label.setText("РЕЗУЛЬТАТ: ?")
         self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
@@ -778,6 +988,8 @@ class P300AnalyzerWindow(QMainWindow):
             "Анализ сброшен. Нажмите «Начать анализ», чтобы начать новую запись эпох."
         )
         LOG.info("Сброс анализа (буферы эпох очищены)")
+        self._exp_trial_targets = []
+        self._exp_last_winner_digit = None
 
     def _on_connect_clicked(self) -> None:
         if self._timer.isActive():
@@ -874,6 +1086,10 @@ class P300AnalyzerWindow(QMainWindow):
         self._epoch_len = None
         self._dt_ms = None
         self._need_redraw_params = False
+        self._marker_eeg_ts_offset = None
+        self._calib_first_marker_ts = None
+        self._lsl_cue_target_id = None
+        self._marker_ts_last_trial_start = None
 
         self.btn_connect.setEnabled(True)
         self.btn_start_analysis.setEnabled(False)
@@ -947,6 +1163,42 @@ class P300AnalyzerWindow(QMainWindow):
         self._epoch_len = int(round(EPOCH_DURATION_MS / dt_ms)) + 1
         self._time_ms_template = np.arange(self._epoch_len, dtype=np.float64) * dt_ms
 
+    def _compute_epoch_start_index(
+        self, time_arr: np.ndarray, t_eff: float
+    ) -> Optional[int]:
+        """
+        Индекс начала эпохи относительно t_eff. При дубликатах/квантовании LSL-времени ЭЭГ
+        searchsorted даёт span_s≈0 и смещение окна; используем номинальную сетку dt от srate
+        и локальное уточнение по min |t[i]-t_eff|.
+        """
+        if self._dt_ms is None or self._epoch_len is None:
+            return None
+        n = int(time_arr.shape[0])
+        el = int(self._epoch_len)
+        if n < el:
+            return None
+        dt_s = float(self._dt_ms) / 1000.0
+        t0 = float(time_arr[0])
+
+        def refine_window(center: int) -> int:
+            lo = max(0, center - 30)
+            hi = min(n - el, center + 30)
+            return int(
+                min(range(lo, hi + 1), key=lambda j: (abs(float(time_arr[j]) - t_eff), j))
+            )
+
+        i_nom = int(np.round((t_eff - t0) / dt_s))
+        i_nom = max(0, min(i_nom, n - el))
+        start_idx = refine_window(i_nom)
+        err = abs(float(time_arr[start_idx]) - t_eff)
+        if err > 1.0:
+            i_se = int(np.searchsorted(time_arr, t_eff, side="left"))
+            i_se = max(0, min(i_se, n - el))
+            start_idx2 = refine_window(i_se)
+            if abs(float(time_arr[start_idx2]) - t_eff) < err:
+                start_idx = start_idx2
+        return int(start_idx)
+
     def _redraw_from_epochs(self) -> None:
         if self._epoch_len is None or self._time_ms_template is None:
             return
@@ -1003,15 +1255,78 @@ class P300AnalyzerWindow(QMainWindow):
             )
         else:
             final_auc_values = integrated[:, -1]
-            winner_idx = int(np.argmax(final_auc_values))
+            dt_m = float(time_ms[1] - time_ms[0]) if time_ms.shape[0] > 1 else 1.0
+            xi0 = int(round(float(window_x_ms) / dt_m))
+            xi1 = int(round(float(window_y_ms) / dt_m)) + 1
+            xi0 = max(0, min(xi0, time_ms.shape[0] - 1))
+            xi1 = max(xi0 + 1, min(xi1, time_ms.shape[0]))
+            raw_win = raw_averaged[:, xi0:xi1]
+            corr_win = corrected[:, xi0:xi1]
+            mode = self.combo_winner_mode.currentData()
+            if not isinstance(mode, str):
+                mode = WINNER_MODE_SIGNED_MEAN
+            winner_idx, mode_used = pick_winner_by_mode(
+                mode, raw_win, corr_win, final_auc_values
+            )
             winner_key = stim_keys[winner_idx]
+            auc_winner_idx = int(np.argmax(final_auc_values))
+            peak_idx = int(np.argmax(np.max(raw_win, axis=1)))
+            signed_idx = int(np.argmax(np.mean(corr_win, axis=1)))
+
+            # region agent log
+            if self._dbg_winner_n < 18:
+                self._dbg_winner_n += 1
+                peak_vals = np.max(raw_win, axis=1).tolist()
+                signed_vals = np.mean(corr_win, axis=1).tolist()
+                _debug_ndjson(
+                    {
+                        "hypothesisId": "H1_metric",
+                        "message": "winner_compare",
+                        "data": {
+                            "winner_rule": mode_used,
+                            "chosen_winner_idx": winner_idx,
+                            "chosen_winner_key": winner_key,
+                            "stim_keys": stim_keys,
+                            "auc_final": [float(x) for x in final_auc_values],
+                            "auc_winner_idx": auc_winner_idx,
+                            "auc_winner_key": stim_keys[auc_winner_idx],
+                            "peak_in_window_idx": peak_idx,
+                            "peak_in_window_key": stim_keys[peak_idx],
+                            "signed_mean_idx": signed_idx,
+                            "signed_mean_key": stim_keys[signed_idx],
+                            "window_ms": [window_x_ms, window_y_ms],
+                            "peak_vals": peak_vals,
+                            "signed_vals": signed_vals,
+                            "lsl_cue_target_id": self._lsl_cue_target_id,
+                            "run_seq": self._exp_run_seq,
+                        },
+                    }
+                )
+            # endregion
 
             m = re.search(r"(\d+)", winner_key)
-            display_name = f"ПЛИТКА {m.group(1)}" if m else winner_key.upper()
+            win_digit = int(m.group(1)) if m else -1
+            self._exp_last_winner_digit = win_digit
+            display_name = f"ПЛИТКА {win_digit}"
+            mode_short = {
+                WINNER_MODE_SIGNED_MEAN: "signed",
+                WINNER_MODE_PEAK_RAW: "raw_peak",
+                WINNER_MODE_PEAK_CORRECTED: "corr_peak",
+                WINNER_MODE_AUC: "auc",
+            }.get(mode_used, mode_used)
+            lines = ["РЕЗУЛЬТАТ:", display_name, f"режим: {mode_short}"]
+            if self._lsl_cue_target_id is not None:
+                lines.append(f"цель LSL: {self._lsl_cue_target_id}")
 
-            self.winner_label.setText(f"РЕЗУЛЬТАТ:\n{display_name}")
+            match_lsl = (
+                self._lsl_cue_target_id is None
+                or win_digit == self._lsl_cue_target_id
+            )
+            self.winner_label.setText("\n".join(lines))
             self.winner_label.setStyleSheet(
                 "QLabel { background-color: #0d2614; color: #4dff88; font-size: 20px; font-weight: bold; padding: 15px; border: 2px solid #28a745; border-radius: 5px; }"
+                if match_lsl
+                else WINNER_LABEL_STYLE_MISMATCH
             )
 
         self._plot_all(
@@ -1029,9 +1344,12 @@ class P300AnalyzerWindow(QMainWindow):
             if not can_decide
             else ""
         )
+        filter_hint = ""
+        if getattr(self, "chk_epochs_after_trial", None) and self.chk_epochs_after_trial.isChecked():
+            filter_hint = " Фильтр: только после trial_start."
         self._set_status(
             f"Обновлено: baseline={baseline_ms} мс, окно=[{window_x_ms}, {window_y_ms}] мс. "
-            f"Эпохи: {counts}.{need_hint}"
+            f"Эпохи: {counts}.{need_hint}{filter_hint}"
         )
 
     def _plot_all(
@@ -1111,8 +1429,49 @@ class P300AnalyzerWindow(QMainWindow):
             self._append_marker_monitor_events(marker_samples_this_tick)
             if self._recording_epochs:
                 for sample, ts in zip(marker_chunk, marker_ts):
+                    cue_tid = parse_trial_target_tile_id(sample)
+                    if cue_tid is not None:
+                        self._lsl_cue_target_id = cue_tid
+                        self._marker_ts_last_trial_start = float(ts)
+                        self._exp_trial_targets.append(cue_tid)
+                        # region agent log
+                        _debug_ndjson(
+                            {
+                                "hypothesisId": "H5_experiment",
+                                "message": "trial_cue",
+                                "data": {
+                                    "run_seq": self._exp_run_seq,
+                                    "trial_index": len(self._exp_trial_targets) - 1,
+                                    "target_tile_id": cue_tid,
+                                },
+                            }
+                        )
+                        if self._dbg_cue_n < 12:
+                            self._dbg_cue_n += 1
+                            _debug_ndjson(
+                                {
+                                    "hypothesisId": "H3_cue",
+                                    "message": "trial_target_lsl",
+                                    "data": {"target_tile_id": cue_tid},
+                                }
+                            )
+                        # endregion
                     stim_key = marker_value_to_stim_key(sample)
-                    self.pending_markers.append((float(ts), stim_key))
+                    if stim_key is None:
+                        continue
+                    tsf = float(ts)
+                    if (
+                        self.chk_epochs_after_trial.isChecked()
+                        and self._marker_ts_last_trial_start is not None
+                        and tsf < self._marker_ts_last_trial_start
+                    ):
+                        continue
+                    self.pending_markers.append((tsf, stim_key))
+                    if (
+                        self._marker_eeg_ts_offset is None
+                        and self._calib_first_marker_ts is None
+                    ):
+                        self._calib_first_marker_ts = tsf
                 # prevent unbounded growth if marker producer is faster than extraction
                 if len(self.pending_markers) > 5000:
                     self.pending_markers = self.pending_markers[-5000:]
@@ -1152,6 +1511,21 @@ class P300AnalyzerWindow(QMainWindow):
                     self.eeg_buffer.extend(ch0.tolist())
                     self.eeg_times.extend([float(t) for t in eeg_ts])
                     self._ensure_epoch_template()
+                    if (
+                        self._marker_eeg_ts_offset is None
+                        and self._calib_first_marker_ts is not None
+                        and self.eeg_times
+                    ):
+                        fm = float(self._calib_first_marker_ts)
+                        self._marker_eeg_ts_offset = float(self.eeg_times[-1]) - fm
+                        self._calib_first_marker_ts = None
+                        LOG.info(
+                            "LSL выравнивание маркер/ЭЭГ: offset=%.6f "
+                            "(eeg[last]=%.6f, first_flash_marker=%.6f)",
+                            self._marker_eeg_ts_offset,
+                            float(self.eeg_times[-1]),
+                            fm,
+                        )
 
         # 3) Extract epochs for pending markers (up to what current buffer allows)
         if (
@@ -1167,40 +1541,75 @@ class P300AnalyzerWindow(QMainWindow):
             buf_arr = np.asarray(self.eeg_buffer, dtype=np.float64)
             new_pending: List[Tuple[float, str]] = []
 
-            for marker_ts, stim_key in self.pending_markers:
-                # If we already have data reaching marker_ts + 800 ms (plus reserve), try to cut epoch.
-                if time_arr[-1] < marker_ts + target_end_s + reserve_s:
-                    new_pending.append((marker_ts, stim_key))
-                    continue
+            mo_off = self._marker_eeg_ts_offset
+            if mo_off is None:
+                new_pending = list(self.pending_markers)
+            else:
+                for marker_ts, stim_key in self.pending_markers:
+                    t_eff = float(marker_ts) + float(mo_off)
 
-                start_idx = int(np.searchsorted(time_arr, marker_ts, side="left"))
-                end_idx = start_idx + self._epoch_len
-                if end_idx > time_arr.shape[0]:
-                    new_pending.append((marker_ts, stim_key))
-                    continue
+                    # If we already have data reaching t_eff + 800 ms (plus reserve), try to cut epoch.
+                    if time_arr[-1] < t_eff + target_end_s + reserve_s:
+                        new_pending.append((marker_ts, stim_key))
+                        continue
 
-                start_t = float(time_arr[start_idx])
-                end_t = float(time_arr[end_idx - 1])
-                span_s = end_t - start_t
-                # Раньше здесь сравнивали end_t с marker+800ms в узком окне (~60ms) — на практике эпохи
-                # никогда не проходили. Достаточно: есть epoch_len сэмплов после маркера и буфер по времени.
+                    start_idx = self._compute_epoch_start_index(time_arr, t_eff)
+                    if start_idx is None:
+                        new_pending.append((marker_ts, stim_key))
+                        continue
+                    end_idx = start_idx + self._epoch_len
+                    if end_idx > time_arr.shape[0]:
+                        new_pending.append((marker_ts, stim_key))
+                        continue
 
-                epoch = buf_arr[start_idx:end_idx]
-                if epoch.shape[0] == self._epoch_len:
-                    n_epochs_before = sum(len(v) for v in self.epochs_data.values())
-                    self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
-                    if n_epochs_before == 0:
-                        LOG.info(
-                            "Первая эпоха ERP: %s, span по LSL=%.4f с (ось графика — nominal srate)",
-                            stim_key,
-                            span_s,
-                        )
-                    # Basic cap: keep most recent epochs per stimulus
-                    if len(self.epochs_data[stim_key]) > 300:
-                        self.epochs_data[stim_key] = self.epochs_data[stim_key][-300:]
-                    need_redraw = True
-                else:
-                    new_pending.append((marker_ts, stim_key))
+                    start_t = float(time_arr[start_idx])
+                    end_t = float(time_arr[end_idx - 1])
+                    span_s = end_t - start_t
+                    dt_s = float(self._dt_ms) / 1000.0
+                    span_nominal_s = (float(self._epoch_len) - 1.0) * dt_s
+
+                    epoch = buf_arr[start_idx:end_idx]
+                    if epoch.shape[0] == self._epoch_len:
+                        n_epochs_before = sum(len(v) for v in self.epochs_data.values())
+                        self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
+                        # region agent log
+                        if self._dbg_epoch_lag_n < 22:
+                            self._dbg_epoch_lag_n += 1
+                            lag_ms = (start_t - t_eff) * 1000.0
+                            _debug_ndjson(
+                                {
+                                    "hypothesisId": "H2_lag",
+                                    "message": "epoch_align",
+                                    "data": {
+                                        "stim_key": stim_key,
+                                        "marker_ts": float(marker_ts),
+                                        "t_eff": t_eff,
+                                        "start_t": start_t,
+                                        "lag_ms": lag_ms,
+                                        "span_s": span_s,
+                                        "span_nominal_s": span_nominal_s,
+                                        "offset": self._marker_eeg_ts_offset,
+                                        "index_rule": "nominal_dt_refine",
+                                    },
+                                }
+                            )
+                        # endregion
+                        if n_epochs_before == 0:
+                            LOG.info(
+                                "Первая эпоха ERP: %s, span по меткам LSL=%.4f с, "
+                                "номинально %.4f с (%d отсчётов @ %.1f Гц)",
+                                stim_key,
+                                span_s,
+                                span_nominal_s,
+                                self._epoch_len,
+                                1000.0 / self._dt_ms,
+                            )
+                        # Basic cap: keep most recent epochs per stimulus
+                        if len(self.epochs_data[stim_key]) > 300:
+                            self.epochs_data[stim_key] = self.epochs_data[stim_key][-300:]
+                        need_redraw = True
+                    else:
+                        new_pending.append((marker_ts, stim_key))
 
             self.pending_markers = new_pending
 
@@ -1215,10 +1624,13 @@ class P300AnalyzerWindow(QMainWindow):
                 self.eeg_buffer = self.eeg_buffer[cut_idx:]
                 self.eeg_times = self.eeg_times[cut_idx:]
 
-            # Pending markers older than the buffer start can't be extracted anymore
+            # Маркеры в исходной шкале; сравнение с cutoff (шкала ЭЭГ) через offset.
             new_pending = []
+            mo = self._marker_eeg_ts_offset
             for marker_ts, stim_key in self.pending_markers:
-                if marker_ts >= cutoff:
+                if mo is None:
+                    new_pending.append((marker_ts, stim_key))
+                elif float(marker_ts) + float(mo) >= cutoff:
                     new_pending.append((marker_ts, stim_key))
             self.pending_markers = new_pending
 
