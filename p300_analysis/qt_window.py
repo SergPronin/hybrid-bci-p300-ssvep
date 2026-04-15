@@ -1419,12 +1419,10 @@ class P300AnalyzerWindow(QMainWindow):
                             el,
                             srate,
                         )
-                        # Basic cap: keep most recent epochs per stimulus
-                        if len(self.epochs_data[stim_key]) > 300:
-                            self.epochs_data[stim_key] = self.epochs_data[stim_key][-300:]
-                        need_redraw = True
-                    else:
-                        new_pending.append((marker_ts, stim_key))
+                    # Basic cap: keep most recent epochs per stimulus
+                    if len(self.epochs_data[stim_key]) > 300:
+                        self.epochs_data[stim_key] = self.epochs_data[stim_key][-300:]
+                    need_redraw = True
 
             self.pending_markers = new_pending
 
