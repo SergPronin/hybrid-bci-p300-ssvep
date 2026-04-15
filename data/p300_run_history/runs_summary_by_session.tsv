@@ -1,0 +1,6 @@
+archive_session_id	run_seq_app	expected_cues	last_chosen_tile	lsl_cue_at_compare	match	ui_winner_at_end	match_end	reason	n_compare
+1	1	1	0	1	False	0	False	stop_clicked	8
+2	2	2	8	2	False	8	False	stop_clicked	8
+3	3								0
+4	1	6	4	6	False	4	False	reset_clicked	12
+5	2	0	2	0	False				10

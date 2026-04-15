@@ -1,0 +1,12 @@
+Архив локальных запусков P300-анализатора (собрано автоматически).
+
+Файлы:
+- debug_ndjson_full_backup.log — полная копия .cursor/debug-5ea034.log (NDJSON: run_start, trial_cue, epoch_align, winner_compare, run_end). Это основной источник для офлайн-перетеста метрик.
+- p300_analyzer_app_full_backup.log — копия scripts/p300_analyzer.log (текстовый лог приложения).
+- runs_summary_by_session.json — разбор по сессиям: у каждой записи «Начать анализ» свой archive_session_id (по порядку run_start в файле).
+- runs_summary_by_session.tsv — та же сводка в TSV для Excel/Numbers.
+
+Ожидаемый результат: last_lsl_cue / expected_targets из LSL (маркер trial target).
+Фактический: ui_winner_tile_id в run_end и chosen_tile_id в последнем winner_compare.
+
+Примечание: run_seq в логах сбрасывается при новом старте записи; уникальность — по archive_session_id.

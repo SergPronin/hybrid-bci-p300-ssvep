@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,9 +27,20 @@ def main() -> None:
     os.chdir(root)
     sys.path.insert(0, str(root))
 
+    analyzer_proc: subprocess.Popen[str] | None = None
+    analyzer_script = root / "scripts" / "p300_analyzer.py"
+    if analyzer_script.exists():
+        analyzer_proc = subprocess.Popen([sys.executable, str(analyzer_script)])
+    else:
+        print(f"[run_app] Warning: analyzer script not found: {analyzer_script}")
+
     from app.main import main as app_main
 
-    app_main()
+    try:
+        app_main()
+    finally:
+        if analyzer_proc is not None and analyzer_proc.poll() is None:
+            analyzer_proc.terminate()
 
 
 if __name__ == "__main__":
