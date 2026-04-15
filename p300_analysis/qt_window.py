@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from pylsl import StreamInlet, StreamInfo
+from pylsl import StreamInlet, StreamInfo, local_clock as lsl_local_clock
 import pyqtgraph as pg
 
 from p300_analysis.constants import (
@@ -108,10 +108,14 @@ class P300AnalyzerWindow(QMainWindow):
         self._dbg_winner_n: int = 0
         self._dbg_cue_n: int = 0
         # Разные LSL-источники часто дают несовместимые шкалы времени (маркеры vs ЭЭГ).
-        # t_eeg ≈ marker_ts + offset; см. калибровку в _update_loop.
+        # Offset хранится для диагностики; для индексации используется прямой расчёт
+        # через pylsl.local_clock() + srate (см. _update_loop, шаг 3).
         self._marker_eeg_ts_offset: Optional[float] = None
         # Первый маркер вспышки сессии (для offset), пока не сопоставили с ЭЭГ в том же тике.
         self._calib_first_marker_ts: Optional[float] = None
+        # LSL-clock time when the latest EEG chunk was received.
+        # Used for direct sample-index calculation (bypasses coarse EEG timestamps).
+        self._lsl_clock_at_buffer_end: Optional[float] = None
         # Целевая плитка из LSL: -1|trial_start|target=N (PsychoPy после cue)
         self._lsl_cue_target_id: Optional[int] = None
         # Сводка по прогонам записи (для сравнения нескольких запусков подряд)
@@ -578,6 +582,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._need_redraw_params = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
+        self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
         self._eeg_monitor_buf.clear()
@@ -618,6 +623,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._recording_epochs = True
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
+        self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
         self._dbg_epoch_lag_n = 0
@@ -768,6 +774,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._need_redraw_params = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
+        self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
         self._clear_plots()
@@ -880,6 +887,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._need_redraw_params = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
+        self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
 
@@ -1224,6 +1232,7 @@ class P300AnalyzerWindow(QMainWindow):
                     # Store ALL channels per timepoint (channel averaging deferred to epoch extraction)
                     self.eeg_buffer.extend(arr_2d)
                     self.eeg_times.extend([float(t) for t in eeg_ts])
+                    self._lsl_clock_at_buffer_end = lsl_local_clock()
                     self._ensure_epoch_template()
                     if (
                         self._marker_eeg_ts_offset is None
@@ -1231,36 +1240,59 @@ class P300AnalyzerWindow(QMainWindow):
                         and self.eeg_times
                     ):
                         fm = float(self._calib_first_marker_ts)
+                        eeg_first = float(self.eeg_times[0])
+                        eeg_last = float(self.eeg_times[-1])
                         calib_method = "fallback_last_eeg_ts"
-                        # Prefer LSL time_correction() for precise cross-stream alignment;
-                        # many drivers (Neurospect) report EEG timestamps with 1-s resolution,
-                        # making the naive eeg[-1] - marker approach imprecise.
+
+                        # Try LSL time_correction(); validate the result before trusting it.
+                        # time_correction() fails silently when streams use incompatible
+                        # clock domains (e.g. Neurospect in Unix-epoch vs PsychoPy in
+                        # LSL local_clock) — it returns ≈0 and t_eff lands outside the
+                        # EEG buffer, making ALL start_idx = 0.
                         try:
                             if self._inlet_markers is not None and self._inlet_eeg is not None:
                                 marker_tc = self._inlet_markers.time_correction(timeout=0.2)
                                 eeg_tc = self._inlet_eeg.time_correction(timeout=0.2)
-                                self._marker_eeg_ts_offset = marker_tc - eeg_tc
-                                calib_method = "lsl_time_correction"
+                                candidate_offset = marker_tc - eeg_tc
+                                t_eff_test = fm + candidate_offset
+                                # Sanity check: does the first marker map into the EEG buffer?
+                                margin = 60.0  # seconds
+                                if eeg_first - margin <= t_eff_test <= eeg_last + margin:
+                                    self._marker_eeg_ts_offset = candidate_offset
+                                    calib_method = "lsl_time_correction"
+                                else:
+                                    LOG.warning(
+                                        "time_correction даёт t_eff=%.3f вне диапазона EEG "
+                                        "[%.3f, %.3f] — clock domains несовместимы, "
+                                        "используем fallback",
+                                        t_eff_test, eeg_first, eeg_last,
+                                    )
                         except Exception:
                             pass
+
                         if calib_method != "lsl_time_correction":
-                            self._marker_eeg_ts_offset = float(self.eeg_times[-1]) - fm
+                            self._marker_eeg_ts_offset = eeg_last - fm
+
                         self._calib_first_marker_ts = None
                         LOG.info(
                             "LSL выравнивание маркер/ЭЭГ: offset=%.6f method=%s "
-                            "(eeg[last]=%.6f, first_flash_marker=%.6f)",
+                            "(eeg_first=%.6f, eeg_last=%.6f, first_flash_marker=%.6f)",
                             self._marker_eeg_ts_offset,
                             calib_method,
-                            float(self.eeg_times[-1]),
+                            eeg_first,
+                            eeg_last,
                             fm,
                         )
                         self._session_recorder.log_event(
                             "time_alignment_calibrated",
                             {
                                 "run_seq": self._exp_run_seq,
-                                "offset": self._marker_eeg_ts_offset,
+                                "offset_diagnostic": self._marker_eeg_ts_offset,
                                 "calib_method": calib_method,
-                                "eeg_last_ts": float(self.eeg_times[-1]),
+                                "epoch_index_method": "lsl_clock_direct",
+                                "lsl_clock_at_buffer_end": self._lsl_clock_at_buffer_end,
+                                "eeg_first_ts": eeg_first,
+                                "eeg_last_ts": eeg_last,
                                 "first_flash_marker_ts": fm,
                                 "eeg_buffer_len": len(self.eeg_buffer),
                                 "pending_markers_count": len(self.pending_markers),
@@ -1268,17 +1300,25 @@ class P300AnalyzerWindow(QMainWindow):
                         )
 
         # 3) Extract epochs for pending markers (up to what current buffer allows)
+        #
+        # Index calculation: bypass coarse EEG timestamps entirely.
+        # Use pylsl.local_clock() recorded at the last EEG pull + nominal srate
+        # to compute the buffer index for each marker_ts (both in LSL-clock domain).
         if (
             self._recording_epochs
             and self._epoch_geom.epoch_len is not None
             and self._epoch_geom.time_ms_template is not None
-            and self.eeg_times
             and self.eeg_buffer
+            and self._lsl_clock_at_buffer_end is not None
         ):
-            reserve_s = EPOCH_RESERVE_MS / 1000.0
-            target_end_s = EPOCH_DURATION_MS / 1000.0
+            dt_s = float(self._epoch_geom.dt_ms) / 1000.0
+            srate = 1.0 / dt_s
+            el = int(self._epoch_geom.epoch_len)
+            buf_len = len(self.eeg_buffer)
+            lsl_ref = self._lsl_clock_at_buffer_end
+            reserve_samples = max(1, int(EPOCH_RESERVE_MS / 1000.0 / dt_s))
 
-            time_arr = np.asarray(self.eeg_times, dtype=np.float64)
+            time_arr = np.asarray(self.eeg_times, dtype=np.float64) if self.eeg_times else np.empty(0)
             # eeg_buffer stores (n_channels,) per timepoint; average ROI channels here
             buf_2d = np.stack(self.eeg_buffer)  # (n_timepoints, n_channels)
             _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
@@ -1291,106 +1331,94 @@ class P300AnalyzerWindow(QMainWindow):
                 buf_arr = buf_2d.ravel()
             new_pending: List[Tuple[float, str]] = []
 
-            mo_off = self._marker_eeg_ts_offset
-            if mo_off is None:
-                new_pending = list(self.pending_markers)
-            else:
-                for marker_ts, stim_key in self.pending_markers:
-                    t_eff = float(marker_ts) + float(mo_off)
+            for marker_ts, stim_key in self.pending_markers:
+                # Direct index: how many samples back from buffer end is this marker?
+                seconds_back = lsl_ref - float(marker_ts)
+                start_idx = int(round(buf_len - 1 - seconds_back * srate))
+                end_idx = start_idx + el
 
-                    # Sample-count readiness check (robust to integer-second timestamps):
-                    # estimate start index via nominal dt, then verify we have enough samples.
-                    dt_s_check = float(self._epoch_geom.dt_ms) / 1000.0
-                    est_start = int(np.round((t_eff - float(time_arr[0])) / dt_s_check))
-                    est_end = est_start + int(self._epoch_geom.epoch_len)
-                    reserve_samples = max(1, int(reserve_s / dt_s_check))
-                    if est_end + reserve_samples > time_arr.shape[0]:
-                        new_pending.append((marker_ts, stim_key))
-                        continue
+                if end_idx + reserve_samples > buf_len:
+                    new_pending.append((marker_ts, stim_key))
+                    continue
+                if start_idx < 0:
+                    continue
 
-                    start_idx = self._compute_epoch_start_index(time_arr, t_eff)
-                    if start_idx is None:
-                        new_pending.append((marker_ts, stim_key))
-                        continue
-                    end_idx = start_idx + self._epoch_geom.epoch_len
-                    if end_idx > time_arr.shape[0]:
-                        new_pending.append((marker_ts, stim_key))
-                        continue
-
-                    start_t = float(time_arr[start_idx])
-                    end_t = float(time_arr[end_idx - 1])
-                    span_s = end_t - start_t
-                    dt_s = float(self._epoch_geom.dt_ms) / 1000.0
-                    el = int(self._epoch_geom.epoch_len)
+                epoch = buf_arr[start_idx:end_idx]
+                if epoch.shape[0] == el:
+                    n_epochs_before = sum(len(v) for v in self.epochs_data.values())
+                    self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
+                    # region agent log
+                    self._dbg_epoch_lag_n += 1
+                    # lag_ms: how far start_idx is from the ideal marker position.
+                    # Ideal index = buf_len - 1 - seconds_back * srate (float, before rounding)
+                    ideal_idx = buf_len - 1 - seconds_back * srate
+                    lag_ms = (start_idx - ideal_idx) * dt_s * 1000.0
                     span_nominal_s = (float(el) - 1.0) * dt_s
-
-                    epoch = buf_arr[start_idx:end_idx]
-                    if epoch.shape[0] == self._epoch_geom.epoch_len:
-                        n_epochs_before = sum(len(v) for v in self.epochs_data.values())
-                        self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
-                        # region agent log
-                        self._dbg_epoch_lag_n += 1
-                        lag_ms = (start_t - t_eff) * 1000.0
-                        # Timestamp resolution diagnostic: unique timestamps inside this epoch
+                    # Timestamp resolution diagnostic
+                    if time_arr.shape[0] == buf_len and end_idx <= time_arr.shape[0]:
                         epoch_ts = time_arr[start_idx:end_idx]
                         ts_unique_count = int(np.unique(epoch_ts).shape[0])
-                        ts_resolution_hint = "sub-sample" if ts_unique_count > el // 2 else f"{ts_unique_count}_unique_in_{el}"
-                        debug_ndjson(
-                            {
-                                "hypothesisId": "H2_lag",
-                                "message": "epoch_align",
-                                "data": {
-                                    "epoch_align_event_seq": self._dbg_epoch_lag_n,
-                                    "run_seq": self._exp_run_seq,
-                                    "stim_key": stim_key,
-                                    "marker_ts": float(marker_ts),
-                                    "t_eff": t_eff,
-                                    "start_t": start_t,
-                                    "lag_ms": lag_ms,
-                                    "span_s": span_s,
-                                    "span_nominal_s": span_nominal_s,
-                                    "offset": self._marker_eeg_ts_offset,
-                                    "index_rule": "nominal_dt_only",
-                                    "start_idx": int(start_idx),
-                                    "end_idx": int(end_idx),
-                                    "epoch_len": int(self._epoch_geom.epoch_len),
-                                    "ts_unique_in_epoch": ts_unique_count,
-                                    "ts_resolution_hint": ts_resolution_hint,
-                                    "roi_channels_used": _valid,
-                                },
-                            }
-                        )
-                        self._session_recorder.log_event(
-                            "epoch_extracted",
-                            {
+                    else:
+                        ts_unique_count = -1
+                    ts_resolution_hint = (
+                        "sub-sample" if ts_unique_count > el // 2
+                        else f"{ts_unique_count}_unique_in_{el}"
+                    )
+                    debug_ndjson(
+                        {
+                            "hypothesisId": "H2_lag",
+                            "message": "epoch_align",
+                            "data": {
+                                "epoch_align_event_seq": self._dbg_epoch_lag_n,
                                 "run_seq": self._exp_run_seq,
-                                "event_seq": self._dbg_epoch_lag_n,
                                 "stim_key": stim_key,
                                 "marker_ts": float(marker_ts),
-                                "t_eff": t_eff,
-                                "start_t": start_t,
-                                "end_t": end_t,
+                                "lsl_ref": lsl_ref,
+                                "seconds_back": seconds_back,
                                 "lag_ms": lag_ms,
-                                "span_s": span_s,
                                 "span_nominal_s": span_nominal_s,
-                                "offset": self._marker_eeg_ts_offset,
+                                "index_rule": "lsl_clock_direct",
                                 "start_idx": int(start_idx),
                                 "end_idx": int(end_idx),
-                                "epoch_samples": epoch.tolist(),
-                                "epoch_counts_by_stim": self._epoch_counts_snapshot(),
+                                "buf_len": buf_len,
+                                "epoch_len": el,
+                                "srate": srate,
+                                "ts_unique_in_epoch": ts_unique_count,
+                                "ts_resolution_hint": ts_resolution_hint,
+                                "roi_channels_used": _valid,
                             },
+                        }
+                    )
+                    self._session_recorder.log_event(
+                        "epoch_extracted",
+                        {
+                            "run_seq": self._exp_run_seq,
+                            "event_seq": self._dbg_epoch_lag_n,
+                            "stim_key": stim_key,
+                            "marker_ts": float(marker_ts),
+                            "lsl_ref": lsl_ref,
+                            "seconds_back": seconds_back,
+                            "lag_ms": lag_ms,
+                            "start_idx": int(start_idx),
+                            "end_idx": int(end_idx),
+                            "buf_len": buf_len,
+                            "epoch_samples": epoch.tolist(),
+                            "epoch_counts_by_stim": self._epoch_counts_snapshot(),
+                        },
+                    )
+                    # endregion
+                    if n_epochs_before == 0:
+                        LOG.info(
+                            "Первая эпоха ERP: %s, index=[%d:%d] в буфере из %d "
+                            "(%.1f с назад от буфера, %d отсч. @ %.1f Гц)",
+                            stim_key,
+                            start_idx,
+                            end_idx,
+                            buf_len,
+                            seconds_back,
+                            el,
+                            srate,
                         )
-                        # endregion
-                        if n_epochs_before == 0:
-                            LOG.info(
-                                "Первая эпоха ERP: %s, span по меткам LSL=%.4f с, "
-                                "номинально %.4f с (%d отсчётов @ %.1f Гц)",
-                                stim_key,
-                                span_s,
-                                span_nominal_s,
-                                self._epoch_geom.epoch_len,
-                                1000.0 / self._epoch_geom.dt_ms,
-                            )
                         # Basic cap: keep most recent epochs per stimulus
                         if len(self.epochs_data[stim_key]) > 300:
                             self.epochs_data[stim_key] = self.epochs_data[stim_key][-300:]
@@ -1400,26 +1428,22 @@ class P300AnalyzerWindow(QMainWindow):
 
             self.pending_markers = new_pending
 
-        # 4) Trim old EEG samples to keep memory bounded
-        if self._recording_epochs and self.eeg_times:
-            latest = float(self.eeg_times[-1])
-            cutoff = latest - EEG_KEEP_SECONDS
+        # 4) Trim old EEG samples to keep memory bounded (sample-count based)
+        if self._recording_epochs and self.eeg_buffer and self._epoch_geom.dt_ms:
+            _srate_trim = 1000.0 / float(self._epoch_geom.dt_ms)
+            max_keep = int(EEG_KEEP_SECONDS * _srate_trim)
+            if len(self.eeg_buffer) > max_keep:
+                cut = len(self.eeg_buffer) - max_keep
+                self.eeg_buffer = self.eeg_buffer[cut:]
+                self.eeg_times = self.eeg_times[cut:]
 
-            time_arr = np.asarray(self.eeg_times, dtype=np.float64)
-            cut_idx = int(np.searchsorted(time_arr, cutoff, side="left"))
-            if cut_idx > 0:
-                self.eeg_buffer = self.eeg_buffer[cut_idx:]
-                self.eeg_times = self.eeg_times[cut_idx:]
-
-            # Маркеры в исходной шкале; сравнение с cutoff (шкала ЭЭГ) через offset.
-            new_pending = []
-            mo = self._marker_eeg_ts_offset
-            for marker_ts, stim_key in self.pending_markers:
-                if mo is None:
-                    new_pending.append((marker_ts, stim_key))
-                elif float(marker_ts) + float(mo) >= cutoff:
-                    new_pending.append((marker_ts, stim_key))
-            self.pending_markers = new_pending
+            # Drop pending markers that are too old (their epoch data was trimmed away)
+            if self._lsl_clock_at_buffer_end is not None:
+                lsl_cutoff = self._lsl_clock_at_buffer_end - EEG_KEEP_SECONDS
+                self.pending_markers = [
+                    (mts, sk) for mts, sk in self.pending_markers
+                    if float(mts) >= lsl_cutoff
+                ]
 
         # 5) Redraw if new epochs arrived or GUI parameters changed
         if self._need_redraw_params:
