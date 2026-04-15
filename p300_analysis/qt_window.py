@@ -122,6 +122,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._marker_ts_last_trial_start: Optional[float] = None
         self._session_recorder = SessionRecorder()
         self._session_run_id: Optional[str] = None
+        # True after first stimulus marker in current recording run.
+        self._has_seen_stimulus_marker_in_run: bool = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(50)
@@ -621,6 +623,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._dbg_epoch_lag_n = 0
         self._dbg_winner_n = 0
         self._dbg_cue_n = 0
+        self._has_seen_stimulus_marker_in_run = False
         self._exp_run_seq += 1
         self._exp_trial_targets = []
         self._exp_last_winner_digit = None
@@ -1157,6 +1160,16 @@ class P300AnalyzerWindow(QMainWindow):
                     stim_key = marker_value_to_stim_key(sample)
                     if stim_key is None:
                         continue
+                    if not self._has_seen_stimulus_marker_in_run:
+                        self._has_seen_stimulus_marker_in_run = True
+                        self._session_recorder.log_event(
+                            "stimulus_stream_started",
+                            {
+                                "run_seq": self._exp_run_seq,
+                                "first_stimulus_marker_ts": float(ts),
+                                "stim_key": stim_key,
+                            },
+                        )
                     tsf = float(ts)
                     if (
                         self.chk_epochs_after_trial.isChecked()
@@ -1187,7 +1200,9 @@ class P300AnalyzerWindow(QMainWindow):
             arr = np.asarray(eeg_chunk, dtype=np.float64)
             if arr.size:
                 if self._recording_epochs:
-                    self._session_recorder.log_eeg_chunk(eeg_chunk=arr, eeg_ts=eeg_ts)
+                    # Skip idle EEG logging before first real stimulus marker.
+                    if self._has_seen_stimulus_marker_in_run:
+                        self._session_recorder.log_eeg_chunk(eeg_chunk=arr, eeg_ts=eeg_ts)
                 if arr.ndim == 1:
                     ch0 = arr
                 elif arr.ndim == 2:
