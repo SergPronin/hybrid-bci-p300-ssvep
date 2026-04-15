@@ -34,7 +34,7 @@ def integrated_cumsum(
     window_x_ms: int,
     window_y_ms: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Интеграция положительной части ERP: cumsum(max(corrected, 0))."""
+    """Интеграция ERP по модулю: cumsum(abs(corrected[x_idx:y_idx]))."""
     if corrected.ndim < 1:
         raise ValueError("corrected must have at least 1 dimension")
     if time_ms.ndim != 1:
@@ -49,9 +49,7 @@ def integrated_cumsum(
     x_idx = max(0, min(x_idx, time_ms.shape[0] - 1))
     y_idx = max(x_idx + 1, min(y_idx, time_ms.shape[0]))
 
-    # Для P300 информативен положительный отклик в окне, а не модуль сигнала:
-    # large negative deflections should not increase the winner score.
-    segment = np.clip(corrected[..., x_idx:y_idx], a_min=0.0, a_max=None)
-    integrated = np.cumsum(segment, axis=-1)
+    segment = corrected[..., x_idx:y_idx]
+    integrated = np.cumsum(np.abs(segment), axis=-1)
     time_crop = time_ms[x_idx:y_idx]
     return integrated, time_crop

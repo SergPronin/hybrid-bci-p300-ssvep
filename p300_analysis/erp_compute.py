@@ -72,8 +72,6 @@ def compute_winner_metrics(
     xi0 = max(0, min(xi0, time_ms.shape[0] - 1))
     xi1 = max(xi0 + 1, min(xi1, time_ms.shape[0]))
     corr_win = corrected[:, xi0:xi1]
-    pos_win = np.clip(corr_win, a_min=0.0, a_max=None)
-    positive_auc_values = np.sum(pos_win, axis=1) * dt_m
     abs_auc_values = np.sum(np.abs(corr_win), axis=1) * dt_m
     signed_mean_values = np.mean(corr_win, axis=1) if corr_win.size else np.zeros(len(stim_keys))
     positive_peak_values = np.max(corr_win, axis=1) if corr_win.size else np.zeros(len(stim_keys))
@@ -82,11 +80,11 @@ def compute_winner_metrics(
         final_metric_values = signed_mean_values
         mode_used = WINNER_MODE_SIGNED_MEAN
     else:
-        final_metric_values = positive_auc_values
+        final_metric_values = abs_auc_values
         mode_used = WINNER_MODE_AUC
 
     winner_idx = int(np.argmax(final_metric_values))
-    auc_winner_idx = int(np.argmax(positive_auc_values))
+    auc_winner_idx = int(np.argmax(abs_auc_values))
     abs_max_values = np.max(np.abs(corr_win), axis=1) if corr_win.size else np.zeros(len(stim_keys))
     debug_payload = {
         "winner_rule": mode_used,
@@ -95,7 +93,6 @@ def compute_winner_metrics(
         "stim_keys": stim_keys,
         "final_metric_values": [float(x) for x in final_metric_values],
         "signed_mean_final": [float(x) for x in signed_mean_values],
-        "positive_auc_values": [float(x) for x in positive_auc_values],
         "abs_auc_values": [float(x) for x in abs_auc_values],
         "auc_winner_idx": auc_winner_idx,
         "auc_winner_key": stim_keys[auc_winner_idx],

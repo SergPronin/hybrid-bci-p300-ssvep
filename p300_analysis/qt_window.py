@@ -60,7 +60,6 @@ from p300_analysis.marker_parsing import marker_value_to_stim_key, parse_trial_t
 from p300_analysis.session_recorder import SessionRecorder
 from p300_analysis.winner_selection import (
     WINNER_MODE_AUC,
-    WINNER_MODE_SIGNED_MEAN,
     mode_to_short_label,
 )
 
@@ -363,10 +362,7 @@ class P300AnalyzerWindow(QMainWindow):
             "background-color: #2d2d2d; color: white; padding: 5px; border: 1px solid #555; border-radius: 3px;"
         )
         self.combo_winner_mode.addItem(
-            "Положительная AUC (cumsum corrected+ в [X–Y])", WINNER_MODE_AUC
-        )
-        self.combo_winner_mode.addItem(
-            "Среднее corrected в окне [X–Y]", WINNER_MODE_SIGNED_MEAN
+            "Интегрирование по модулю |corrected| в окне [X–Y]", WINNER_MODE_AUC
         )
         self.combo_winner_mode.setCurrentIndex(0)
         self.combo_winner_mode.currentIndexChanged.connect(self._on_params_changed)
@@ -410,7 +406,7 @@ class P300AnalyzerWindow(QMainWindow):
 
         self._setup_plot(self.plot_raw, title="Сырые усредненные потенциалы")
         self._setup_plot(self.plot_corrected, title="После выравнивания (Baseline Correction)")
-        self._setup_plot(self.plot_integrated, title="Интегрирование положительной площади (AUC)")
+        self._setup_plot(self.plot_integrated, title="Интегрирование по модулю (AUC)")
 
         plots_layout.addWidget(self.plot_raw, stretch=1)
         plots_layout.addWidget(self.plot_corrected, stretch=1)
@@ -938,7 +934,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._setup_plot(
             self.plot_corrected, title="После выравнивания (Baseline Correction)"
         )
-        self._setup_plot(self.plot_integrated, title="Интегрирование положительной площади (AUC)")
+        self._setup_plot(self.plot_integrated, title="Интегрирование по модулю (AUC)")
 
     def _ensure_epoch_template(self) -> None:
         self._epoch_geom.ensure_template(self._inlet_eeg, self.eeg_times)
@@ -1100,9 +1096,9 @@ class P300AnalyzerWindow(QMainWindow):
             )
         self.plot_corrected.setXRange(0, 800)
 
-        # Graph 3: integration of the positive ERP area in the decision window
+        # Graph 3: |corrected| integrated in the decision window
         self.plot_integrated.clear()
-        self._setup_plot(self.plot_integrated, title="Интегрирование положительной площади (AUC)")
+        self._setup_plot(self.plot_integrated, title="Интегрирование по модулю (AUC)")
         for i in range(n_stim):
             label = labels[i] if i < len(labels) else f"Стимул {i + 1}"
             self.plot_integrated.plot(
