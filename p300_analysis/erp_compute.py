@@ -9,6 +9,7 @@ import numpy as np
 from p300_analysis.constants import MIN_EPOCHS_TO_DECIDE
 from p300_analysis.marker_parsing import stim_key_sort_key, stim_key_to_tile_digit
 from p300_analysis.signal_processing import baseline_correction, integrated_cumsum
+from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_SIGNED_MEAN
 
 
 def build_averaged_erp(
@@ -62,6 +63,7 @@ def compute_winner_metrics(
     time_ms: np.ndarray,
     window_x_ms: int,
     window_y_ms: int,
+    winner_mode: str = WINNER_MODE_AUC,
 ) -> Tuple[int, str, Dict[str, Any]]:
     """Возвращает winner_idx, mode_used, data для debug_ndjson (winner_compare)."""
     dt_m = float(time_ms[1] - time_ms[0]) if time_ms.shape[0] > 1 else 1.0
@@ -70,25 +72,34 @@ def compute_winner_metrics(
     xi0 = max(0, min(xi0, time_ms.shape[0] - 1))
     xi1 = max(xi0 + 1, min(xi1, time_ms.shape[0]))
     corr_win = corrected[:, xi0:xi1]
-    # P300 is a POSITIVE deflection; signed mean is more discriminative than abs-AUC,
-    # which counts negative noise and artifacts equally with real P300.
+    pos_win = np.clip(corr_win, a_min=0.0, a_max=None)
+    positive_auc_values = np.sum(pos_win, axis=1) * dt_m
     abs_auc_values = np.sum(np.abs(corr_win), axis=1) * dt_m
     signed_mean_values = np.mean(corr_win, axis=1) if corr_win.size else np.zeros(len(stim_keys))
-    # Primary metric: signed mean (positive = P300-like)
-    final_metric_values = signed_mean_values
+    positive_peak_values = np.max(corr_win, axis=1) if corr_win.size else np.zeros(len(stim_keys))
+
+    if winner_mode == WINNER_MODE_SIGNED_MEAN:
+        final_metric_values = signed_mean_values
+        mode_used = WINNER_MODE_SIGNED_MEAN
+    else:
+        final_metric_values = positive_auc_values
+        mode_used = WINNER_MODE_AUC
+
     winner_idx = int(np.argmax(final_metric_values))
-    mode_used = "signed_mean"
-    auc_winner_idx = int(np.argmax(abs_auc_values))
+    auc_winner_idx = int(np.argmax(positive_auc_values))
     abs_max_values = np.max(np.abs(corr_win), axis=1) if corr_win.size else np.zeros(len(stim_keys))
     debug_payload = {
         "winner_rule": mode_used,
         "chosen_winner_idx": winner_idx,
         "chosen_winner_key": stim_keys[winner_idx],
         "stim_keys": stim_keys,
+        "final_metric_values": [float(x) for x in final_metric_values],
         "signed_mean_final": [float(x) for x in signed_mean_values],
+        "positive_auc_values": [float(x) for x in positive_auc_values],
         "abs_auc_values": [float(x) for x in abs_auc_values],
         "auc_winner_idx": auc_winner_idx,
         "auc_winner_key": stim_keys[auc_winner_idx],
+        "positive_peak_values": [float(x) for x in positive_peak_values],
         "window_index": [xi0, xi1],
         "dt_ms": float(dt_m),
         "window_ms": [window_x_ms, window_y_ms],
