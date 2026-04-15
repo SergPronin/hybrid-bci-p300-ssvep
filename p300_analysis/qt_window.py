@@ -57,6 +57,7 @@ from p300_analysis.lsl_streams import (
     unwrap_combo_userdata,
 )
 from p300_analysis.marker_parsing import marker_value_to_stim_key, parse_trial_target_tile_id
+from p300_analysis.session_recorder import SessionRecorder
 from p300_analysis.winner_selection import (
     WINNER_MODE_AUC,
     WINNER_MODE_PEAK_CORRECTED,
@@ -122,6 +123,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._exp_last_winner_digit: Optional[int] = None
         # LSL trial_start: отсечь вспышки до cue (см. chk_epochs_after_trial)
         self._marker_ts_last_trial_start: Optional[float] = None
+        self._session_recorder = SessionRecorder()
+        self._session_run_id: Optional[str] = None
 
         self._timer = QTimer(self)
         self._timer.setInterval(50)
@@ -639,6 +642,22 @@ class P300AnalyzerWindow(QMainWindow):
             "Если нажали «Начать» до запуска плиток — дождитесь первой вспышки (калибровка времени по ней)."
         )
         LOG.info("Начата запись эпох для анализа")
+        self._session_run_id = self._session_recorder.start_run(
+            {
+                "run_seq": self._exp_run_seq,
+                "winner_mode": self.combo_winner_mode.currentData(),
+                "baseline_ms": int(self.spin_baseline.value()),
+                "window_x_ms": int(self.spin_x.value()),
+                "window_y_ms": int(self.spin_y.value()),
+                "epochs_after_trial_only": bool(self.chk_epochs_after_trial.isChecked()),
+                "recorder_file": str(self._session_recorder.output_path),
+            }
+        )
+        LOG.info(
+            "Запущена запись сырых данных для офлайн-отладки: run_id=%s file=%s",
+            self._session_run_id,
+            self._session_recorder.output_path,
+        )
         # region agent log
         debug_ndjson(
             {
@@ -682,25 +701,30 @@ class P300AnalyzerWindow(QMainWindow):
             n_lag = self._dbg_epoch_lag_n
         except Exception:
             n_lag = 0
+        summary = {
+            "run_seq": self._exp_run_seq,
+            "lsl_cue_targets_in_order": targets,
+            "n_cues": len(targets),
+            "unique_cues": sorted(set(targets)),
+            "last_lsl_cue": last_cue,
+            "ui_winner_tile_id": win,
+            "match_last_cue_vs_winner": match_last,
+            "epoch_counts_by_stim": counts,
+            "n_epoch_align_logs": n_lag,
+            "marker_eeg_offset": self._marker_eeg_ts_offset,
+        }
         debug_ndjson(
             {
                 "hypothesisId": "H5_experiment",
                 "message": "run_end",
                 "data": {
                     "reason": reason,
-                    "run_seq": self._exp_run_seq,
-                    "lsl_cue_targets_in_order": targets,
-                    "n_cues": len(targets),
-                    "unique_cues": sorted(set(targets)),
-                    "last_lsl_cue": last_cue,
-                    "ui_winner_tile_id": win,
-                    "match_last_cue_vs_winner": match_last,
-                    "epoch_counts_by_stim": counts,
-                    "n_epoch_align_logs": n_lag,
-                    "marker_eeg_offset": self._marker_eeg_ts_offset,
+                    **summary,
                 },
             }
         )
+        self._session_recorder.stop_run(reason=reason, summary=summary)
+        self._session_run_id = None
 
     def _on_reset_analysis_clicked(self) -> None:
         if self._inlet_eeg is None or self._inlet_markers is None:
@@ -802,6 +826,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._begin_connection_session()
 
     def _on_disconnect_clicked(self) -> None:
+        if self._recording_epochs:
+            self._log_experiment_run_end("disconnect_clicked")
         self._recording_epochs = False
         if self._timer.isActive():
             self._timer.stop()
@@ -845,6 +871,8 @@ class P300AnalyzerWindow(QMainWindow):
         LOG.info("Сессия LSL остановлена пользователем")
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._recording_epochs:
+            self._log_experiment_run_end("window_closed")
         if self._timer.isActive():
             self._timer.stop()
         try:
@@ -937,6 +965,16 @@ class P300AnalyzerWindow(QMainWindow):
                 winner_key, mode_to_short_label(mode_used), self._lsl_cue_target_id
             )
             self._exp_last_winner_digit = win_digit
+            self._session_recorder.log_winner(
+                {
+                    "run_seq": self._exp_run_seq,
+                    "winner_key": winner_key,
+                    "winner_digit": win_digit,
+                    "mode": mode_used,
+                    "match_lsl_cue": match_lsl,
+                    "lsl_cue_target_id": self._lsl_cue_target_id,
+                }
+            )
             self.winner_label.setText("\n".join(lines))
             self.winner_label.setStyleSheet(
                 WINNER_LABEL_STYLE_MATCH if match_lsl else WINNER_LABEL_STYLE_MISMATCH
@@ -1041,6 +1079,7 @@ class P300AnalyzerWindow(QMainWindow):
             marker_samples_this_tick = len(marker_ts)
             self._append_marker_monitor_events(marker_samples_this_tick)
             if self._recording_epochs:
+                self._session_recorder.log_markers(marker_chunk=marker_chunk, marker_ts=marker_ts)
                 for sample, ts in zip(marker_chunk, marker_ts):
                     cue_tid = parse_trial_target_tile_id(sample)
                     if cue_tid is not None:
@@ -1101,6 +1140,8 @@ class P300AnalyzerWindow(QMainWindow):
             eeg_samples_this_tick = len(eeg_ts)
             arr = np.asarray(eeg_chunk, dtype=np.float64)
             if arr.size:
+                if self._recording_epochs:
+                    self._session_recorder.log_eeg_chunk(eeg_chunk=arr, eeg_ts=eeg_ts)
                 if arr.ndim == 1:
                     ch0 = arr
                 elif arr.ndim == 2:
