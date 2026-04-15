@@ -69,17 +69,14 @@ def compute_winner_metrics(
     xi1 = int(round(float(window_y_ms) / dt_m)) + 1
     xi0 = max(0, min(xi0, time_ms.shape[0] - 1))
     xi1 = max(xi0 + 1, min(xi1, time_ms.shape[0]))
-    raw_win = raw_averaged[:, xi0:xi1]
     corr_win = corrected[:, xi0:xi1]
-    final_auc_values = np.sum(np.abs(corr_win), axis=1)
+    final_auc_values = np.sum(np.abs(corr_win), axis=1) * dt_m
     print("AUC values:", final_auc_values)
     winner_idx = int(np.argmax(final_auc_values))
     mode_used = "auc"
     auc_winner_idx = int(np.argmax(final_auc_values))
-    peak_idx = int(np.argmax(np.max(raw_win, axis=1)))
-    signed_idx = int(np.argmax(np.mean(corr_win, axis=1)))
-    peak_vals = np.max(raw_win, axis=1).tolist()
-    signed_vals = np.mean(corr_win, axis=1).tolist()
+    abs_max_values = np.max(np.abs(corr_win), axis=1) if corr_win.size else np.zeros(len(stim_keys))
+    corr_mean_values = np.mean(corr_win, axis=1) if corr_win.size else np.zeros(len(stim_keys))
     debug_payload = {
         "winner_rule": mode_used,
         "chosen_winner_idx": winner_idx,
@@ -88,13 +85,12 @@ def compute_winner_metrics(
         "auc_final": [float(x) for x in final_auc_values],
         "auc_winner_idx": auc_winner_idx,
         "auc_winner_key": stim_keys[auc_winner_idx],
-        "peak_in_window_idx": peak_idx,
-        "peak_in_window_key": stim_keys[peak_idx],
-        "signed_mean_idx": signed_idx,
-        "signed_mean_key": stim_keys[signed_idx],
+        "window_index": [xi0, xi1],
+        "dt_ms": float(dt_m),
         "window_ms": [window_x_ms, window_y_ms],
-        "peak_vals": peak_vals,
-        "signed_vals": signed_vals,
+        "corr_abs_max": [float(x) for x in abs_max_values],
+        "corr_mean_in_window": [float(x) for x in corr_mean_values],
+        "corr_window_shape": [int(corr_win.shape[0]), int(corr_win.shape[1])],
     }
     return winner_idx, mode_used, debug_payload
 

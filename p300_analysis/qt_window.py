@@ -130,6 +130,9 @@ class P300AnalyzerWindow(QMainWindow):
         self._setup_ui()
         self._setup_stream_monitor_windows()
 
+    def _epoch_counts_snapshot(self) -> Dict[str, int]:
+        return {k: len(v) for k, v in self.epochs_data.items()}
+
     def _setup_stream_monitor_windows(self) -> None:
         """Два отдельных окна: ЭЭГ (нейроспектр) и маркеры плиток (PsychoPy)."""
         def _make(title: str) -> Tuple[QWidget, QLabel, pg.PlotWidget]:
@@ -319,14 +322,14 @@ class P300AnalyzerWindow(QMainWindow):
 
         self.spin_x = QSpinBox()
         self.spin_x.setRange(0, 799)
-        self.spin_x.setValue(250)
+        self.spin_x.setValue(200)
         self.spin_x.setSuffix(" мс")
         self.spin_x.setKeyboardTracking(False)
         self.spin_x.valueChanged.connect(self._on_params_changed)
 
         self.spin_y = QSpinBox()
         self.spin_y.setRange(1, 800)
-        self.spin_y.setValue(500)
+        self.spin_y.setValue(600)
         self.spin_y.setKeyboardTracking(False)
         self.spin_y.valueChanged.connect(self._on_params_changed)
 
@@ -640,6 +643,19 @@ class P300AnalyzerWindow(QMainWindow):
                 "window_x_ms": int(self.spin_x.value()),
                 "window_y_ms": int(self.spin_y.value()),
                 "epochs_after_trial_only": bool(self.chk_epochs_after_trial.isChecked()),
+                "selected_roi_channels_0idx": [
+                    i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()
+                ],
+                "eeg_stream_name": (self._inlet_eeg.info().name() if self._inlet_eeg else None),
+                "eeg_stream_srate": (
+                    float(self._inlet_eeg.info().nominal_srate()) if self._inlet_eeg else None
+                ),
+                "eeg_stream_channels": (
+                    int(self._inlet_eeg.info().channel_count()) if self._inlet_eeg else None
+                ),
+                "markers_stream_name": (
+                    self._inlet_markers.info().name() if self._inlet_markers else None
+                ),
                 "recorder_file": str(self._session_recorder.output_path),
             }
         )
@@ -653,7 +669,14 @@ class P300AnalyzerWindow(QMainWindow):
             {
                 "hypothesisId": "H5_experiment",
                 "message": "run_start",
-                "data": {"run_seq": self._exp_run_seq},
+                "data": {
+                    "run_seq": self._exp_run_seq,
+                    "window_ms": [int(self.spin_x.value()), int(self.spin_y.value())],
+                    "baseline_ms": int(self.spin_baseline.value()),
+                    "selected_roi_channels_0idx": [
+                        i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()
+                    ],
+                },
             }
         )
         # endregion
@@ -702,6 +725,15 @@ class P300AnalyzerWindow(QMainWindow):
             "epoch_counts_by_stim": counts,
             "n_epoch_align_logs": n_lag,
             "marker_eeg_offset": self._marker_eeg_ts_offset,
+            "pending_markers_count": len(self.pending_markers),
+            "eeg_buffer_len": len(self.eeg_buffer),
+            "eeg_times_len": len(self.eeg_times),
+            "analysis_params": {
+                "baseline_ms": int(self.spin_baseline.value()),
+                "window_x_ms": int(self.spin_x.value()),
+                "window_y_ms": int(self.spin_y.value()),
+                "epochs_after_trial_only": bool(self.chk_epochs_after_trial.isChecked()),
+            },
         }
         debug_ndjson(
             {
@@ -941,11 +973,12 @@ class P300AnalyzerWindow(QMainWindow):
             winner_key = stim_keys[winner_idx]
             dbg["lsl_cue_target_id"] = self._lsl_cue_target_id
             dbg["run_seq"] = self._exp_run_seq
-            if self._dbg_winner_n < 18:
-                self._dbg_winner_n += 1
-                debug_ndjson(
-                    {"hypothesisId": "H1_metric", "message": "winner_compare", "data": dbg}
-                )
+            self._dbg_winner_n += 1
+            dbg["winner_event_seq"] = self._dbg_winner_n
+            dbg["marker_eeg_offset"] = self._marker_eeg_ts_offset
+            dbg["pending_markers_count"] = len(self.pending_markers)
+            dbg["epoch_counts_by_stim"] = {k: len(self.epochs_data.get(k, [])) for k in stim_keys}
+            debug_ndjson({"hypothesisId": "H1_metric", "message": "winner_compare", "data": dbg})
             lines, win_digit, match_lsl = winner_display_lines(
                 winner_key, mode_to_short_label(mode_used), self._lsl_cue_target_id
             )
@@ -953,11 +986,33 @@ class P300AnalyzerWindow(QMainWindow):
             self._session_recorder.log_winner(
                 {
                     "run_seq": self._exp_run_seq,
+                    "winner_event_seq": self._dbg_winner_n,
                     "winner_key": winner_key,
                     "winner_digit": win_digit,
                     "mode": mode_used,
                     "match_lsl_cue": match_lsl,
                     "lsl_cue_target_id": self._lsl_cue_target_id,
+                    "winner_debug": dbg,
+                    "window_ms": [wx, wy],
+                    "time_axis_ms": [float(x) for x in time_ms],
+                    "time_crop_ms": [float(x) for x in time_crop],
+                    "stim_keys": stim_keys,
+                    "epoch_counts_by_stim": {k: len(self.epochs_data.get(k, [])) for k in stim_keys},
+                    "raw_averaged": raw_averaged.tolist(),
+                    "corrected": corrected.tolist(),
+                    "integrated": integrated.tolist(),
+                    "pending_markers_count": len(self.pending_markers),
+                    "marker_eeg_offset": self._marker_eeg_ts_offset,
+                    "analysis_params": {
+                        "baseline_ms": baseline_ms,
+                        "window_x_ms": wx,
+                        "window_y_ms": wy,
+                        "min_epochs_to_decide": MIN_EPOCHS_TO_DECIDE,
+                        "epochs_after_trial_only": bool(self.chk_epochs_after_trial.isChecked()),
+                        "roi_channels_0idx": [
+                            i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()
+                        ],
+                    },
                 }
             )
             self.winner_label.setText("\n".join(lines))
@@ -1083,15 +1138,21 @@ class P300AnalyzerWindow(QMainWindow):
                                 },
                             }
                         )
-                        if self._dbg_cue_n < 12:
-                            self._dbg_cue_n += 1
-                            debug_ndjson(
-                                {
-                                    "hypothesisId": "H3_cue",
-                                    "message": "trial_target_lsl",
-                                    "data": {"target_tile_id": cue_tid},
-                                }
-                            )
+                        self._dbg_cue_n += 1
+                        debug_ndjson(
+                            {
+                                "hypothesisId": "H3_cue",
+                                "message": "trial_target_lsl",
+                                "data": {
+                                    "cue_event_seq": self._dbg_cue_n,
+                                    "target_tile_id": cue_tid,
+                                    "marker_ts": float(ts),
+                                    "pending_markers_count": len(self.pending_markers),
+                                    "marker_eeg_offset": self._marker_eeg_ts_offset,
+                                    "epoch_counts_by_stim": self._epoch_counts_snapshot(),
+                                },
+                            }
+                        )
                         # endregion
                     stim_key = marker_value_to_stim_key(sample)
                     if stim_key is None:
@@ -1165,6 +1226,17 @@ class P300AnalyzerWindow(QMainWindow):
                             float(self.eeg_times[-1]),
                             fm,
                         )
+                        self._session_recorder.log_event(
+                            "time_alignment_calibrated",
+                            {
+                                "run_seq": self._exp_run_seq,
+                                "offset": self._marker_eeg_ts_offset,
+                                "eeg_last_ts": float(self.eeg_times[-1]),
+                                "first_flash_marker_ts": fm,
+                                "eeg_buffer_len": len(self.eeg_buffer),
+                                "pending_markers_count": len(self.pending_markers),
+                            },
+                        )
 
         # 3) Extract epochs for pending markers (up to what current buffer allows)
         if (
@@ -1213,26 +1285,50 @@ class P300AnalyzerWindow(QMainWindow):
                         n_epochs_before = sum(len(v) for v in self.epochs_data.values())
                         self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
                         # region agent log
-                        if self._dbg_epoch_lag_n < 22:
-                            self._dbg_epoch_lag_n += 1
-                            lag_ms = (start_t - t_eff) * 1000.0
-                            debug_ndjson(
-                                {
-                                    "hypothesisId": "H2_lag",
-                                    "message": "epoch_align",
-                                    "data": {
-                                        "stim_key": stim_key,
-                                        "marker_ts": float(marker_ts),
-                                        "t_eff": t_eff,
-                                        "start_t": start_t,
-                                        "lag_ms": lag_ms,
-                                        "span_s": span_s,
-                                        "span_nominal_s": span_nominal_s,
-                                        "offset": self._marker_eeg_ts_offset,
-                                        "index_rule": "nominal_dt_refine",
-                                    },
-                                }
-                            )
+                        self._dbg_epoch_lag_n += 1
+                        lag_ms = (start_t - t_eff) * 1000.0
+                        debug_ndjson(
+                            {
+                                "hypothesisId": "H2_lag",
+                                "message": "epoch_align",
+                                "data": {
+                                    "epoch_align_event_seq": self._dbg_epoch_lag_n,
+                                    "run_seq": self._exp_run_seq,
+                                    "stim_key": stim_key,
+                                    "marker_ts": float(marker_ts),
+                                    "t_eff": t_eff,
+                                    "start_t": start_t,
+                                    "lag_ms": lag_ms,
+                                    "span_s": span_s,
+                                    "span_nominal_s": span_nominal_s,
+                                    "offset": self._marker_eeg_ts_offset,
+                                    "index_rule": "nominal_dt_refine",
+                                    "start_idx": int(start_idx),
+                                    "end_idx": int(end_idx),
+                                    "epoch_len": int(self._epoch_geom.epoch_len),
+                                },
+                            }
+                        )
+                        self._session_recorder.log_event(
+                            "epoch_extracted",
+                            {
+                                "run_seq": self._exp_run_seq,
+                                "event_seq": self._dbg_epoch_lag_n,
+                                "stim_key": stim_key,
+                                "marker_ts": float(marker_ts),
+                                "t_eff": t_eff,
+                                "start_t": start_t,
+                                "end_t": end_t,
+                                "lag_ms": lag_ms,
+                                "span_s": span_s,
+                                "span_nominal_s": span_nominal_s,
+                                "offset": self._marker_eeg_ts_offset,
+                                "start_idx": int(start_idx),
+                                "end_idx": int(end_idx),
+                                "epoch_samples": epoch.tolist(),
+                                "epoch_counts_by_stim": self._epoch_counts_snapshot(),
+                            },
+                        )
                         # endregion
                         if n_epochs_before == 0:
                             LOG.info(

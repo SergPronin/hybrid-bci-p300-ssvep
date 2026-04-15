@@ -70,6 +70,12 @@ class SessionRecorder:
             return
         self._write("winner_update", payload, run_id=self._active_run_id)
 
+    def log_event(self, event: str, payload: Dict[str, Any]) -> None:
+        """Generic detailed event logger for offline replay/debug."""
+        if self._active_run_id is None:
+            return
+        self._write(event, payload, run_id=self._active_run_id)
+
     def _write(self, event: str, data: Dict[str, Any], *, run_id: str) -> None:
         try:
             line = json.dumps(
