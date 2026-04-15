@@ -9,7 +9,6 @@ import numpy as np
 from p300_analysis.constants import MIN_EPOCHS_TO_DECIDE
 from p300_analysis.marker_parsing import stim_key_sort_key, stim_key_to_tile_digit
 from p300_analysis.signal_processing import baseline_correction, integrated_cumsum
-from p300_analysis.winner_selection import WINNER_MODE_SIGNED_MEAN, pick_winner_by_mode
 
 
 def build_averaged_erp(
@@ -60,14 +59,11 @@ def compute_winner_metrics(
     stim_keys: List[str],
     raw_averaged: np.ndarray,
     corrected: np.ndarray,
-    integrated: np.ndarray,
     time_ms: np.ndarray,
     window_x_ms: int,
     window_y_ms: int,
-    winner_mode: str,
 ) -> Tuple[int, str, Dict[str, Any]]:
     """Возвращает winner_idx, mode_used, data для debug_ndjson (winner_compare)."""
-    final_auc_values = integrated[:, -1]
     dt_m = float(time_ms[1] - time_ms[0]) if time_ms.shape[0] > 1 else 1.0
     xi0 = int(round(float(window_x_ms) / dt_m))
     xi1 = int(round(float(window_y_ms) / dt_m)) + 1
@@ -75,8 +71,10 @@ def compute_winner_metrics(
     xi1 = max(xi0 + 1, min(xi1, time_ms.shape[0]))
     raw_win = raw_averaged[:, xi0:xi1]
     corr_win = corrected[:, xi0:xi1]
-    mode = winner_mode if isinstance(winner_mode, str) else WINNER_MODE_SIGNED_MEAN
-    winner_idx, mode_used = pick_winner_by_mode(mode, raw_win, corr_win, final_auc_values)
+    final_auc_values = np.sum(np.abs(corr_win), axis=1)
+    print("AUC values:", final_auc_values)
+    winner_idx = int(np.argmax(final_auc_values))
+    mode_used = "auc"
     auc_winner_idx = int(np.argmax(final_auc_values))
     peak_idx = int(np.argmax(np.max(raw_win, axis=1)))
     signed_idx = int(np.argmax(np.mean(corr_win, axis=1)))

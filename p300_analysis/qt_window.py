@@ -60,9 +60,6 @@ from p300_analysis.marker_parsing import marker_value_to_stim_key, parse_trial_t
 from p300_analysis.session_recorder import SessionRecorder
 from p300_analysis.winner_selection import (
     WINNER_MODE_AUC,
-    WINNER_MODE_PEAK_CORRECTED,
-    WINNER_MODE_PEAK_RAW,
-    WINNER_MODE_SIGNED_MEAN,
     mode_to_short_label,
 )
 
@@ -354,13 +351,6 @@ class P300AnalyzerWindow(QMainWindow):
         self.combo_winner_mode = QComboBox()
         self.combo_winner_mode.setStyleSheet(
             "background-color: #2d2d2d; color: white; padding: 5px; border: 1px solid #555; border-radius: 3px;"
-        )
-        self.combo_winner_mode.addItem(
-            "Среднее signed в окне [X–Y] (baseline → P300)", WINNER_MODE_SIGNED_MEAN
-        )
-        self.combo_winner_mode.addItem("Пик сырого ERP в окне [X–Y]", WINNER_MODE_PEAK_RAW)
-        self.combo_winner_mode.addItem(
-            "Пик после baseline в окне [X–Y]", WINNER_MODE_PEAK_CORRECTED
         )
         self.combo_winner_mode.addItem(
             "Макс. AUC (cumsum |corrected| в [X–Y])", WINNER_MODE_AUC
@@ -940,18 +930,13 @@ class P300AnalyzerWindow(QMainWindow):
             )
             self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_COLLECTING)
         else:
-            mode = self.combo_winner_mode.currentData()
-            if not isinstance(mode, str):
-                mode = WINNER_MODE_SIGNED_MEAN
             winner_idx, mode_used, dbg = compute_winner_metrics(
                 stim_keys,
                 raw_averaged,
                 corrected,
-                integrated,
                 time_ms,
                 wx,
                 wy,
-                mode,
             )
             winner_key = stim_keys[winner_idx]
             dbg["lsl_cue_target_id"] = self._lsl_cue_target_id
