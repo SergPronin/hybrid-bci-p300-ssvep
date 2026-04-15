@@ -78,7 +78,7 @@ class P300AnalyzerWindow(QMainWindow):
         self.setMinimumWidth(1100)
 
         # Real-time state required by the task
-        self.eeg_buffer: List[float] = []
+        self.eeg_buffer: List[np.ndarray] = []  # each element: (n_channels,) per timepoint
         self.eeg_times: List[float] = []
         self.pending_markers: List[Tuple[float, str]] = []
         self.epochs_data: Dict[str, List[np.ndarray]] = {}
@@ -1203,27 +1203,26 @@ class P300AnalyzerWindow(QMainWindow):
                     # Skip idle EEG logging before first real stimulus marker.
                     if self._has_seen_stimulus_marker_in_run:
                         self._session_recorder.log_eeg_chunk(eeg_chunk=arr, eeg_ts=eeg_ts)
+                # Normalize to 2D (n_samples, n_channels)
                 if arr.ndim == 1:
-                    ch0 = arr
+                    arr_2d = arr.reshape(-1, 1)
                 elif arr.ndim == 2:
-                    # Собираем индексы включенных каналов (0-indexed)
-                    roi_channels = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
-
-                    n_avail_channels = arr.shape[1]
-                    valid_channels = [c for c in roi_channels if 0 <= c < n_avail_channels]
-
-                    if valid_channels:
-                        # Average only selected valid channels
-                        ch0 = np.mean(arr[:, valid_channels], axis=1)
-                    else:
-                        # Fallback: average all available channels
-                        ch0 = np.mean(arr, axis=1)
+                    arr_2d = arr
                 else:
-                    ch0 = arr.reshape(-1)
+                    arr_2d = arr.reshape(arr.shape[0], -1)
+
+                # ch0 for monitor: average only selected ROI channels
+                roi_channels = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
+                valid_channels = [c for c in roi_channels if 0 <= c < arr_2d.shape[1]]
+                if valid_channels:
+                    ch0 = np.mean(arr_2d[:, valid_channels], axis=1)
+                else:
+                    ch0 = np.mean(arr_2d, axis=1)
 
                 self._append_eeg_monitor_samples(ch0)
                 if self._recording_epochs:
-                    self.eeg_buffer.extend(ch0.tolist())
+                    # Store ALL channels per timepoint (channel averaging deferred to epoch extraction)
+                    self.eeg_buffer.extend(arr_2d)
                     self.eeg_times.extend([float(t) for t in eeg_ts])
                     self._ensure_epoch_template()
                     if (
@@ -1232,12 +1231,26 @@ class P300AnalyzerWindow(QMainWindow):
                         and self.eeg_times
                     ):
                         fm = float(self._calib_first_marker_ts)
-                        self._marker_eeg_ts_offset = float(self.eeg_times[-1]) - fm
+                        calib_method = "fallback_last_eeg_ts"
+                        # Prefer LSL time_correction() for precise cross-stream alignment;
+                        # many drivers (Neurospect) report EEG timestamps with 1-s resolution,
+                        # making the naive eeg[-1] - marker approach imprecise.
+                        try:
+                            if self._inlet_markers is not None and self._inlet_eeg is not None:
+                                marker_tc = self._inlet_markers.time_correction(timeout=0.2)
+                                eeg_tc = self._inlet_eeg.time_correction(timeout=0.2)
+                                self._marker_eeg_ts_offset = marker_tc - eeg_tc
+                                calib_method = "lsl_time_correction"
+                        except Exception:
+                            pass
+                        if calib_method != "lsl_time_correction":
+                            self._marker_eeg_ts_offset = float(self.eeg_times[-1]) - fm
                         self._calib_first_marker_ts = None
                         LOG.info(
-                            "LSL выравнивание маркер/ЭЭГ: offset=%.6f "
+                            "LSL выравнивание маркер/ЭЭГ: offset=%.6f method=%s "
                             "(eeg[last]=%.6f, first_flash_marker=%.6f)",
                             self._marker_eeg_ts_offset,
+                            calib_method,
                             float(self.eeg_times[-1]),
                             fm,
                         )
@@ -1246,6 +1259,7 @@ class P300AnalyzerWindow(QMainWindow):
                             {
                                 "run_seq": self._exp_run_seq,
                                 "offset": self._marker_eeg_ts_offset,
+                                "calib_method": calib_method,
                                 "eeg_last_ts": float(self.eeg_times[-1]),
                                 "first_flash_marker_ts": fm,
                                 "eeg_buffer_len": len(self.eeg_buffer),
@@ -1259,12 +1273,22 @@ class P300AnalyzerWindow(QMainWindow):
             and self._epoch_geom.epoch_len is not None
             and self._epoch_geom.time_ms_template is not None
             and self.eeg_times
+            and self.eeg_buffer
         ):
             reserve_s = EPOCH_RESERVE_MS / 1000.0
             target_end_s = EPOCH_DURATION_MS / 1000.0
 
             time_arr = np.asarray(self.eeg_times, dtype=np.float64)
-            buf_arr = np.asarray(self.eeg_buffer, dtype=np.float64)
+            # eeg_buffer stores (n_channels,) per timepoint; average ROI channels here
+            buf_2d = np.stack(self.eeg_buffer)  # (n_timepoints, n_channels)
+            _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
+            _valid = [c for c in _roi if 0 <= c < buf_2d.shape[1]] if buf_2d.ndim == 2 else []
+            if buf_2d.ndim == 2 and _valid:
+                buf_arr = np.mean(buf_2d[:, _valid], axis=1)
+            elif buf_2d.ndim == 2:
+                buf_arr = np.mean(buf_2d, axis=1)
+            else:
+                buf_arr = buf_2d.ravel()
             new_pending: List[Tuple[float, str]] = []
 
             mo_off = self._marker_eeg_ts_offset
@@ -1274,8 +1298,13 @@ class P300AnalyzerWindow(QMainWindow):
                 for marker_ts, stim_key in self.pending_markers:
                     t_eff = float(marker_ts) + float(mo_off)
 
-                    # If we already have data reaching t_eff + 800 ms (plus reserve), try to cut epoch.
-                    if time_arr[-1] < t_eff + target_end_s + reserve_s:
+                    # Sample-count readiness check (robust to integer-second timestamps):
+                    # estimate start index via nominal dt, then verify we have enough samples.
+                    dt_s_check = float(self._epoch_geom.dt_ms) / 1000.0
+                    est_start = int(np.round((t_eff - float(time_arr[0])) / dt_s_check))
+                    est_end = est_start + int(self._epoch_geom.epoch_len)
+                    reserve_samples = max(1, int(reserve_s / dt_s_check))
+                    if est_end + reserve_samples > time_arr.shape[0]:
                         new_pending.append((marker_ts, stim_key))
                         continue
 
@@ -1302,6 +1331,10 @@ class P300AnalyzerWindow(QMainWindow):
                         # region agent log
                         self._dbg_epoch_lag_n += 1
                         lag_ms = (start_t - t_eff) * 1000.0
+                        # Timestamp resolution diagnostic: unique timestamps inside this epoch
+                        epoch_ts = time_arr[start_idx:end_idx]
+                        ts_unique_count = int(np.unique(epoch_ts).shape[0])
+                        ts_resolution_hint = "sub-sample" if ts_unique_count > el // 2 else f"{ts_unique_count}_unique_in_{el}"
                         debug_ndjson(
                             {
                                 "hypothesisId": "H2_lag",
@@ -1317,10 +1350,13 @@ class P300AnalyzerWindow(QMainWindow):
                                     "span_s": span_s,
                                     "span_nominal_s": span_nominal_s,
                                     "offset": self._marker_eeg_ts_offset,
-                                    "index_rule": "nominal_dt_refine",
+                                    "index_rule": "nominal_dt_only",
                                     "start_idx": int(start_idx),
                                     "end_idx": int(end_idx),
                                     "epoch_len": int(self._epoch_geom.epoch_len),
+                                    "ts_unique_in_epoch": ts_unique_count,
+                                    "ts_resolution_hint": ts_resolution_hint,
+                                    "roi_channels_used": _valid,
                                 },
                             }
                         )

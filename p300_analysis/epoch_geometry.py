@@ -67,6 +67,12 @@ class EpochGeometry:
         self._time_ms_template = np.arange(self._epoch_len, dtype=np.float64) * dt_ms
 
     def compute_start_index(self, time_arr: np.ndarray, t_eff: float) -> Optional[int]:
+        """Возвращает индекс начала эпохи в time_arr, ближайший к t_eff.
+
+        Использует номинальный dt (от srate потока), а НЕ фактические timestamp'ы,
+        потому что многие LSL-драйверы (в т.ч. Neurospect) отдают timestamp'ы
+        с разрешением 1 с — все сэмплы внутри секунды получают одну и ту же метку.
+        """
         if self._dt_ms is None or self._epoch_len is None:
             return None
         n = int(time_arr.shape[0])
@@ -76,21 +82,6 @@ class EpochGeometry:
         dt_s = float(self._dt_ms) / 1000.0
         t0 = float(time_arr[0])
 
-        def refine_window(center: int) -> int:
-            lo = max(0, center - 30)
-            hi = min(n - el, center + 30)
-            return int(
-                min(range(lo, hi + 1), key=lambda j: (abs(float(time_arr[j]) - t_eff), j))
-            )
-
         i_nom = int(np.round((t_eff - t0) / dt_s))
         i_nom = max(0, min(i_nom, n - el))
-        start_idx = refine_window(i_nom)
-        err = abs(float(time_arr[start_idx]) - t_eff)
-        if err > 1.0:
-            i_se = int(np.searchsorted(time_arr, t_eff, side="left"))
-            i_se = max(0, min(i_se, n - el))
-            start_idx2 = refine_window(i_se)
-            if abs(float(time_arr[start_idx2]) - t_eff) < err:
-                start_idx = start_idx2
-        return int(start_idx)
+        return i_nom

@@ -70,26 +70,30 @@ def compute_winner_metrics(
     xi0 = max(0, min(xi0, time_ms.shape[0] - 1))
     xi1 = max(xi0 + 1, min(xi1, time_ms.shape[0]))
     corr_win = corrected[:, xi0:xi1]
-    final_auc_values = np.sum(np.abs(corr_win), axis=1) * dt_m
-    print("AUC values:", final_auc_values)
-    winner_idx = int(np.argmax(final_auc_values))
-    mode_used = "auc"
-    auc_winner_idx = int(np.argmax(final_auc_values))
+    # P300 is a POSITIVE deflection; signed mean is more discriminative than abs-AUC,
+    # which counts negative noise and artifacts equally with real P300.
+    abs_auc_values = np.sum(np.abs(corr_win), axis=1) * dt_m
+    signed_mean_values = np.mean(corr_win, axis=1) if corr_win.size else np.zeros(len(stim_keys))
+    # Primary metric: signed mean (positive = P300-like)
+    final_metric_values = signed_mean_values
+    winner_idx = int(np.argmax(final_metric_values))
+    mode_used = "signed_mean"
+    auc_winner_idx = int(np.argmax(abs_auc_values))
     abs_max_values = np.max(np.abs(corr_win), axis=1) if corr_win.size else np.zeros(len(stim_keys))
-    corr_mean_values = np.mean(corr_win, axis=1) if corr_win.size else np.zeros(len(stim_keys))
     debug_payload = {
         "winner_rule": mode_used,
         "chosen_winner_idx": winner_idx,
         "chosen_winner_key": stim_keys[winner_idx],
         "stim_keys": stim_keys,
-        "auc_final": [float(x) for x in final_auc_values],
+        "signed_mean_final": [float(x) for x in signed_mean_values],
+        "abs_auc_values": [float(x) for x in abs_auc_values],
         "auc_winner_idx": auc_winner_idx,
         "auc_winner_key": stim_keys[auc_winner_idx],
         "window_index": [xi0, xi1],
         "dt_ms": float(dt_m),
         "window_ms": [window_x_ms, window_y_ms],
         "corr_abs_max": [float(x) for x in abs_max_values],
-        "corr_mean_in_window": [float(x) for x in corr_mean_values],
+        "corr_mean_in_window": [float(x) for x in signed_mean_values],
         "corr_window_shape": [int(corr_win.shape[0]), int(corr_win.shape[1])],
     }
     return winner_idx, mode_used, debug_payload
