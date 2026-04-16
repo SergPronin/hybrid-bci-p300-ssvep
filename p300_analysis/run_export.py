@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -12,13 +13,28 @@ def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _round3(value: Any) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        fv = float(value)
+        if not math.isfinite(fv):
+            return None
+        return round(fv, 3)
+    return value
+
+
+def _rounded_row(row: Sequence[Any]) -> List[Any]:
+    return [_round3(x) for x in row]
+
+
 def _rows_to_csv(path: Path, header: Sequence[str], rows: Iterable[Sequence[Any]]) -> None:
     _ensure_parent(path)
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(list(header))
         for row in rows:
-            writer.writerow(list(row))
+            writer.writerow(_rounded_row(row))
 
 
 def _rows_to_txt(path: Path, title: str, header: Sequence[str], rows: Iterable[Sequence[Any]]) -> None:
@@ -27,7 +43,7 @@ def _rows_to_txt(path: Path, title: str, header: Sequence[str], rows: Iterable[S
         f.write(f"{title}\n")
         f.write("\t".join(header) + "\n")
         for row in rows:
-            f.write("\t".join(str(x) for x in row) + "\n")
+            f.write("\t".join(str(x) for x in _rounded_row(row)) + "\n")
 
 
 def _summary_rows(run_data: Dict[str, Any]) -> List[Tuple[str, Any]]:
@@ -277,7 +293,7 @@ def export_run_data(
             ws = wb.create_sheet(title=name[:31])
             ws.append(list(header))
             for row in rows:
-                ws.append(list(row))
+                ws.append(_rounded_row(row))
 
         if include_summary:
             _add_sheet("summary", ("field", "value"), summary_rows)
