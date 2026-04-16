@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -727,6 +728,7 @@ class P300AnalyzerWindow(QMainWindow):
     def _on_stop_analysis_clicked(self) -> None:
         if not self._recording_epochs:
             return
+        self._finalize_pending_epochs_for_stop()
         self._recording_epochs = False
         self.pending_markers = []
         self.btn_start_analysis.setEnabled(True)
@@ -738,6 +740,87 @@ class P300AnalyzerWindow(QMainWindow):
         # region agent log
         self._log_experiment_run_end("stop_clicked")
         # endregion
+
+    def _finalize_pending_epochs_for_stop(self) -> None:
+        """Best-effort finalize pending markers before stopping recording.
+
+        Useful for very short runs (e.g. one flash per tile), where the user
+        clicks Stop immediately and epochs may still be queued in pending_markers.
+        """
+        if (
+            not self._recording_epochs
+            or self._epoch_geom.epoch_len is None
+            or self._epoch_geom.dt_ms is None
+            or self._epoch_geom.time_ms_template is None
+            or not self.eeg_buffer
+            or self._lsl_clock_at_buffer_end is None
+            or not self.pending_markers
+        ):
+            return
+
+        dt_s = float(self._epoch_geom.dt_ms) / 1000.0
+        if dt_s <= 0:
+            return
+        srate = 1.0 / dt_s
+        el = int(self._epoch_geom.epoch_len)
+        buf_len = len(self.eeg_buffer)
+        lsl_ref = self._lsl_clock_at_buffer_end
+        time_arr = np.asarray(self.eeg_times, dtype=np.float64) if self.eeg_times else np.empty(0)
+        buf_2d = np.stack(self.eeg_buffer)
+        _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
+        _valid = [c for c in _roi if 0 <= c < buf_2d.shape[1]] if buf_2d.ndim == 2 else []
+        if buf_2d.ndim == 2 and _valid:
+            buf_arr = np.mean(buf_2d[:, _valid], axis=1)
+        elif buf_2d.ndim == 2:
+            buf_arr = np.mean(buf_2d, axis=1)
+        else:
+            buf_arr = buf_2d.ravel()
+
+        extracted_now = 0
+        for marker_ts, stim_key in list(self.pending_markers):
+            start_idx, end_idx, wait_more = self._resolve_epoch_indices_for_marker(
+                marker_ts=float(marker_ts),
+                buf_len=buf_len,
+                srate=srate,
+                epoch_len=el,
+                lsl_ref=lsl_ref,
+                time_arr=time_arr,
+            )
+            if wait_more:
+                continue
+            if start_idx is None or end_idx is None:
+                continue
+            epoch = buf_arr[start_idx:end_idx]
+            if epoch.shape[0] != el:
+                continue
+            self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
+            raw_segment = buf_2d[start_idx:end_idx]
+            if raw_segment.ndim == 2:
+                raw_epoch_samples = raw_segment.astype(np.float64).tolist()
+            else:
+                raw_epoch_samples = np.asarray(raw_segment, dtype=np.float64).reshape(-1, 1).tolist()
+            if time_arr.shape[0] == buf_len and end_idx <= time_arr.shape[0]:
+                raw_epoch_ts = [float(x) for x in time_arr[start_idx:end_idx]]
+            else:
+                raw_epoch_ts = [None for _ in range(int(el))]
+            self._run_epoch_segments_export.append(
+                {
+                    "stim_key": stim_key,
+                    "marker_ts": float(marker_ts),
+                    "start_idx": int(start_idx),
+                    "end_idx": int(end_idx),
+                    "eeg_ts": raw_epoch_ts,
+                    "eeg_samples": raw_epoch_samples,
+                }
+            )
+            extracted_now += 1
+
+        if extracted_now:
+            LOG.info(
+                "Перед остановкой добрали эпох из pending_markers: %d (для коротких прогонов).",
+                extracted_now,
+            )
+            self._redraw_from_epochs()
 
     def _log_experiment_run_end(self, reason: str) -> None:
         """Одна строка на прогон записи: цели LSL по порядку vs победитель UI (для сравнения запусков)."""
@@ -998,6 +1081,50 @@ class P300AnalyzerWindow(QMainWindow):
         self, time_arr: np.ndarray, t_eff: float
     ) -> Optional[int]:
         return self._epoch_geom.compute_start_index(time_arr, t_eff)
+
+    def _resolve_epoch_indices_for_marker(
+        self,
+        *,
+        marker_ts: float,
+        buf_len: int,
+        srate: float,
+        epoch_len: int,
+        lsl_ref: float,
+        time_arr: np.ndarray,
+    ) -> Tuple[Optional[int], Optional[int], bool]:
+        """Return (start_idx, end_idx, wait_more_data).
+
+        Primary mode uses local_clock-based direct indexing.
+        Fallback uses EEG timestamps + marker/EEG offset for multi-host LAN cases.
+        """
+        seconds_back = lsl_ref - float(marker_ts)
+        start_idx = int(round(buf_len - 1 - seconds_back * srate))
+        end_idx = start_idx + epoch_len
+        if 0 <= start_idx and end_idx <= buf_len:
+            return start_idx, end_idx, False
+
+        # If direct method says "future", maybe we simply need more EEG samples.
+        direct_needs_wait = end_idx > buf_len
+
+        if time_arr.size:
+            candidates: List[float] = []
+            if self._marker_eeg_ts_offset is not None:
+                candidates.append(float(marker_ts) + float(self._marker_eeg_ts_offset))
+            candidates.append(float(marker_ts))
+
+            for t_eff in candidates:
+                fb_start = self._compute_epoch_start_index(time_arr, t_eff)
+                if fb_start is None:
+                    continue
+                fb_end = fb_start + epoch_len
+                if 0 <= fb_start and fb_end <= buf_len:
+                    return fb_start, fb_end, False
+                if fb_end > buf_len:
+                    return None, None, True
+
+        if direct_needs_wait:
+            return None, None, True
+        return None, None, False
 
     def _redraw_from_epochs(self) -> None:
         el = self._epoch_geom.epoch_len
@@ -1404,15 +1531,21 @@ class P300AnalyzerWindow(QMainWindow):
             new_pending: List[Tuple[float, str]] = []
 
             for marker_ts, stim_key in self.pending_markers:
-                # Direct index: how many samples back from buffer end is this marker?
-                seconds_back = lsl_ref - float(marker_ts)
-                start_idx = int(round(buf_len - 1 - seconds_back * srate))
-                end_idx = start_idx + el
-
-                if end_idx + reserve_samples > buf_len:
+                start_idx, end_idx, wait_more = self._resolve_epoch_indices_for_marker(
+                    marker_ts=float(marker_ts),
+                    buf_len=buf_len,
+                    srate=srate,
+                    epoch_len=el,
+                    lsl_ref=lsl_ref,
+                    time_arr=time_arr,
+                )
+                if wait_more:
                     new_pending.append((marker_ts, stim_key))
                     continue
-                if start_idx < 0:
+                if start_idx is None or end_idx is None:
+                    continue
+                if end_idx + reserve_samples > buf_len:
+                    new_pending.append((marker_ts, stim_key))
                     continue
 
                 epoch = buf_arr[start_idx:end_idx]
@@ -1444,6 +1577,7 @@ class P300AnalyzerWindow(QMainWindow):
                     self._dbg_epoch_lag_n += 1
                     # lag_ms: how far start_idx is from the ideal marker position.
                     # Ideal index = buf_len - 1 - seconds_back * srate (float, before rounding)
+                    seconds_back = lsl_ref - float(marker_ts)
                     ideal_idx = buf_len - 1 - seconds_back * srate
                     lag_ms = (start_idx - ideal_idx) * dt_s * 1000.0
                     span_nominal_s = (float(el) - 1.0) * dt_s
@@ -1557,28 +1691,34 @@ class P300AnalyzerWindow(QMainWindow):
 
         form = QFormLayout()
         combo_format = QComboBox()
-        combo_format.addItem("CSV (таблицы для Excel)", "csv")
-        combo_format.addItem("TXT (текст/табличный)", "txt")
-        combo_format.addItem("NS TXT (как Neuron-Spectrum)", "ns_txt")
-        combo_format.addItem("XLSX (Excel workbook)", "xlsx")
+        combo_format.addItem("CSV", "csv")
+        combo_format.addItem("TXT", "txt")
+        combo_format.addItem("XLSX", "xlsx")
         form.addRow("Формат:", combo_format)
+        spin_stim_index = QSpinBox()
+        spin_stim_index.setRange(0, 999)
+        spin_stim_index.setValue(0)
+        form.addRow("Индекс плитки (stim):", spin_stim_index)
+        combo_channels = QComboBox()
+        combo_channels.addItem("Все каналы", "all")
+        combo_channels.addItem("Только ROI-каналы (выбранные в UI)", "roi")
+        combo_channels.addItem("Вручную (индексы через запятую, 1-based)", "manual")
+        form.addRow("Каналы:", combo_channels)
+        edit_manual_channels = QLineEdit()
+        edit_manual_channels.setPlaceholderText("Напр.: 1,2,5,10")
+        edit_manual_channels.setEnabled(False)
+        form.addRow("Индексы каналов:", edit_manual_channels)
+        combo_channels.currentIndexChanged.connect(
+            lambda _: edit_manual_channels.setEnabled(combo_channels.currentData() == "manual")
+        )
         layout.addLayout(form)
 
-        chk_summary = QCheckBox("Сохранить сводку прогона")
-        chk_summary.setChecked(True)
-        chk_markers = QCheckBox("Сохранить маркеры плиток")
-        chk_markers.setChecked(True)
-        chk_eeg = QCheckBox("Сохранить все сырые данные ЭЭГ")
-        chk_eeg.setChecked(True)
-        chk_epochs = QCheckBox("Сохранить эпохи (включая сырые ЭЭГ фрагменты)")
-        chk_epochs.setChecked(True)
-        chk_winners = QCheckBox("Сохранить обновления winner")
-        chk_winners.setChecked(True)
-        layout.addWidget(chk_summary)
-        layout.addWidget(chk_markers)
-        layout.addWidget(chk_eeg)
-        layout.addWidget(chk_epochs)
-        layout.addWidget(chk_winners)
+        info = QLabel(
+            "Сохраняются только сырые данные ЭЭГ в моменты вспышки выбранной плитки."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #aaa; font-size: 11px;")
+        layout.addWidget(info)
 
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.accepted.connect(dlg.accept)
@@ -1588,13 +1728,33 @@ class P300AnalyzerWindow(QMainWindow):
         if dlg.exec_() != QDialog.Accepted:
             return None
 
+        channels_mode = str(combo_channels.currentData())
+        selected_channels: Optional[List[int]] = None
+        if channels_mode == "roi":
+            selected_channels = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
+        elif channels_mode == "manual":
+            raw = edit_manual_channels.text().strip()
+            if not raw:
+                QMessageBox.warning(self, "Каналы", "Укажите индексы каналов для ручного режима.")
+                return None
+            parts = [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
+            selected_channels = []
+            for p in parts:
+                try:
+                    idx_1based = int(p)
+                except ValueError:
+                    QMessageBox.warning(self, "Каналы", f"Некорректный индекс канала: {p}")
+                    return None
+                if idx_1based <= 0:
+                    QMessageBox.warning(self, "Каналы", f"Индекс должен быть >= 1: {p}")
+                    return None
+                selected_channels.append(idx_1based - 1)
+            selected_channels = sorted(set(selected_channels))
+
         return {
             "format": str(combo_format.currentData()),
-            "include_summary": bool(chk_summary.isChecked()),
-            "include_markers": bool(chk_markers.isChecked()),
-            "include_eeg": bool(chk_eeg.isChecked()),
-            "include_epochs": bool(chk_epochs.isChecked()),
-            "include_winners": bool(chk_winners.isChecked()),
+            "stim_index": int(spin_stim_index.value()),
+            "selected_channels": selected_channels,
         }
 
     def _on_save_exam_clicked(self) -> None:
@@ -1616,29 +1776,15 @@ class P300AnalyzerWindow(QMainWindow):
         opts = self._show_export_options_dialog()
         if opts is None:
             return
-        if not any(
-            [
-                opts["include_summary"],
-                opts["include_markers"],
-                opts["include_eeg"],
-                opts["include_epochs"],
-                opts["include_winners"],
-            ]
-        ):
-            QMessageBox.warning(self, "Пустой выбор", "Выберите хотя бы один тип данных для сохранения.")
-            return
-
         run_seq = self._last_run_export_data.get("run_seq") or 0
-        default_name = f"exam_run_{run_seq}"
+        default_name = f"exam_run_{run_seq}_stim_{opts['stim_index']}"
         suffix_hint = {"csv": ".csv", "txt": ".txt", "xlsx": ".xlsx"}.get(opts["format"], ".csv")
-        if opts["format"] == "ns_txt":
-            suffix_hint = ".txt"
         default_dir = str((Path(__file__).resolve().parent.parent / "data" / "exports"))
         selected_path, _ = QFileDialog.getSaveFileName(
             self,
             "Куда сохранить обследование",
             str(Path(default_dir) / f"{default_name}{suffix_hint}"),
-            "CSV (*.csv);;TXT (*.txt);;NS TXT (*.txt);;Excel (*.xlsx);;All files (*.*)",
+            "CSV (*.csv);;TXT (*.txt);;Excel (*.xlsx);;All files (*.*)",
         )
         if not selected_path:
             return
@@ -1648,11 +1794,8 @@ class P300AnalyzerWindow(QMainWindow):
                 run_data=self._last_run_export_data,
                 output_path=Path(selected_path),
                 file_format=str(opts["format"]),
-                include_summary=bool(opts["include_summary"]),
-                include_markers=bool(opts["include_markers"]),
-                include_eeg=bool(opts["include_eeg"]),
-                include_epochs=bool(opts["include_epochs"]),
-                include_winners=bool(opts["include_winners"]),
+                stim_index=int(opts["stim_index"]),
+                selected_channels=opts["selected_channels"],
             )
         except Exception as e:
             LOG.exception("Ошибка сохранения обследования: %s", e)

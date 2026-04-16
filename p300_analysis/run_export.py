@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import csv
-import datetime as dt
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 def _ensure_parent(path: Path) -> None:
@@ -125,157 +124,97 @@ def _epoch_raw_rows(run_data: Dict[str, Any]) -> List[List[Any]]:
     return rows
 
 
+def _stim_index_from_key(stim_key: Any) -> Optional[int]:
+    if not isinstance(stim_key, str):
+        return None
+    if "_" not in stim_key:
+        return None
+    tail = stim_key.rsplit("_", 1)[-1]
+    try:
+        return int(tail)
+    except Exception:
+        return None
+
+
+def _epoch_raw_rows_for_stim(run_data: Dict[str, Any], stim_index: int) -> List[List[Any]]:
+    rows: List[List[Any]] = []
+    segments = run_data.get("epoch_segments") or []
+    for seg_idx, seg in enumerate(segments):
+        stim_key = seg.get("stim_key")
+        if _stim_index_from_key(stim_key) != stim_index:
+            continue
+        marker_ts = seg.get("marker_ts")
+        eeg_ts = seg.get("eeg_ts") or []
+        eeg_samples = seg.get("eeg_samples") or []
+        for sample_idx, (ts, sample) in enumerate(zip(eeg_ts, eeg_samples)):
+            row: List[Any] = [seg_idx, stim_key, marker_ts, sample_idx, ts]
+            row.extend(sample if isinstance(sample, list) else [sample])
+            rows.append(row)
+    return rows
+
+
+def _filter_sample_channels(sample: Any, channels: List[int]) -> List[Any]:
+    vals = sample if isinstance(sample, list) else [sample]
+    out: List[Any] = []
+    for c in channels:
+        if 0 <= c < len(vals):
+            out.append(vals[c])
+    return out
+
+
+def _filtered_run_data(run_data: Dict[str, Any], selected_channels: List[int] | None) -> Dict[str, Any]:
+    if selected_channels is None:
+        return run_data
+    if not selected_channels:
+        raise RuntimeError("Список каналов для экспорта пустой.")
+    filtered = dict(run_data)
+    filtered["eeg_samples"] = [
+        _filter_sample_channels(sample, selected_channels) for sample in (run_data.get("eeg_samples") or [])
+    ]
+    segs: List[Dict[str, Any]] = []
+    for seg in run_data.get("epoch_segments") or []:
+        seg_copy = dict(seg)
+        seg_copy["eeg_samples"] = [
+            _filter_sample_channels(sample, selected_channels) for sample in (seg.get("eeg_samples") or [])
+        ]
+        segs.append(seg_copy)
+    filtered["epoch_segments"] = segs
+    filtered["selected_channels"] = list(selected_channels)
+    return filtered
+
+
 def export_run_data(
     *,
     run_data: Dict[str, Any],
     output_path: Path,
     file_format: str,
-    include_summary: bool,
-    include_markers: bool,
-    include_eeg: bool,
-    include_epochs: bool,
-    include_winners: bool,
+    stim_index: int,
+    selected_channels: List[int] | None = None,
 ) -> List[Path]:
-    """Export run data and return created file paths."""
+    """Export EEG rows only for selected stimulus index."""
+    run_data = _filtered_run_data(run_data, selected_channels)
     file_format = file_format.lower().strip()
     created: List[Path] = []
     stem = output_path.with_suffix("")
 
-    summary_rows = _summary_rows(run_data)
-    marker_rows = _marker_rows(run_data)
-    eeg_rows = _eeg_rows(run_data)
-    winner_rows = _winner_rows(run_data)
-    epoch_rows = _epoch_rows(run_data)
-    epoch_raw_rows = _epoch_raw_rows(run_data)
+    rows = _epoch_raw_rows_for_stim(run_data, stim_index=stim_index)
+    if not rows:
+        raise RuntimeError(f"Нет эпох для stim_index={stim_index}.")
+    max_ch = max((len(x) for x in (run_data.get("eeg_samples") or [])), default=0)
+    if max_ch == 0:
+        max_ch = max((len(r) - 5 for r in rows), default=0)
+    header = ["segment_idx", "stim_key", "marker_ts", "sample_idx", "ts"] + [
+        f"ch_{i+1}" for i in range(max_ch)
+    ]
 
     if file_format in {"csv", "txt"}:
         ext = ".csv" if file_format == "csv" else ".txt"
-        if include_summary:
-            p = Path(f"{stem}_summary{ext}")
-            if file_format == "csv":
-                _rows_to_csv(p, ("field", "value"), summary_rows)
-            else:
-                _rows_to_txt(p, "Summary", ("field", "value"), summary_rows)
-            created.append(p)
-        if include_markers:
-            p = Path(f"{stem}_markers{ext}")
-            if file_format == "csv":
-                _rows_to_csv(p, ("ts", "value"), marker_rows)
-            else:
-                _rows_to_txt(p, "Markers", ("ts", "value"), marker_rows)
-            created.append(p)
-        if include_eeg:
-            max_ch = max((len(x) for x in (run_data.get("eeg_samples") or [])), default=0)
-            eeg_header = ["sample_idx", "ts"] + [f"ch_{i+1}" for i in range(max_ch)]
-            p = Path(f"{stem}_eeg{ext}")
-            if file_format == "csv":
-                _rows_to_csv(p, eeg_header, eeg_rows)
-            else:
-                _rows_to_txt(p, "EEG", eeg_header, eeg_rows)
-            created.append(p)
-        if include_winners:
-            p = Path(f"{stem}_winners{ext}")
-            if file_format == "csv":
-                _rows_to_csv(
-                    p, ("event_seq", "winner_digit", "winner_key", "match_lsl_cue"), winner_rows
-                )
-            else:
-                _rows_to_txt(
-                    p, "Winner updates", ("event_seq", "winner_digit", "winner_key", "match_lsl_cue"), winner_rows
-                )
-            created.append(p)
-        if include_epochs:
-            p = Path(f"{stem}_epochs{ext}")
-            if file_format == "csv":
-                _rows_to_csv(p, ("stim_key", "epoch_idx", "time_ms", "value"), epoch_rows)
-            else:
-                _rows_to_txt(p, "Epochs", ("stim_key", "epoch_idx", "time_ms", "value"), epoch_rows)
-            created.append(p)
-            max_ch = max(
-                (len(x) for seg in (run_data.get("epoch_segments") or []) for x in (seg.get("eeg_samples") or [])),
-                default=0,
-            )
-            raw_header = ["segment_idx", "stim_key", "marker_ts", "sample_idx", "ts"] + [
-                f"ch_{i+1}" for i in range(max_ch)
-            ]
-            p_raw = Path(f"{stem}_epochs_raw_eeg{ext}")
-            if file_format == "csv":
-                _rows_to_csv(p_raw, raw_header, epoch_raw_rows)
-            else:
-                _rows_to_txt(p_raw, "Epochs raw EEG", raw_header, epoch_raw_rows)
-            created.append(p_raw)
-        return created
-
-    if file_format == "ns_txt":
-        # Single text file in a Neuron-Spectrum-like style for easy side-by-side comparison.
-        if not include_eeg and not include_epochs:
-            raise RuntimeError("Для NS TXT включите сырые ЭЭГ данные или эпохи.")
-        eeg_ts: List[Any]
-        eeg_samples: List[Any]
-        if include_epochs and (run_data.get("epoch_segments") or []):
-            eeg_ts = []
-            eeg_samples = []
-            for seg in run_data.get("epoch_segments") or []:
-                eeg_ts.extend(seg.get("eeg_ts") or [])
-                eeg_samples.extend(seg.get("eeg_samples") or [])
+        p = Path(f"{stem}_stim_{stim_index}{ext}")
+        if file_format == "csv":
+            _rows_to_csv(p, header, rows)
         else:
-            eeg_ts = run_data.get("eeg_ts") or []
-            eeg_samples = run_data.get("eeg_samples") or []
-        if not eeg_samples:
-            raise RuntimeError("Нет сырых ЭЭГ данных для NS TXT экспорта.")
-        n_channels = max((len(x) for x in eeg_samples), default=0)
-        if n_channels <= 0:
-            raise RuntimeError("Не удалось определить число каналов для NS TXT.")
-        summary = run_data.get("summary") or {}
-        params = summary.get("analysis_params") or {}
-        srate = params.get("sampling_rate_hz") or summary.get("eeg_stream_srate") or 0
-        try:
-            srate = int(round(float(srate))) if float(srate) > 0 else 0
-        except Exception:
-            srate = 0
-        now = dt.datetime.now()
-        if eeg_ts:
-            duration_s = max(float(eeg_ts[-1]) - float(eeg_ts[0]), 0.0)
-        elif srate > 0:
-            duration_s = len(eeg_samples) / float(srate)
-        else:
-            duration_s = 0.0
-
-        final_path = output_path if output_path.suffix else output_path.with_suffix(".txt")
-        _ensure_parent(final_path)
-        with open(final_path, "w", encoding="utf-8") as f:
-            f.write("; Neuron-Spectrum.NET EEG TXT export file v.1\n")
-            f.write("; EEG device name: LSL EEG stream\n")
-            f.write("; EEG checkup: P300 Analyzer Export\n")
-            f.write(f"; Checkup date: {now.strftime('%d.%m.%Y')}\n")
-            f.write("; Patient name: \n")
-            f.write("; Patient birthday: \n")
-            f.write("; Montage: LSL channels\n")
-            f.write("; Hi frequency filter: \n")
-            f.write("; Low frequency filter: \n")
-            f.write("; Notch filter: \n")
-            f.write(f"; Sampling rate: {srate if srate > 0 else 'unknown'} Hz\n")
-            f.write(f"; Derivations count: {n_channels}\n")
-            for i in range(n_channels):
-                f.write(f"; {i + 1}. EEG CH{i + 1} [{i}]\n")
-            f.write(";\n")
-            f.write(f"; Start recording date: {now.strftime('%d.%m.%Y')}\n")
-            f.write(f"; Start recording time: {now.strftime('%H:%M:%S.%f')[:-3]}\n")
-            f.write(f"; Record length: {duration_s:.3f} s\n")
-            f.write("; Unit: microvolts\n")
-            f.write("; Sygnal Type: EEG\n")
-            f.write(";\n")
-            for sample in eeg_samples:
-                row_vals = []
-                for val in sample:
-                    try:
-                        fv = float(val)
-                    except Exception:
-                        fv = 0.0
-                    # Locale-like decimal comma to resemble NS export.
-                    row_vals.append(f"{fv:.3f}".replace(".", ","))
-                f.write(" ".join(row_vals) + " \n")
-        created.append(final_path)
+            _rows_to_txt(p, f"EEG at flashes for stim {stim_index}", header, rows)
+        created.append(p)
         return created
 
     if file_format == "xlsx":
@@ -295,28 +234,7 @@ def export_run_data(
             for row in rows:
                 ws.append(_rounded_row(row))
 
-        if include_summary:
-            _add_sheet("summary", ("field", "value"), summary_rows)
-        if include_markers:
-            _add_sheet("markers", ("ts", "value"), marker_rows)
-        if include_eeg:
-            max_ch = max((len(x) for x in (run_data.get("eeg_samples") or [])), default=0)
-            eeg_header = ["sample_idx", "ts"] + [f"ch_{i+1}" for i in range(max_ch)]
-            _add_sheet("eeg", eeg_header, eeg_rows)
-        if include_winners:
-            _add_sheet(
-                "winners", ("event_seq", "winner_digit", "winner_key", "match_lsl_cue"), winner_rows
-            )
-        if include_epochs:
-            _add_sheet("epochs", ("stim_key", "epoch_idx", "time_ms", "value"), epoch_rows)
-            max_ch = max(
-                (len(x) for seg in (run_data.get("epoch_segments") or []) for x in (seg.get("eeg_samples") or [])),
-                default=0,
-            )
-            raw_header = ["segment_idx", "stim_key", "marker_ts", "sample_idx", "ts"] + [
-                f"ch_{i+1}" for i in range(max_ch)
-            ]
-            _add_sheet("epochs_raw_eeg", raw_header, epoch_raw_rows)
+        _add_sheet(f"stim_{stim_index}", header, rows)
 
         final_path = output_path if output_path.suffix.lower() == ".xlsx" else output_path.with_suffix(".xlsx")
         _ensure_parent(final_path)
