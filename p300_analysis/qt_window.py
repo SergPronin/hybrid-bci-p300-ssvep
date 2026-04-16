@@ -138,6 +138,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._run_eeg_ts_export: List[float] = []
         self._run_eeg_samples_export: List[List[float]] = []
         self._run_winners_export: List[Dict[str, Any]] = []
+        self._run_epoch_segments_export: List[Dict[str, Any]] = []
         self._last_run_export_data: Optional[Dict[str, Any]] = None
 
         self._timer = QTimer(self)
@@ -655,6 +656,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._run_eeg_ts_export = []
         self._run_eeg_samples_export = []
         self._run_winners_export = []
+        self._run_epoch_segments_export = []
         self._last_run_export_data = None
         self._exp_run_seq += 1
         self._exp_trial_targets = []
@@ -769,6 +771,11 @@ class P300AnalyzerWindow(QMainWindow):
                 "window_x_ms": int(self.spin_x.value()),
                 "window_y_ms": int(self.spin_y.value()),
                 "epochs_after_trial_only": bool(self.chk_epochs_after_trial.isChecked()),
+                "sampling_rate_hz": (
+                    float(self._inlet_eeg.info().nominal_srate())
+                    if self._inlet_eeg is not None
+                    else None
+                ),
             },
         }
         self._last_run_export_data = {
@@ -779,6 +786,7 @@ class P300AnalyzerWindow(QMainWindow):
             "eeg_ts": list(self._run_eeg_ts_export),
             "eeg_samples": [list(x) for x in self._run_eeg_samples_export],
             "winner_updates": list(self._run_winners_export),
+            "epoch_segments": list(self._run_epoch_segments_export),
             "epochs_data": {
                 k: [np.asarray(ep, dtype=np.float64).tolist() for ep in v]
                 for k, v in self.epochs_data.items()
@@ -1411,6 +1419,27 @@ class P300AnalyzerWindow(QMainWindow):
                 if epoch.shape[0] == el:
                     n_epochs_before = sum(len(v) for v in self.epochs_data.values())
                     self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
+                    raw_segment = buf_2d[start_idx:end_idx]
+                    if raw_segment.ndim == 2:
+                        raw_epoch_samples = raw_segment.astype(np.float64).tolist()
+                    else:
+                        raw_epoch_samples = (
+                            np.asarray(raw_segment, dtype=np.float64).reshape(-1, 1).tolist()
+                        )
+                    if time_arr.shape[0] == buf_len and end_idx <= time_arr.shape[0]:
+                        raw_epoch_ts = [float(x) for x in time_arr[start_idx:end_idx]]
+                    else:
+                        raw_epoch_ts = [None for _ in range(int(el))]
+                    self._run_epoch_segments_export.append(
+                        {
+                            "stim_key": stim_key,
+                            "marker_ts": float(marker_ts),
+                            "start_idx": int(start_idx),
+                            "end_idx": int(end_idx),
+                            "eeg_ts": raw_epoch_ts,
+                            "eeg_samples": raw_epoch_samples,
+                        }
+                    )
                     # region agent log
                     self._dbg_epoch_lag_n += 1
                     # lag_ms: how far start_idx is from the ideal marker position.
@@ -1530,6 +1559,7 @@ class P300AnalyzerWindow(QMainWindow):
         combo_format = QComboBox()
         combo_format.addItem("CSV (таблицы для Excel)", "csv")
         combo_format.addItem("TXT (текст/табличный)", "txt")
+        combo_format.addItem("NS TXT (как Neuron-Spectrum)", "ns_txt")
         combo_format.addItem("XLSX (Excel workbook)", "xlsx")
         form.addRow("Формат:", combo_format)
         layout.addLayout(form)
@@ -1540,7 +1570,7 @@ class P300AnalyzerWindow(QMainWindow):
         chk_markers.setChecked(True)
         chk_eeg = QCheckBox("Сохранить все сырые данные ЭЭГ")
         chk_eeg.setChecked(True)
-        chk_epochs = QCheckBox("Сохранить только эпохи (по стимулам)")
+        chk_epochs = QCheckBox("Сохранить эпохи (включая сырые ЭЭГ фрагменты)")
         chk_epochs.setChecked(True)
         chk_winners = QCheckBox("Сохранить обновления winner")
         chk_winners.setChecked(True)
@@ -1601,12 +1631,14 @@ class P300AnalyzerWindow(QMainWindow):
         run_seq = self._last_run_export_data.get("run_seq") or 0
         default_name = f"exam_run_{run_seq}"
         suffix_hint = {"csv": ".csv", "txt": ".txt", "xlsx": ".xlsx"}.get(opts["format"], ".csv")
+        if opts["format"] == "ns_txt":
+            suffix_hint = ".txt"
         default_dir = str((Path(__file__).resolve().parent.parent / "data" / "exports"))
         selected_path, _ = QFileDialog.getSaveFileName(
             self,
             "Куда сохранить обследование",
             str(Path(default_dir) / f"{default_name}{suffix_hint}"),
-            "CSV (*.csv);;TXT (*.txt);;Excel (*.xlsx);;All files (*.*)",
+            "CSV (*.csv);;TXT (*.txt);;NS TXT (*.txt);;Excel (*.xlsx);;All files (*.*)",
         )
         if not selected_path:
             return
