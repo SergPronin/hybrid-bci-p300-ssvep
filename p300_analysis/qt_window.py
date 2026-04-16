@@ -5,6 +5,7 @@
 import logging
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -12,7 +13,11 @@ from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
     QComboBox,
+    QDialogButtonBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -57,6 +62,7 @@ from p300_analysis.lsl_streams import (
     unwrap_combo_userdata,
 )
 from p300_analysis.marker_parsing import marker_value_to_stim_key, parse_trial_target_tile_id
+from p300_analysis.run_export import export_run_data
 from p300_analysis.session_recorder import SessionRecorder
 from p300_analysis.winner_selection import (
     WINNER_MODE_AUC,
@@ -128,6 +134,11 @@ class P300AnalyzerWindow(QMainWindow):
         self._session_run_id: Optional[str] = None
         # True after first stimulus marker in current recording run.
         self._has_seen_stimulus_marker_in_run: bool = False
+        self._run_markers_export: List[Dict[str, Any]] = []
+        self._run_eeg_ts_export: List[float] = []
+        self._run_eeg_samples_export: List[List[float]] = []
+        self._run_winners_export: List[Dict[str, Any]] = []
+        self._last_run_export_data: Optional[Dict[str, Any]] = None
 
         self._timer = QTimer(self)
         self._timer.setInterval(50)
@@ -282,6 +293,16 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_reset_analysis.setEnabled(False)
         self.btn_reset_analysis.clicked.connect(self._on_reset_analysis_clicked)
         sidebar_layout.addWidget(self.btn_reset_analysis)
+
+        self.btn_save_exam = QPushButton("Сохранить обследование")
+        self.btn_save_exam.setStyleSheet(
+            "QPushButton { background-color: #20c997; color: white; font-weight: bold; padding: 10px 12px; border-radius: 6px; } "
+            "QPushButton:hover { background-color: #1aa97f; } "
+            "QPushButton:disabled { background-color: #444; color: #888; }"
+        )
+        self.btn_save_exam.setEnabled(False)
+        self.btn_save_exam.clicked.connect(self._on_save_exam_clicked)
+        sidebar_layout.addWidget(self.btn_save_exam)
 
         self.btn_disconnect = QPushButton("Отключить LSL")
         self.btn_disconnect.setStyleSheet(
@@ -630,6 +651,11 @@ class P300AnalyzerWindow(QMainWindow):
         self._dbg_winner_n = 0
         self._dbg_cue_n = 0
         self._has_seen_stimulus_marker_in_run = False
+        self._run_markers_export = []
+        self._run_eeg_ts_export = []
+        self._run_eeg_samples_export = []
+        self._run_winners_export = []
+        self._last_run_export_data = None
         self._exp_run_seq += 1
         self._exp_trial_targets = []
         self._exp_last_winner_digit = None
@@ -639,6 +665,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._ensure_epoch_template()
         self.btn_start_analysis.setEnabled(False)
         self.btn_stop_analysis.setEnabled(True)
+        self.btn_save_exam.setEnabled(False)
         self._set_status(
             f"Запись эпох. Для выбора победителя нужно ≥{MIN_EPOCHS_TO_DECIDE} эпох по каждому классу с данными. "
             "Если нажали «Начать» до запуска плиток — дождитесь первой вспышки (калибровка времени по ней)."
@@ -744,6 +771,25 @@ class P300AnalyzerWindow(QMainWindow):
                 "epochs_after_trial_only": bool(self.chk_epochs_after_trial.isChecked()),
             },
         }
+        self._last_run_export_data = {
+            "run_seq": self._exp_run_seq,
+            "saved_at_ms": int(time.time() * 1000),
+            "summary": summary,
+            "markers": list(self._run_markers_export),
+            "eeg_ts": list(self._run_eeg_ts_export),
+            "eeg_samples": [list(x) for x in self._run_eeg_samples_export],
+            "winner_updates": list(self._run_winners_export),
+            "epochs_data": {
+                k: [np.asarray(ep, dtype=np.float64).tolist() for ep in v]
+                for k, v in self.epochs_data.items()
+            },
+            "epoch_time_ms": (
+                self._epoch_geom.time_ms_template.tolist()
+                if self._epoch_geom.time_ms_template is not None
+                else []
+            ),
+        }
+        self.btn_save_exam.setEnabled(True)
         debug_ndjson(
             {
                 "hypothesisId": "H5_experiment",
@@ -895,6 +941,7 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_start_analysis.setEnabled(False)
         self.btn_stop_analysis.setEnabled(False)
         self.btn_reset_analysis.setEnabled(False)
+        self.btn_save_exam.setEnabled(False)
         self.btn_disconnect.setEnabled(False)
         self._set_status("Остановлено. Обновите список 🔄 и снова «Подключиться к LSL».")
         self._clear_plots()
@@ -995,6 +1042,14 @@ class P300AnalyzerWindow(QMainWindow):
                 winner_key, mode_to_short_label(mode_used), self._lsl_cue_target_id
             )
             self._exp_last_winner_digit = win_digit
+            self._run_winners_export.append(
+                {
+                    "event_seq": self._dbg_winner_n,
+                    "winner_key": winner_key,
+                    "winner_digit": win_digit,
+                    "match_lsl_cue": match_lsl,
+                }
+            )
             self._session_recorder.log_winner(
                 {
                     "run_seq": self._exp_run_seq,
@@ -1133,6 +1188,12 @@ class P300AnalyzerWindow(QMainWindow):
             if self._recording_epochs:
                 self._session_recorder.log_markers(marker_chunk=marker_chunk, marker_ts=marker_ts)
                 for sample, ts in zip(marker_chunk, marker_ts):
+                    if isinstance(sample, (list, tuple)):
+                        marker_value = sample[0] if sample else ""
+                    else:
+                        marker_value = sample
+                    self._run_markers_export.append({"ts": float(ts), "value": str(marker_value)})
+                for sample, ts in zip(marker_chunk, marker_ts):
                     cue_tid = parse_trial_target_tile_id(sample)
                     if cue_tid is not None:
                         self._lsl_cue_target_id = cue_tid
@@ -1233,6 +1294,8 @@ class P300AnalyzerWindow(QMainWindow):
                     # Store ALL channels per timepoint (channel averaging deferred to epoch extraction)
                     self.eeg_buffer.extend(arr_2d)
                     self.eeg_times.extend([float(t) for t in eeg_ts])
+                    self._run_eeg_ts_export.extend([float(t) for t in eeg_ts])
+                    self._run_eeg_samples_export.extend(arr_2d.tolist())
                     self._lsl_clock_at_buffer_end = lsl_local_clock()
                     self._ensure_epoch_template()
                     if (
@@ -1456,4 +1519,117 @@ class P300AnalyzerWindow(QMainWindow):
             eeg_samples_this_tick=eeg_samples_this_tick,
             marker_samples_this_tick=marker_samples_this_tick,
             connected=True,
+        )
+
+    def _show_export_options_dialog(self) -> Optional[Dict[str, Any]]:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Сохранение обследования")
+        layout = QVBoxLayout(dlg)
+
+        form = QFormLayout()
+        combo_format = QComboBox()
+        combo_format.addItem("CSV (таблицы для Excel)", "csv")
+        combo_format.addItem("TXT (текст/табличный)", "txt")
+        combo_format.addItem("XLSX (Excel workbook)", "xlsx")
+        form.addRow("Формат:", combo_format)
+        layout.addLayout(form)
+
+        chk_summary = QCheckBox("Сохранить сводку прогона")
+        chk_summary.setChecked(True)
+        chk_markers = QCheckBox("Сохранить маркеры плиток")
+        chk_markers.setChecked(True)
+        chk_eeg = QCheckBox("Сохранить все сырые данные ЭЭГ")
+        chk_eeg.setChecked(True)
+        chk_epochs = QCheckBox("Сохранить только эпохи (по стимулам)")
+        chk_epochs.setChecked(True)
+        chk_winners = QCheckBox("Сохранить обновления winner")
+        chk_winners.setChecked(True)
+        layout.addWidget(chk_summary)
+        layout.addWidget(chk_markers)
+        layout.addWidget(chk_eeg)
+        layout.addWidget(chk_epochs)
+        layout.addWidget(chk_winners)
+
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.accepted.connect(dlg.accept)
+        box.rejected.connect(dlg.reject)
+        layout.addWidget(box)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return None
+
+        return {
+            "format": str(combo_format.currentData()),
+            "include_summary": bool(chk_summary.isChecked()),
+            "include_markers": bool(chk_markers.isChecked()),
+            "include_eeg": bool(chk_eeg.isChecked()),
+            "include_epochs": bool(chk_epochs.isChecked()),
+            "include_winners": bool(chk_winners.isChecked()),
+        }
+
+    def _on_save_exam_clicked(self) -> None:
+        if self._recording_epochs:
+            QMessageBox.information(
+                self,
+                "Сохранение недоступно",
+                "Сначала остановите анализ, затем сохраните обследование.",
+            )
+            return
+        if not self._last_run_export_data:
+            QMessageBox.information(
+                self,
+                "Нет данных",
+                "Нет завершённого обследования для сохранения.",
+            )
+            return
+
+        opts = self._show_export_options_dialog()
+        if opts is None:
+            return
+        if not any(
+            [
+                opts["include_summary"],
+                opts["include_markers"],
+                opts["include_eeg"],
+                opts["include_epochs"],
+                opts["include_winners"],
+            ]
+        ):
+            QMessageBox.warning(self, "Пустой выбор", "Выберите хотя бы один тип данных для сохранения.")
+            return
+
+        run_seq = self._last_run_export_data.get("run_seq") or 0
+        default_name = f"exam_run_{run_seq}"
+        suffix_hint = {"csv": ".csv", "txt": ".txt", "xlsx": ".xlsx"}.get(opts["format"], ".csv")
+        default_dir = str((Path(__file__).resolve().parent.parent / "data" / "exports"))
+        selected_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Куда сохранить обследование",
+            str(Path(default_dir) / f"{default_name}{suffix_hint}"),
+            "CSV (*.csv);;TXT (*.txt);;Excel (*.xlsx);;All files (*.*)",
+        )
+        if not selected_path:
+            return
+
+        try:
+            created_files = export_run_data(
+                run_data=self._last_run_export_data,
+                output_path=Path(selected_path),
+                file_format=str(opts["format"]),
+                include_summary=bool(opts["include_summary"]),
+                include_markers=bool(opts["include_markers"]),
+                include_eeg=bool(opts["include_eeg"]),
+                include_epochs=bool(opts["include_epochs"]),
+                include_winners=bool(opts["include_winners"]),
+            )
+        except Exception as e:
+            LOG.exception("Ошибка сохранения обследования: %s", e)
+            QMessageBox.critical(self, "Ошибка сохранения", str(e))
+            return
+
+        files_txt = "\n".join(str(p) for p in created_files)
+        QMessageBox.information(
+            self,
+            "Сохранено",
+            f"Обследование сохранено.\n\nФайлы:\n{files_txt}",
         )
