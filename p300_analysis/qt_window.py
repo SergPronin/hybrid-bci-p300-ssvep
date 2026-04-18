@@ -71,7 +71,11 @@ from p300_analysis.lsl_streams import (
     stream_inlet_with_buffer,
     unwrap_combo_userdata,
 )
-from p300_analysis.marker_parsing import marker_value_to_stim_key, parse_trial_target_tile_id
+from p300_analysis.marker_parsing import (
+    marker_value_to_stim_key,
+    parse_trial_target_tile_id,
+    stim_key_to_tile_digit,
+)
 from p300_analysis.run_export import (
     export_run_continuous_csv,
     export_run_data,
@@ -143,6 +147,12 @@ class P300AnalyzerWindow(QMainWindow):
         # LSL-clock time when the latest EEG chunk was received.
         # Used for direct sample-index calculation (bypasses coarse EEG timestamps).
         self._lsl_clock_at_buffer_end: Optional[float] = None
+        # LSL-clock time когда пришла первая пачка ЭЭГ в записи — нужен для оценки
+        # реальной частоты дискретизации (если nominal_srate() = 0, что бывает у NeuroSpectrum).
+        self._lsl_clock_at_buffer_start: Optional[float] = None
+        # Количество отсчётов в _run_eeg_samples_export в момент self._lsl_clock_at_buffer_end
+        # (фиксируется на каждый pull, используется при финализации для привязки маркеров).
+        self._lsl_clock_buffer_end_n_samples: int = 0
         # Целевая плитка из LSL: -1|trial_start|target=N (PsychoPy после cue)
         self._lsl_cue_target_id: Optional[int] = None
         # Сводка по прогонам записи (для сравнения нескольких запусков подряд)
@@ -831,6 +841,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
         self._lsl_clock_at_buffer_end = None
+        self._lsl_clock_at_buffer_start = None
+        self._lsl_clock_buffer_end_n_samples = 0
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
         self._eeg_monitor_buf.clear()
@@ -875,6 +887,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
         self._lsl_clock_at_buffer_end = None
+        self._lsl_clock_at_buffer_start = None
+        self._lsl_clock_buffer_end_n_samples = 0
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
         self._dbg_epoch_lag_n = 0
@@ -1104,6 +1118,12 @@ class P300AnalyzerWindow(QMainWindow):
                 if self._lsl_clock_at_buffer_end is not None
                 else None
             ),
+            "lsl_clock_at_buffer_start": (
+                float(self._lsl_clock_at_buffer_start)
+                if self._lsl_clock_at_buffer_start is not None
+                else None
+            ),
+            "lsl_clock_buffer_end_n_samples": int(self._lsl_clock_buffer_end_n_samples),
             "pending_markers_count": len(self.pending_markers),
             "eeg_buffer_len": len(self.eeg_buffer),
             "eeg_times_len": len(self.eeg_times),
@@ -1124,11 +1144,59 @@ class P300AnalyzerWindow(QMainWindow):
             self._exam_detail_log.write("exam_end", {"reason": reason, "summary": summary})
             self._exam_detail_log.close()
             self._exam_detail_log = None
+
+        # Оценка реальной частоты дискретизации (NeuroSpectrum частенько отдаёт nominal_srate()=0).
+        nominal_srate = summary["analysis_params"].get("sampling_rate_hz")
+        try:
+            nominal_srate = float(nominal_srate) if nominal_srate is not None else 0.0
+        except (TypeError, ValueError):
+            nominal_srate = 0.0
+        est_srate: Optional[float] = None
+        lc_end = self._lsl_clock_at_buffer_end
+        lc_start = self._lsl_clock_at_buffer_start
+        n_total = len(self._run_eeg_samples_export)
+        if (
+            lc_end is not None
+            and lc_start is not None
+            and n_total > 1
+            and float(lc_end) > float(lc_start)
+        ):
+            est_srate = float(n_total) / float(float(lc_end) - float(lc_start))
+        effective_srate = nominal_srate if nominal_srate and nominal_srate > 0 else (est_srate or 0.0)
+        summary["analysis_params"]["sampling_rate_hz_estimated"] = est_srate
+        summary["analysis_params"]["sampling_rate_hz_effective"] = (
+            effective_srate if effective_srate > 0 else None
+        )
+
+        # Предвычисленная привязка каждого маркера к индексу отсчёта в _run_eeg_samples_export.
+        # Логика совпадает с resolve_epoch_indices_for_marker: ось — pylsl.local_clock(),
+        # ref = lsl_clock_at_buffer_end, обратный ход по sampling_rate.
+        markers_with_sample_idx: List[Dict[str, Any]] = []
+        mk_offset = self._marker_eeg_ts_offset
+        ref_lc = lc_end
+        ref_n = int(self._lsl_clock_buffer_end_n_samples)
+        can_map = effective_srate and effective_srate > 0 and ref_lc is not None and ref_n > 0
+        for item in self._run_markers_export:
+            new_item = dict(item)
+            sample_idx: Optional[int] = None
+            if can_map:
+                try:
+                    ts_m = float(item.get("ts"))
+                    t_mark_lc = ts_m + float(mk_offset) if mk_offset is not None else ts_m
+                    seconds_back = float(ref_lc) - t_mark_lc
+                    j = ref_n - 1 - int(round(seconds_back * float(effective_srate)))
+                    if 0 <= j < n_total:
+                        sample_idx = j
+                except (TypeError, ValueError):
+                    sample_idx = None
+            new_item["sample_idx"] = sample_idx
+            markers_with_sample_idx.append(new_item)
+
         self._last_run_export_data = {
             "run_seq": self._exp_run_seq,
             "saved_at_ms": int(time.time() * 1000),
             "summary": summary,
-            "markers": list(self._run_markers_export),
+            "markers": markers_with_sample_idx,
             "eeg_ts": list(self._run_eeg_ts_export),
             "eeg_samples": [list(x) for x in self._run_eeg_samples_export],
             "winner_updates": list(self._run_winners_export),
@@ -1175,6 +1243,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
         self._lsl_clock_at_buffer_end = None
+        self._lsl_clock_at_buffer_start = None
+        self._lsl_clock_buffer_end_n_samples = 0
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
         self._clear_plots()
@@ -1294,6 +1364,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
         self._lsl_clock_at_buffer_end = None
+        self._lsl_clock_at_buffer_start = None
+        self._lsl_clock_buffer_end_n_samples = 0
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
 
@@ -1802,6 +1874,9 @@ class P300AnalyzerWindow(QMainWindow):
                     self._run_eeg_ts_export.extend([float(t) for t in eeg_ts])
                     self._run_eeg_samples_export.extend(arr_2d.tolist())
                     self._lsl_clock_at_buffer_end = lsl_local_clock()
+                    self._lsl_clock_buffer_end_n_samples = len(self._run_eeg_samples_export)
+                    if self._lsl_clock_at_buffer_start is None:
+                        self._lsl_clock_at_buffer_start = float(self._lsl_clock_at_buffer_end)
                     self._ensure_epoch_template()
                     if (
                         self._exam_detail_log is not None
@@ -2214,7 +2289,7 @@ class P300AnalyzerWindow(QMainWindow):
         combo_mode.addItem("Одна плитка (по индексу)", "one_stim")
         combo_mode.addItem("Все плитки в один файл (эпохи по порядку вспышек)", "all_stims")
         combo_mode.addItem(
-            "Вся ЭЭГ за прогон, включая паузы (непрерывный CSV)", "continuous"
+            "Вся ЭЭГ за прогон, включая паузы (непрерывный CSV/XLSX)", "continuous"
         )
         form.addRow("Что сохранять:", combo_mode)
         spin_stim_index = QSpinBox()
@@ -2224,13 +2299,15 @@ class P300AnalyzerWindow(QMainWindow):
 
         def _mode_changed(_: int = 0) -> None:
             spin_stim_index.setEnabled(combo_mode.currentData() == "one_stim")
-            # В непрерывном режиме файл всегда CSV — форсируем.
+            # В непрерывном режиме доступны только CSV/XLSX (TXT не имеет смысла).
             is_cont = combo_mode.currentData() == "continuous"
-            combo_format.setEnabled(not is_cont)
             if is_cont:
-                i = combo_format.findData("csv")
-                if i >= 0:
-                    combo_format.setCurrentIndex(i)
+                # Отключаем TXT, если оно выбрано — сдвигаем на CSV.
+                i_txt = combo_format.findData("txt")
+                if i_txt >= 0 and combo_format.currentIndex() == i_txt:
+                    i_csv = combo_format.findData("csv")
+                    if i_csv >= 0:
+                        combo_format.setCurrentIndex(i_csv)
 
         combo_mode.currentIndexChanged.connect(_mode_changed)
         _mode_changed()
@@ -2252,9 +2329,10 @@ class P300AnalyzerWindow(QMainWindow):
             "• «Одна плитка» — эпохи только выбранного индекса.\n"
             "• «Все плитки» — эпохи всех плиток в порядке вспышек; колонки segment_id, "
             "stim_key, marker_ts, sample_idx, ts, каналы.\n"
-            "• «Вся ЭЭГ за прогон» — один CSV, одна строка = один отсчёт ЭЭГ (в т.ч. "
+            "• «Вся ЭЭГ за прогон» — один CSV/XLSX, одна строка = один отсчёт ЭЭГ (в т.ч. "
             "когда никакая плитка не моргает); колонки sample_idx, t_rel_s, ts, каналы, "
-            "marker (0 = пауза, иначе номер плитки), in_epoch (попал ли в эпоху)."
+            "marker (0 = пауза, иначе номер плитки), in_epoch (попал ли в эпоху).\n"
+            "CSV пишется в «русском» формате Excel: разделитель «;», дробная часть через «,»."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #aaa; font-size: 11px;")
@@ -2352,12 +2430,16 @@ class P300AnalyzerWindow(QMainWindow):
                     selected_channels=opts["selected_channels"],
                 )
             elif mode == "continuous":
+                cont_format = str(opts["format"]) if str(opts["format"]) in {"csv", "xlsx"} else "csv"
                 cpath = export_run_continuous_csv(
                     run_data=self._last_run_export_data,
                     output_path=Path(selected_path),
                     selected_channels=opts["selected_channels"],
+                    file_format=cont_format,
                 )
                 created_files = [cpath]
+                self._show_continuous_diagnostics(cpath)
+                return
             else:
                 created_files = export_run_data(
                     run_data=self._last_run_export_data,
@@ -2377,3 +2459,87 @@ class P300AnalyzerWindow(QMainWindow):
             "Сохранено",
             f"Обследование сохранено.\n\nФайлы:\n{files_txt}",
         )
+
+    def _show_continuous_diagnostics(self, saved_path: Path) -> None:
+        """После сохранения непрерывного экспорта показываем сводку: сколько вспышек
+        из LSL-потока плиток попало в файл, с какой частотой дискретизации.
+
+        Помогает отличить ситуации «маркеров вообще не было» и «маркеры есть, но не
+        привязались к отсчётам ЭЭГ».
+        """
+        run = self._last_run_export_data or {}
+        markers = list(run.get("markers") or [])
+        summary = dict(run.get("summary") or {})
+        ap = dict(summary.get("analysis_params") or {})
+
+        n_flashes = 0
+        n_mapped = 0
+        per_tile: Dict[int, int] = {}
+        for item in markers:
+            sk = marker_value_to_stim_key(item.get("value"))
+            if sk is None:
+                continue
+            try:
+                d = int(stim_key_to_tile_digit(sk))
+            except Exception:
+                continue
+            if d < 0:
+                continue
+            n_flashes += 1
+            per_tile[d] = per_tile.get(d, 0) + 1
+            si = item.get("sample_idx")
+            if isinstance(si, int) and si >= 0:
+                n_mapped += 1
+
+        srate_eff = ap.get("sampling_rate_hz_effective")
+        srate_nom = ap.get("sampling_rate_hz")
+        srate_est = ap.get("sampling_rate_hz_estimated")
+        offset = summary.get("marker_eeg_offset")
+        lc_end = summary.get("lsl_clock_at_buffer_end")
+
+        tiles_txt = (
+            ", ".join(f"плитка {k}: {v}" for k, v in sorted(per_tile.items())) or "—"
+        )
+
+        def _fmt(x: Any) -> str:
+            if x is None:
+                return "—"
+            try:
+                return f"{float(x):.4f}"
+            except (TypeError, ValueError):
+                return str(x)
+
+        text = (
+            f"Файл: {saved_path}\n\n"
+            f"Маркеры плиток (LSL-стрим моргающих плиток, не NeuroSpectrum):\n"
+            f"  всего вспышек в прогоне: {n_flashes}\n"
+            f"  привязано к отсчётам ЭЭГ (marker != 0 в файле): {n_mapped}\n"
+            f"  по плиткам: {tiles_txt}\n\n"
+            f"Частота дискретизации ЭЭГ:\n"
+            f"  nominal_srate (от NeuroSpectrum): {_fmt(srate_nom)} Гц\n"
+            f"  оценка по чанкам (N/Δlsl_clock): {_fmt(srate_est)} Гц\n"
+            f"  использовано при привязке: {_fmt(srate_eff)} Гц\n\n"
+            f"Калибровка оси маркер↔ЭЭГ:\n"
+            f"  marker_eeg_offset: {_fmt(offset)}\n"
+            f"  lsl_clock_at_buffer_end: {_fmt(lc_end)}\n"
+        )
+
+        if n_flashes == 0:
+            text += (
+                "\nВ LSL-потоке плиток не было ни одной вспышки за прогон.\n"
+                "Проверь, что стим-стрим (PsychoPy/GUI плиток) запущен и виден в LSL."
+            )
+        elif n_mapped == 0:
+            text += (
+                "\nВспышки есть, но ни одна не привязалась к ЭЭГ.\n"
+                "Скорее всего, не получилось оценить частоту дискретизации "
+                "(nominal_srate() от NeuroSpectrum = 0, а чанков пришло мало, "
+                "чтобы оценить по времени). Попробуй запись подлиннее."
+            )
+        elif n_mapped < n_flashes:
+            text += (
+                f"\nЧасть вспышек ({n_flashes - n_mapped}) не попала в окно записи ЭЭГ "
+                f"(мало отсчётов до/после стимула). Это нормально для краёв прогона."
+            )
+
+        QMessageBox.information(self, "Сохранено: сводка по маркерам", text)

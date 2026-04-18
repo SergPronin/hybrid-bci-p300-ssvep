@@ -40,6 +40,59 @@ def _rows_to_csv(path: Path, header: Sequence[str], rows: Iterable[Sequence[Any]
             writer.writerow(_rounded_row(row))
 
 
+def _format_ru_decimal(value: Any) -> Any:
+    """Для русской локали Excel: число → строка с запятой вместо точки."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        fv = float(value)
+        if not math.isfinite(fv):
+            return ""
+        return (f"{round(fv, 6):.6f}").rstrip("0").rstrip(".").replace(".", ",") or "0"
+    return value
+
+
+def _rows_to_csv_ru(
+    path: Path,
+    header: Sequence[str],
+    rows: Iterable[Sequence[Any]],
+) -> None:
+    """CSV в «русском» формате Excel: разделитель столбцов ``;``, десятичный — ``,``.
+    В первой строке пишется ``sep=;``, чтобы Excel корректно определил разделитель.
+    """
+    _ensure_parent(path)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write("sep=;\n")
+        writer = csv.writer(f, delimiter=";")
+        writer.writerow(list(header))
+        for row in rows:
+            writer.writerow([_format_ru_decimal(x) for x in row])
+
+
+def _rows_to_xlsx(
+    path: Path,
+    sheet_name: str,
+    header: Sequence[str],
+    rows: Iterable[Sequence[Any]],
+) -> None:
+    try:
+        from openpyxl import Workbook
+    except Exception as e:  # pragma: no cover - runtime dependency check
+        raise RuntimeError(
+            "Для экспорта в XLSX установите openpyxl (pip install openpyxl)."
+        ) from e
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name[:31] if sheet_name else "data"
+    ws.append(list(header))
+    for row in rows:
+        ws.append(_rounded_row(row))
+    _ensure_parent(path)
+    wb.save(path)
+
+
 def _rows_to_txt(path: Path, title: str, header: Sequence[str], rows: Iterable[Sequence[Any]]) -> None:
     _ensure_parent(path)
     with open(path, "w", encoding="utf-8") as f:
@@ -369,15 +422,23 @@ def export_run_continuous_csv(
     output_path: Path,
     selected_channels: List[int] | None = None,
     epoch_window_ms: Optional[float] = None,
+    file_format: str = "csv",
 ) -> Path:
-    """Непрерывная ЭЭГ за прогон (включая паузы без вспышек) → один CSV.
+    """Непрерывная ЭЭГ за прогон (включая паузы без вспышек) → один файл.
 
     Колонки: ``sample_idx`` (0..N от начала записи), ``t_rel_s`` (секунды от первого отсчёта),
     ``ts`` (сырой штамп потока), ``ch_1``..``ch_N``, ``marker`` (0 — нет вспышки, иначе
     цифра плитки на ближайшем к ``marker_ts`` отсчёте), ``in_epoch`` (1 — отсчёт попадает
     в окно эпохи после какой-либо вспышки, 0 — пауза; окно берётся из ``epoch_window_ms``
     либо ``epoch_time_ms``/шаблона, по умолчанию 800 мс).
+
+    ``file_format``: ``csv`` (русский формат Excel: ``;`` разделитель и ``,`` дробная часть)
+    или ``xlsx`` (нативные числа, Excel сам подставит запятую по локали).
     """
+    fmt = (file_format or "csv").lower().strip()
+    if fmt not in {"csv", "xlsx"}:
+        raise ValueError(f"Unsupported file format for continuous export: {file_format}")
+
     data = _filtered_run_data(run_data, selected_channels)
     eeg_ts = data.get("eeg_ts") or []
     eeg_samples = data.get("eeg_samples") or []
@@ -393,46 +454,57 @@ def export_run_continuous_csv(
 
     summary = data.get("summary") or {}
     ap = summary.get("analysis_params") or {}
-    srate: Optional[float] = None
-    if ap.get("sampling_rate_hz") is not None:
-        try:
-            srate = float(ap.get("sampling_rate_hz"))
-        except (TypeError, ValueError):
-            srate = None
 
-    # t_rel_s: предпочитаем индекс/частоту (штамп NeuroSpectrum может быть с шагом ~1 с),
+    def _f(x: Any) -> Optional[float]:
+        try:
+            if x is None:
+                return None
+            v = float(x)
+            return v
+        except (TypeError, ValueError):
+            return None
+
+    nominal_srate = _f(ap.get("sampling_rate_hz"))
+    eff_srate_summary = _f(ap.get("sampling_rate_hz_effective"))
+    est_srate_summary = _f(ap.get("sampling_rate_hz_estimated"))
+    last_lc = _f(summary.get("lsl_clock_at_buffer_end"))
+    first_lc = _f(summary.get("lsl_clock_at_buffer_start"))
+    mk_offset = _f(summary.get("marker_eeg_offset"))
+    ref_n = summary.get("lsl_clock_buffer_end_n_samples")
+    try:
+        ref_n_int = int(ref_n) if ref_n is not None else 0
+    except (TypeError, ValueError):
+        ref_n_int = 0
+    if ref_n_int <= 0:
+        ref_n_int = n
+
+    # Оценка частоты: предпочтение — eff_srate из summary; затем nominal; затем первая/последняя lc.
+    srate: Optional[float] = None
+    for cand in (eff_srate_summary, nominal_srate, est_srate_summary):
+        if cand is not None and cand > 0:
+            srate = cand
+            break
+    if srate is None and last_lc is not None and first_lc is not None and last_lc > first_lc and n > 1:
+        srate = float(n) / float(last_lc - first_lc)
+
+    # t_rel_s: предпочитаем индекс/частоту (штамп NeuroSpectrum часто идёт шагом ~1 с),
     # иначе — по сырому ts.
     if srate and srate > 0:
         t_rel_s = np.arange(n, dtype=np.float64) / float(srate)
     else:
         t_rel_s = ts_arr - float(ts_arr[0]) if n > 0 else np.zeros(0, dtype=np.float64)
 
-    # Привязка маркеров к индексам ЭЭГ.
-    # 1) Точный путь: marker_ts + marker_eeg_offset → lsl_local_clock(), сравниваем с
-    #    lsl_clock_at_buffer_end (соответствует последнему отсчёту в _run_eeg_samples_export)
-    #    и идём назад по частоте дискретизации. Это тот же механизм, что и в resolve_epoch_indices_for_marker.
-    # 2) Fallback: argmin по ts (для старых прогонов без сохранённых lsl_clock/offset).
-    mk_offset_raw = summary.get("marker_eeg_offset")
-    try:
-        mk_offset = float(mk_offset_raw) if mk_offset_raw is not None else None
-    except (TypeError, ValueError):
-        mk_offset = None
-    last_lc_raw = summary.get("lsl_clock_at_buffer_end")
-    try:
-        last_lc = float(last_lc_raw) if last_lc_raw is not None else None
-    except (TypeError, ValueError):
-        last_lc = None
-    use_lc_mapping = (
-        mk_offset is not None and last_lc is not None and srate is not None and srate > 0
+    # Привязка маркеров к индексам ЭЭГ. Приоритет:
+    # 1) предвычисленный ``sample_idx`` на самом маркере (заполняется в qt_window на финализации);
+    # 2) пересчёт на лету: marker_ts + offset → lsl_local_clock(), далее seconds_back * srate от ref_n;
+    # 3) argmin |eeg_ts - marker_ts| — последний запасной вариант (ненадёжно при грубых штампах).
+    can_lc_map = (
+        last_lc is not None and srate is not None and srate > 0 and ref_n_int > 0
     )
 
     marker_vals = np.zeros(n, dtype=np.float64)
     flash_sample_idx: List[int] = []
     for item in data.get("markers") or []:
-        try:
-            ts_m = float(item.get("ts"))
-        except (TypeError, ValueError):
-            continue
         sk = marker_value_to_stim_key(item.get("value"))
         if sk is None:
             continue
@@ -442,12 +514,31 @@ def export_run_continuous_csv(
             continue
         if d_int < 0:
             continue
-        if use_lc_mapping:
-            t_mark_lc = ts_m + float(mk_offset)
-            seconds_back = float(last_lc) - t_mark_lc
-            j = n - 1 - int(round(seconds_back * float(srate)))
-        else:
-            j = int(np.argmin(np.abs(ts_arr - ts_m)))
+
+        pre = item.get("sample_idx")
+        j: Optional[int] = None
+        if isinstance(pre, (int, np.integer)) and not isinstance(pre, bool):
+            if 0 <= int(pre) < n:
+                j = int(pre)
+
+        if j is None and can_lc_map:
+            try:
+                ts_m = float(item.get("ts"))
+                t_mark_lc = ts_m + float(mk_offset) if mk_offset is not None else ts_m
+                seconds_back = float(last_lc) - t_mark_lc
+                cand = int(ref_n_int) - 1 - int(round(seconds_back * float(srate)))
+                if 0 <= cand < n:
+                    j = cand
+            except (TypeError, ValueError):
+                j = None
+
+        if j is None:
+            try:
+                ts_m = float(item.get("ts"))
+                j = int(np.argmin(np.abs(ts_arr - ts_m)))
+            except (TypeError, ValueError):
+                continue
+
         if 0 <= j < n:
             marker_vals[j] = float(d_int)
             flash_sample_idx.append(j)
@@ -486,11 +577,16 @@ def export_run_continuous_csv(
         row: List[Any] = [int(i), float(t_rel_s[i]), float(t)]
         for k in range(max_ch):
             row.append(vals[k] if k < len(vals) else None)
-        row.append(float(mk))
+        row.append(int(mk))
         row.append(int(ie))
         rows.append(row)
 
     stem = output_path.with_suffix("")
-    p = Path(f"{stem}_continuous.csv")
-    _rows_to_csv(p, header, rows)
+    suffix_tag = "" if stem.name.endswith("_continuous") else "_continuous"
+    if fmt == "xlsx":
+        p = Path(f"{stem}{suffix_tag}.xlsx")
+        _rows_to_xlsx(p, "continuous", header, rows)
+    else:
+        p = Path(f"{stem}{suffix_tag}.csv")
+        _rows_to_csv_ru(p, header, rows)
     return p

@@ -100,6 +100,20 @@ def test_export_run_data_all_stims_empty_raises() -> None:
             )
 
 
+def _read_ru_csv(path: Path) -> list[list[str]]:
+    """Читает CSV в русском формате Excel: первая строка ``sep=;``, разделитель ``;``."""
+    with open(path, encoding="utf-8", newline="") as f:
+        first = f.readline().strip()
+        assert first.startswith("sep=")
+        reader = csv.reader(f, delimiter=";")
+        return [row for row in reader]
+
+
+def _num_ru(s: str) -> float:
+    """Парсит число из русского формата Excel (запятая → точка)."""
+    return float(s.replace(",", "."))
+
+
 def test_export_run_continuous_csv_marker_and_in_epoch() -> None:
     run = {
         "summary": {"analysis_params": {"sampling_rate_hz": 500.0}},
@@ -114,8 +128,11 @@ def test_export_run_continuous_csv_marker_and_in_epoch() -> None:
         base = Path(td) / "run1.csv"
         p = export_run_continuous_csv(run_data=run, output_path=base)
         assert p.name == "run1_continuous.csv"
-        with open(p, encoding="utf-8", newline="") as f:
-            rows = list(csv.reader(f))
+        # Если имя уже содержит _continuous — не добавляем второй раз.
+        base2 = Path(td) / "runX_continuous.csv"
+        p2 = export_run_continuous_csv(run_data=run, output_path=base2)
+        assert p2.name == "runX_continuous.csv"
+        rows = _read_ru_csv(p)
         assert rows[0] == [
             "sample_idx",
             "t_rel_s",
@@ -126,15 +143,18 @@ def test_export_run_continuous_csv_marker_and_in_epoch() -> None:
             "in_epoch",
         ]
         # строка 3 (sample_idx=2) — ближайшая к маркеру 100.004
-        assert float(rows[3][0]) == 2.0
-        assert float(rows[3][-2]) == 8.0  # marker = 8
-        assert float(rows[3][-1]) == 1.0  # in_epoch = 1
+        assert _num_ru(rows[3][0]) == 2.0
+        assert _num_ru(rows[3][-2]) == 8.0  # marker = 8
+        assert _num_ru(rows[3][-1]) == 1.0  # in_epoch = 1
         # пауза до вспышки
-        assert float(rows[1][-2]) == 0.0
-        assert float(rows[1][-1]) == 0.0
+        assert _num_ru(rows[1][-2]) == 0.0
+        assert _num_ru(rows[1][-1]) == 0.0
         # t_rel_s от начала
-        assert abs(float(rows[1][1]) - 0.0) < 1e-9
-        assert abs(float(rows[3][1]) - 0.004) < 1e-9
+        assert abs(_num_ru(rows[1][1]) - 0.0) < 1e-9
+        assert abs(_num_ru(rows[3][1]) - 0.004) < 1e-9
+        # В строках с числами должна стоять запятая (русский формат Excel),
+        # кроме sample_idx/marker/in_epoch которые целые.
+        assert "," in rows[3][1] or rows[3][1] in {"0", "0,0"}
 
 
 def test_export_run_continuous_csv_marker_via_lsl_clock_mapping() -> None:
@@ -170,11 +190,71 @@ def test_export_run_continuous_csv_marker_via_lsl_clock_mapping() -> None:
     with TemporaryDirectory() as td:
         base = Path(td) / "runLC.csv"
         p = export_run_continuous_csv(run_data=run, output_path=base)
-        with open(p, encoding="utf-8", newline="") as f:
-            rows = list(csv.reader(f))
+        rows = _read_ru_csv(p)
     expected_idx = n - 1 - int(round(0.4 * srate))
     body = rows[1:]
-    markers_nonzero = [i for i, r in enumerate(body) if float(r[-2]) != 0.0]
+    markers_nonzero = [i for i, r in enumerate(body) if _num_ru(r[-2]) != 0.0]
     assert markers_nonzero == [expected_idx]
-    assert float(body[expected_idx][-2]) == 3.0
-    assert float(body[expected_idx][-1]) == 1.0
+    assert _num_ru(body[expected_idx][-2]) == 3.0
+    assert _num_ru(body[expected_idx][-1]) == 1.0
+
+
+def test_export_run_continuous_uses_precomputed_sample_idx() -> None:
+    """Если в ``markers[i]["sample_idx"]`` уже записан индекс отсчёта, используем его
+    и игнорируем ``marker_ts`` (он может быть в любой чужой временной шкале).
+    """
+    n = 50
+    srate = 250.0
+    eeg_ts = [100.0 for _ in range(n)]  # нарочно «сломанный» грубый ts
+    eeg_samples = [[0.0] for _ in range(n)]
+    run = {
+        "summary": {"analysis_params": {"sampling_rate_hz": srate}},
+        "eeg_ts": eeg_ts,
+        "eeg_samples": eeg_samples,
+        "markers": [{"ts": 999999.0, "value": "5|on", "sample_idx": 17}],
+        "epoch_segments": [],
+        "epoch_time_ms": [0.0, 4.0],
+    }
+    with TemporaryDirectory() as td:
+        base = Path(td) / "pre.csv"
+        p = export_run_continuous_csv(run_data=run, output_path=base)
+        rows = _read_ru_csv(p)
+    body = rows[1:]
+    markers_nonzero = [i for i, r in enumerate(body) if _num_ru(r[-2]) != 0.0]
+    assert markers_nonzero == [17]
+    assert _num_ru(body[17][-2]) == 5.0
+
+
+def test_export_run_continuous_xlsx_format() -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    n = 6
+    srate = 500.0
+    run = {
+        "summary": {"analysis_params": {"sampling_rate_hz": srate}},
+        "eeg_ts": [100.0 + i * 0.002 for i in range(n)],
+        "eeg_samples": [[float(i), -float(i)] for i in range(n)],
+        "markers": [{"ts": 100.004, "value": "2|on"}],
+        "epoch_segments": [],
+        "epoch_time_ms": [0.0, 2.0],
+    }
+    with TemporaryDirectory() as td:
+        base = Path(td) / "xl.csv"  # расширение не важно — функция сама поставит
+        p = export_run_continuous_csv(run_data=run, output_path=base, file_format="xlsx")
+        assert p.suffix == ".xlsx"
+        wb = openpyxl.load_workbook(p)
+        ws = wb.active
+        header = [c.value for c in ws[1]]
+        assert header == [
+            "sample_idx",
+            "t_rel_s",
+            "ts",
+            "ch_1",
+            "ch_2",
+            "marker",
+            "in_epoch",
+        ]
+        # строка 4 (sample_idx=2) — вспышка
+        row2 = [c.value for c in ws[4]]
+        assert row2[0] == 2
+        assert row2[-2] == 2
+        assert row2[-1] == 1
