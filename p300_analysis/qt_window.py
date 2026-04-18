@@ -49,6 +49,7 @@ from p300_analysis.constants import (
 )
 from p300_analysis.debug_ndjson import debug_ndjson
 from p300_analysis.epoch_geometry import EpochGeometry
+from p300_analysis.epoch_indexing import resolve_epoch_indices_for_marker
 from p300_analysis.erp_compute import (
     build_averaged_erp,
     check_can_decide,
@@ -1092,39 +1093,17 @@ class P300AnalyzerWindow(QMainWindow):
         lsl_ref: float,
         time_arr: np.ndarray,
     ) -> Tuple[Optional[int], Optional[int], bool]:
-        """Return (start_idx, end_idx, wait_more_data).
-
-        Primary mode uses local_clock-based direct indexing.
-        Fallback uses EEG timestamps + marker/EEG offset for multi-host LAN cases.
-        """
-        seconds_back = lsl_ref - float(marker_ts)
-        start_idx = int(round(buf_len - 1 - seconds_back * srate))
-        end_idx = start_idx + epoch_len
-        if 0 <= start_idx and end_idx <= buf_len:
-            return start_idx, end_idx, False
-
-        # If direct method says "future", maybe we simply need more EEG samples.
-        direct_needs_wait = end_idx > buf_len
-
-        if time_arr.size:
-            candidates: List[float] = []
-            if self._marker_eeg_ts_offset is not None:
-                candidates.append(float(marker_ts) + float(self._marker_eeg_ts_offset))
-            candidates.append(float(marker_ts))
-
-            for t_eff in candidates:
-                fb_start = self._compute_epoch_start_index(time_arr, t_eff)
-                if fb_start is None:
-                    continue
-                fb_end = fb_start + epoch_len
-                if 0 <= fb_start and fb_end <= buf_len:
-                    return fb_start, fb_end, False
-                if fb_end > buf_len:
-                    return None, None, True
-
-        if direct_needs_wait:
-            return None, None, True
-        return None, None, False
+        """Return (start_idx, end_idx, wait_more_data). См. p300_analysis.epoch_indexing."""
+        return resolve_epoch_indices_for_marker(
+            marker_ts=marker_ts,
+            buf_len=buf_len,
+            srate=srate,
+            epoch_len=epoch_len,
+            lsl_ref=lsl_ref,
+            time_arr=time_arr,
+            marker_eeg_offset=self._marker_eeg_ts_offset,
+            compute_start_index=self._compute_epoch_start_index,
+        )
 
     def _redraw_from_epochs(self) -> None:
         el = self._epoch_geom.epoch_len
