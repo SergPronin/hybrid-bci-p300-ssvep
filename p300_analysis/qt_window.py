@@ -435,12 +435,22 @@ class P300AnalyzerWindow(QMainWindow):
         self.plot_corrected.setBackground("#0a0a0a")
         self.plot_integrated = pg.PlotWidget()
         self.plot_integrated.setBackground("#0a0a0a")
+        self.plot_raw_last = pg.PlotWidget()
+        self.plot_raw_last.setBackground("#0a0a0a")
 
-        self._setup_plot(self.plot_raw, title="Сырые усредненные потенциалы")
+        self._setup_plot(
+            self.plot_raw,
+            title="Сырые ERP — среднее (mean) по всем эпохам класса",
+        )
+        self._setup_plot(
+            self.plot_raw_last,
+            title="Сырые ERP — последняя эпоха на класс (без усреднения)",
+        )
         self._setup_plot(self.plot_corrected, title="После выравнивания (Baseline Correction)")
         self._setup_plot(self.plot_integrated, title="Интегрирование по модулю (AUC)")
 
         plots_layout.addWidget(self.plot_raw, stretch=1)
+        plots_layout.addWidget(self.plot_raw_last, stretch=1)
         plots_layout.addWidget(self.plot_corrected, stretch=1)
         plots_layout.addWidget(self.plot_integrated, stretch=1)
 
@@ -452,19 +462,20 @@ class P300AnalyzerWindow(QMainWindow):
         plot_widget.setTitle(title, color="#5bc0be", size="14pt")
         plot_widget.showGrid(x=True, y=True, alpha=0.3)
         plot_widget.setLabel("bottom", "Время, мс")
-        plot_widget.setLabel(
-            "left",
-            "Амплитуда (условн. ед.)"
-            if title == "Сырые усредненные потенциалы"
-            else ("Амплитуда (условн. ед.)" if "Baseline" in title else "Накопл. AUC (условн. ед.)"),
-        )
+        if "AUC" in title or "модулю" in title:
+            left_lbl = "Накопл. AUC (условн. ед.)"
+        elif "Baseline" in title or "выравнивания" in title:
+            left_lbl = "Амплитуда (условн. ед.)"
+        else:
+            left_lbl = "Амплитуда (условн. ед.)"
+        plot_widget.setLabel("left", left_lbl)
         plot_widget.addLegend(offset=(10, 10))
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)
 
     def _update_markers_presence_label(self) -> None:
-        streams = resolve_marker_streams(timeout=0.6)
+        streams = resolve_marker_streams(timeout=0.8, attempts=1)
         if streams:
             info0 = streams[0]
             name = info0.name() or "Markers"
@@ -476,7 +487,8 @@ class P300AnalyzerWindow(QMainWindow):
             LOG.info("Обнаружен поток Markers: name=%r channels=%s", name, nch)
         else:
             self._markers_presence_label.setText(
-                "Поток плиток (Markers): не найден (запустите стимуляцию PsychoPy)"
+                "Поток плиток (Markers): не найден — запустите PsychoPy; "
+                "на другом ПК проверьте Wi‑Fi (multicast) и брандмауэр"
             )
             self._markers_presence_label.setStyleSheet("color: #d9534f; font-size: 11px;")
             LOG.info("Поток Markers не найден (resolve timeout)")
@@ -991,13 +1003,18 @@ class P300AnalyzerWindow(QMainWindow):
         self._set_status("Подключение к маркерам...")
         QApplication.processEvents()
 
-        marker_streams = resolve_marker_streams(timeout=2.0)
+        marker_streams = resolve_marker_streams(timeout=5.0, attempts=2)
 
         if not marker_streams:
             QMessageBox.warning(
                 self,
                 "LSL",
-                "Не найден поток маркеров (type='Markers'). Убедитесь, что стимуляция запущена.",
+                "Не найден поток маркеров (type='Markers').\n\n"
+                "Проверьте: стимуляция PsychoPy запущена на том же ПК или в сети; на втором ноутбуке "
+                "LSL использует multicast — оба в одной Wi‑Fi, без «клиентской изоляции» AP, "
+                "разрешите входящий UDP в брандмауэре Windows/macOS.\n"
+                "Если ЭЭГ виден, а маркеры нет: запустите LabRecorder на машине со стимуляцией "
+                "или используйте провод/Ethernet.",
             )
             self._set_status("Не найден поток маркеров.")
             return
@@ -1103,10 +1120,17 @@ class P300AnalyzerWindow(QMainWindow):
 
     def _clear_plots(self) -> None:
         self.plot_raw.clear()
+        self.plot_raw_last.clear()
         self.plot_corrected.clear()
         self.plot_integrated.clear()
 
-        self._setup_plot(self.plot_raw, title="Сырые усредненные потенциалы")
+        self._setup_plot(
+            self.plot_raw, title="Сырые ERP — среднее (mean) по всем эпохам класса"
+        )
+        self._setup_plot(
+            self.plot_raw_last,
+            title="Сырые ERP — последняя эпоха на класс (без усреднения)",
+        )
         self._setup_plot(
             self.plot_corrected, title="После выравнивания (Baseline Correction)"
         )
@@ -1266,6 +1290,7 @@ class P300AnalyzerWindow(QMainWindow):
             time_ms=time_ms,
             time_crop=time_crop,
         )
+        self._plot_last_single_epochs(stim_keys, time_ms)
 
         counts = ", ".join([f"{k}:{len(self.epochs_data[k])}" for k in stim_keys])
         need_hint = (
@@ -1280,6 +1305,36 @@ class P300AnalyzerWindow(QMainWindow):
             f"Обновлено: baseline={baseline_ms} мс, окно=[{wx}, {wy}] мс. "
             f"Эпохи: {counts}.{need_hint}{filter_hint}"
         )
+
+    def _plot_last_single_epochs(
+        self,
+        stim_keys: List[str],
+        time_ms: np.ndarray,
+    ) -> None:
+        """Одна последняя эпоха на каждый класс — без mean по повторениям."""
+        self.plot_raw_last.clear()
+        self._setup_plot(
+            self.plot_raw_last,
+            title="Сырые ERP — последняя эпоха на класс (без усреднения)",
+        )
+        colors = ["#ff4d4d", "#4d79ff", "#4dff88", "#ffcc33", "#b366ff", "#33ffd8"]
+        t = np.asarray(time_ms, dtype=np.float64)
+        for i, key in enumerate(stim_keys):
+            epochs = self.epochs_data.get(key, [])
+            if not epochs:
+                continue
+            last = np.asarray(epochs[-1], dtype=np.float64).ravel()
+            n = int(min(last.size, t.size))
+            if n <= 0:
+                continue
+            label = f"{key} (последняя эпоха)"
+            self.plot_raw_last.plot(
+                t[:n],
+                last[:n],
+                pen=pg.mkPen(colors[i % len(colors)], width=2),
+                name=label,
+            )
+        self.plot_raw_last.setXRange(0, 800)
 
     def _plot_all(
         self,
@@ -1296,7 +1351,9 @@ class P300AnalyzerWindow(QMainWindow):
 
         # Graph 1: raw averaged ERP
         self.plot_raw.clear()
-        self._setup_plot(self.plot_raw, title="Сырые усредненные потенциалы")
+        self._setup_plot(
+            self.plot_raw, title="Сырые ERP — среднее (mean) по всем эпохам класса"
+        )
         for i in range(n_stim):
             label = labels[i] if i < len(labels) else f"Стимул {i + 1}"
             self.plot_raw.plot(

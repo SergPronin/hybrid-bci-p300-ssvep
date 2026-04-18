@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any, List, Set, Tuple
 
 from pylsl import StreamInfo, StreamInlet, resolve_byprop
 
@@ -33,11 +33,34 @@ def find_allowed_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
     return [s for s in all_streams if _is_allowed_stream(s)]
 
 
-def resolve_marker_streams(timeout: float = 0.5) -> List[StreamInfo]:
-    try:
-        return list(resolve_byprop("type", "Markers", timeout=timeout))
-    except Exception:
-        return []
+def resolve_marker_streams(
+    timeout: float = 5.0,
+    *,
+    attempts: int = 2,
+) -> List[StreamInfo]:
+    """Поиск потоков type=Markers (LSL discovery).
+
+    На втором ноутбуке в той же Wi‑Fi сети первый resolve иногда пустой из‑за
+    задержки multicast/брандмауэра — делаем несколько попыток с тем же timeout.
+    """
+    merged: List[StreamInfo] = []
+    seen: Set[Tuple[str, str]] = set()
+    for _ in range(max(1, int(attempts))):
+        try:
+            batch = list(resolve_byprop("type", "Markers", timeout=float(timeout)))
+        except Exception:
+            batch = []
+        for s in batch:
+            try:
+                key = (s.name() or "", s.session_id() or "")
+            except Exception:
+                key = (str(s), "")
+            if key not in seen:
+                seen.add(key)
+                merged.append(s)
+        if merged:
+            return merged
+    return []
 
 
 def unwrap_combo_userdata(data: Any) -> Any:
