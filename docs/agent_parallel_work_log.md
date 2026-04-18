@@ -37,6 +37,16 @@
 
 ---
 
+## Done — 2026-04-18 — подробный NDJSON-лог каждого обследования
+
+**Агент:** Cursor  
+**Файлы:** `p300_analysis/exam_session_detail_logger.py`, интеграция в `p300_analysis/qt_window.py`, тесты `tests/test_exam_session_detail_logger.py`.  
+**Папка логов:** `data/examination_logs/exam_run{seq}_{дата}_{id}.ndjson` (один файл на нажатие «Начать анализ» до остановки/сброса/отключения/закрытия окна).  
+**События в логе:** `exam_start`, `lsl_marker_sample`, `trial_cue_lsl`, `stimulus_stream_started`, `eeg_chunk`, `time_alignment_calibrated`, `marker_epoch_*`, `epoch_extracted`, `winner_update`, `qt_tick`, обрезки буфера, `exam_end` + путь в `summary.detail_exam_log_path`.  
+**Тесты:** `python -m pytest tests/test_exam_session_detail_logger.py tests/test_epoch_indexing.py tests/test_winner_metrics.py -v` → 13 passed.
+
+---
+
 ## In progress
 
 _(пусто — зарезервируйте перед началом работы)_

@@ -50,6 +50,12 @@ from p300_analysis.constants import (
 from p300_analysis.debug_ndjson import debug_ndjson
 from p300_analysis.epoch_geometry import EpochGeometry
 from p300_analysis.epoch_indexing import resolve_epoch_indices_for_marker
+from p300_analysis.exam_session_detail_logger import (
+    ExamSessionDetailLogger,
+    epoch_roi_summary,
+    pending_snapshot_for_log,
+    summarize_eeg_chunk,
+)
 from p300_analysis.erp_compute import (
     build_averaged_erp,
     check_can_decide,
@@ -142,6 +148,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._run_winners_export: List[Dict[str, Any]] = []
         self._run_epoch_segments_export: List[Dict[str, Any]] = []
         self._last_run_export_data: Optional[Dict[str, Any]] = None
+        self._exam_detail_log: Optional[ExamSessionDetailLogger] = None
+        self._exam_qt_tick_seq: int = 0
 
         self._timer = QTimer(self)
         self._timer.setInterval(50)
@@ -675,35 +683,54 @@ class P300AnalyzerWindow(QMainWindow):
             "Если нажали «Начать» до запуска плиток — дождитесь первой вспышки (калибровка времени по ней)."
         )
         LOG.info("Начата запись эпох для анализа")
-        self._session_run_id = self._session_recorder.start_run(
-            {
-                "run_seq": self._exp_run_seq,
-                "winner_mode": self.combo_winner_mode.currentData(),
-                "baseline_ms": int(self.spin_baseline.value()),
-                "window_x_ms": int(self.spin_x.value()),
-                "window_y_ms": int(self.spin_y.value()),
-                "epochs_after_trial_only": bool(self.chk_epochs_after_trial.isChecked()),
-                "selected_roi_channels_0idx": [
-                    i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()
-                ],
-                "eeg_stream_name": (self._inlet_eeg.info().name() if self._inlet_eeg else None),
-                "eeg_stream_srate": (
-                    float(self._inlet_eeg.info().nominal_srate()) if self._inlet_eeg else None
-                ),
-                "eeg_stream_channels": (
-                    int(self._inlet_eeg.info().channel_count()) if self._inlet_eeg else None
-                ),
-                "markers_stream_name": (
-                    self._inlet_markers.info().name() if self._inlet_markers else None
-                ),
-                "recorder_file": str(self._session_recorder.output_path),
-            }
-        )
+        run_meta: Dict[str, Any] = {
+            "run_seq": self._exp_run_seq,
+            "winner_mode": self.combo_winner_mode.currentData(),
+            "baseline_ms": int(self.spin_baseline.value()),
+            "window_x_ms": int(self.spin_x.value()),
+            "window_y_ms": int(self.spin_y.value()),
+            "epochs_after_trial_only": bool(self.chk_epochs_after_trial.isChecked()),
+            "selected_roi_channels_0idx": [
+                i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()
+            ],
+            "eeg_stream_name": (self._inlet_eeg.info().name() if self._inlet_eeg else None),
+            "eeg_stream_srate": (
+                float(self._inlet_eeg.info().nominal_srate()) if self._inlet_eeg else None
+            ),
+            "eeg_stream_channels": (
+                int(self._inlet_eeg.info().channel_count()) if self._inlet_eeg else None
+            ),
+            "markers_stream_name": (
+                self._inlet_markers.info().name() if self._inlet_markers else None
+            ),
+            "recorder_file": str(self._session_recorder.output_path),
+        }
+        self._session_run_id = self._session_recorder.start_run(run_meta)
         LOG.info(
             "Запущена запись сырых данных для офлайн-отладки: run_id=%s file=%s",
             self._session_run_id,
             self._session_recorder.output_path,
         )
+        try:
+            self._exam_detail_log = ExamSessionDetailLogger.open_new(
+                run_seq=self._exp_run_seq,
+                exam_start_data={
+                    **run_meta,
+                    "session_ndjson_run_id": self._session_run_id,
+                    "qt_timer_interval_ms": int(self._timer.interval()),
+                    "eeg_keep_seconds": float(EEG_KEEP_SECONDS),
+                    "epoch_duration_ms": int(EPOCH_DURATION_MS),
+                    "epoch_reserve_ms": int(EPOCH_RESERVE_MS),
+                    "min_epochs_to_decide": int(MIN_EPOCHS_TO_DECIDE),
+                    "eeg_pull_max_samples": int(EEG_PULL_MAX_SAMPLES),
+                    "markers_pull_max_samples": int(MARKERS_PULL_MAX_SAMPLES),
+                },
+            )
+            self._exam_qt_tick_seq = 0
+            LOG.info("Подробный NDJSON-лог обследования: %s", self._exam_detail_log.path)
+        except Exception:
+            self._exam_detail_log = None
+            LOG.exception("Не удалось открыть подробный лог обследования (NDJSON)")
         # region agent log
         debug_ndjson(
             {
@@ -821,6 +848,11 @@ class P300AnalyzerWindow(QMainWindow):
                 "Перед остановкой добрали эпох из pending_markers: %d (для коротких прогонов).",
                 extracted_now,
             )
+            if self._exam_detail_log is not None:
+                self._exam_detail_log.write(
+                    "stop_finalize_epochs",
+                    {"extracted_epochs": int(extracted_now)},
+                )
             self._redraw_from_epochs()
 
     def _log_experiment_run_end(self, reason: str) -> None:
@@ -862,6 +894,11 @@ class P300AnalyzerWindow(QMainWindow):
                 ),
             },
         }
+        if self._exam_detail_log is not None:
+            summary["detail_exam_log_path"] = str(self._exam_detail_log.path)
+            self._exam_detail_log.write("exam_end", {"reason": reason, "summary": summary})
+            self._exam_detail_log.close()
+            self._exam_detail_log = None
         self._last_run_export_data = {
             "run_seq": self._exp_run_seq,
             "saved_at_ms": int(time.time() * 1000),
@@ -1196,6 +1233,26 @@ class P300AnalyzerWindow(QMainWindow):
                     },
                 }
             )
+            if self._exam_detail_log is not None:
+                self._exam_detail_log.write(
+                    "winner_update",
+                    {
+                        "winner_event_seq": int(self._dbg_winner_n),
+                        "winner_key": winner_key,
+                        "winner_digit": win_digit,
+                        "mode": str(mode_used),
+                        "match_lsl_cue": bool(match_lsl),
+                        "lsl_cue_target_id": self._lsl_cue_target_id,
+                        "stim_keys": list(stim_keys),
+                        "epoch_counts_by_stim": {
+                            k: len(self.epochs_data.get(k, [])) for k in stim_keys
+                        },
+                        "winner_debug": dbg,
+                        "window_ms": [int(wx), int(wy)],
+                        "pending_markers_count": len(self.pending_markers),
+                        "marker_eeg_offset": self._marker_eeg_ts_offset,
+                    },
+                )
             self.winner_label.setText("\n".join(lines))
             self.winner_label.setStyleSheet(
                 WINNER_LABEL_STYLE_MATCH if match_lsl else WINNER_LABEL_STYLE_MISMATCH
@@ -1308,6 +1365,10 @@ class P300AnalyzerWindow(QMainWindow):
                         marker_value = sample
                     self._run_markers_export.append({"ts": float(ts), "value": str(marker_value)})
                 for sample, ts in zip(marker_chunk, marker_ts):
+                    if isinstance(sample, (list, tuple)):
+                        marker_value = sample[0] if sample else ""
+                    else:
+                        marker_value = sample
                     cue_tid = parse_trial_target_tile_id(sample)
                     if cue_tid is not None:
                         self._lsl_cue_target_id = cue_tid
@@ -1340,9 +1401,33 @@ class P300AnalyzerWindow(QMainWindow):
                                 },
                             }
                         )
+                        if self._exam_detail_log is not None:
+                            self._exam_detail_log.write(
+                                "trial_cue_lsl",
+                                {
+                                    "cue_event_seq": int(self._dbg_cue_n),
+                                    "trial_index": len(self._exp_trial_targets) - 1,
+                                    "target_tile_id": int(cue_tid),
+                                    "marker_ts": float(ts),
+                                    "pending_markers_count": len(self.pending_markers),
+                                    "epoch_counts_by_stim": self._epoch_counts_snapshot(),
+                                },
+                            )
                         # endregion
                     stim_key = marker_value_to_stim_key(sample)
                     if stim_key is None:
+                        if self._exam_detail_log is not None:
+                            self._exam_detail_log.write(
+                                "lsl_marker_sample",
+                                {
+                                    "lsl_ts": float(ts),
+                                    "raw_value": str(marker_value),
+                                    "parsed_stim_key": None,
+                                    "parsed_trial_target_tile_id": cue_tid,
+                                    "enqueued_as_stimulus": False,
+                                    "note": "not_stimulus_on_marker",
+                                },
+                            )
                         continue
                     if not self._has_seen_stimulus_marker_in_run:
                         self._has_seen_stimulus_marker_in_run = True
@@ -1354,14 +1439,47 @@ class P300AnalyzerWindow(QMainWindow):
                                 "stim_key": stim_key,
                             },
                         )
+                        if self._exam_detail_log is not None:
+                            self._exam_detail_log.write(
+                                "stimulus_stream_started",
+                                {
+                                    "first_stimulus_marker_ts": float(ts),
+                                    "stim_key": stim_key,
+                                },
+                            )
                     tsf = float(ts)
                     if (
                         self.chk_epochs_after_trial.isChecked()
                         and self._marker_ts_last_trial_start is not None
                         and tsf < self._marker_ts_last_trial_start
                     ):
+                        if self._exam_detail_log is not None:
+                            self._exam_detail_log.write(
+                                "lsl_marker_sample",
+                                {
+                                    "lsl_ts": tsf,
+                                    "raw_value": str(marker_value),
+                                    "parsed_stim_key": stim_key,
+                                    "parsed_trial_target_tile_id": cue_tid,
+                                    "enqueued_as_stimulus": False,
+                                    "skipped_before_trial_start": True,
+                                    "trial_start_ts": float(self._marker_ts_last_trial_start),
+                                },
+                            )
                         continue
                     self.pending_markers.append((tsf, stim_key))
+                    if self._exam_detail_log is not None:
+                        self._exam_detail_log.write(
+                            "lsl_marker_sample",
+                            {
+                                "lsl_ts": tsf,
+                                "raw_value": str(marker_value),
+                                "parsed_stim_key": stim_key,
+                                "parsed_trial_target_tile_id": cue_tid,
+                                "enqueued_as_stimulus": True,
+                                "pending_len_after": len(self.pending_markers),
+                            },
+                        )
                     if (
                         self._marker_eeg_ts_offset is None
                         and self._calib_first_marker_ts is None
@@ -1369,7 +1487,13 @@ class P300AnalyzerWindow(QMainWindow):
                         self._calib_first_marker_ts = tsf
                 # prevent unbounded growth if marker producer is faster than extraction
                 if len(self.pending_markers) > 5000:
+                    n_pm = len(self.pending_markers)
                     self.pending_markers = self.pending_markers[-5000:]
+                    if self._exam_detail_log is not None:
+                        self._exam_detail_log.write(
+                            "pending_markers_capped",
+                            {"dropped_oldest": int(n_pm - 5000), "kept": 5000},
+                        )
 
         # 2) Pull EEG and extend buffers (take only channel 0)
         try:
@@ -1412,6 +1536,18 @@ class P300AnalyzerWindow(QMainWindow):
                     self._run_eeg_samples_export.extend(arr_2d.tolist())
                     self._lsl_clock_at_buffer_end = lsl_local_clock()
                     self._ensure_epoch_template()
+                    if (
+                        self._exam_detail_log is not None
+                        and self._has_seen_stimulus_marker_in_run
+                    ):
+                        self._exam_detail_log.write(
+                            "eeg_chunk",
+                            {
+                                **summarize_eeg_chunk(arr_2d, [float(t) for t in eeg_ts]),
+                                "buf_len_after": len(self.eeg_buffer),
+                                "lsl_clock_at_buffer_end": float(self._lsl_clock_at_buffer_end),
+                            },
+                        )
                     if (
                         self._marker_eeg_ts_offset is None
                         and self._calib_first_marker_ts is not None
@@ -1476,6 +1612,21 @@ class P300AnalyzerWindow(QMainWindow):
                                 "pending_markers_count": len(self.pending_markers),
                             },
                         )
+                        if self._exam_detail_log is not None:
+                            self._exam_detail_log.write(
+                                "time_alignment_calibrated",
+                                {
+                                    "run_seq": self._exp_run_seq,
+                                    "offset_diagnostic": self._marker_eeg_ts_offset,
+                                    "calib_method": calib_method,
+                                    "lsl_clock_at_buffer_end": self._lsl_clock_at_buffer_end,
+                                    "eeg_first_ts": eeg_first,
+                                    "eeg_last_ts": eeg_last,
+                                    "first_flash_marker_ts": fm,
+                                    "eeg_buffer_len": len(self.eeg_buffer),
+                                    "pending_markers_count": len(self.pending_markers),
+                                },
+                            )
 
         # 3) Extract epochs for pending markers (up to what current buffer allows)
         #
@@ -1520,11 +1671,45 @@ class P300AnalyzerWindow(QMainWindow):
                 )
                 if wait_more:
                     new_pending.append((marker_ts, stim_key))
+                    if self._exam_detail_log is not None:
+                        self._exam_detail_log.write(
+                            "marker_epoch_wait_more",
+                            {
+                                "marker_ts": float(marker_ts),
+                                "stim_key": stim_key,
+                                "buf_len": int(buf_len),
+                                "lsl_ref": float(lsl_ref),
+                                "epoch_len": int(el),
+                                "srate": float(srate),
+                            },
+                        )
                     continue
                 if start_idx is None or end_idx is None:
+                    if self._exam_detail_log is not None:
+                        self._exam_detail_log.write(
+                            "marker_epoch_dropped",
+                            {
+                                "marker_ts": float(marker_ts),
+                                "stim_key": stim_key,
+                                "buf_len": int(buf_len),
+                                "lsl_ref": float(lsl_ref),
+                            },
+                        )
                     continue
                 if end_idx + reserve_samples > buf_len:
                     new_pending.append((marker_ts, stim_key))
+                    if self._exam_detail_log is not None:
+                        self._exam_detail_log.write(
+                            "marker_epoch_wait_reserve",
+                            {
+                                "marker_ts": float(marker_ts),
+                                "stim_key": stim_key,
+                                "buf_len": int(buf_len),
+                                "end_idx": int(end_idx),
+                                "reserve_samples": int(reserve_samples),
+                                "lsl_ref": float(lsl_ref),
+                            },
+                        )
                     continue
 
                 epoch = buf_arr[start_idx:end_idx]
@@ -1612,6 +1797,28 @@ class P300AnalyzerWindow(QMainWindow):
                             "epoch_counts_by_stim": self._epoch_counts_snapshot(),
                         },
                     )
+                    if self._exam_detail_log is not None:
+                        self._exam_detail_log.write(
+                            "epoch_extracted",
+                            {
+                                "event_seq": int(self._dbg_epoch_lag_n),
+                                "stim_key": stim_key,
+                                "marker_ts": float(marker_ts),
+                                "lsl_ref": float(lsl_ref),
+                                "seconds_back": float(seconds_back),
+                                "lag_ms": float(lag_ms),
+                                "start_idx": int(start_idx),
+                                "end_idx": int(end_idx),
+                                "buf_len": int(buf_len),
+                                "epoch_len": int(el),
+                                "srate": float(srate),
+                                "ts_unique_in_epoch": int(ts_unique_count),
+                                "ts_resolution_hint": ts_resolution_hint,
+                                "roi_channels_used": list(_valid),
+                                "epoch_roi": epoch_roi_summary(epoch),
+                                "epoch_counts_by_stim": self._epoch_counts_snapshot(),
+                            },
+                        )
                     # endregion
                     if n_epochs_before == 0:
                         LOG.info(
@@ -1640,14 +1847,37 @@ class P300AnalyzerWindow(QMainWindow):
                 cut = len(self.eeg_buffer) - max_keep
                 self.eeg_buffer = self.eeg_buffer[cut:]
                 self.eeg_times = self.eeg_times[cut:]
+                if self._exam_detail_log is not None:
+                    self._exam_detail_log.write(
+                        "eeg_buffer_trim",
+                        {
+                            "removed_samples": int(cut),
+                            "buf_len_after": len(self.eeg_buffer),
+                            "max_keep_samples": int(max_keep),
+                            "eeg_keep_seconds": float(EEG_KEEP_SECONDS),
+                        },
+                    )
 
             # Drop pending markers that are too old (their epoch data was trimmed away)
             if self._lsl_clock_at_buffer_end is not None:
                 lsl_cutoff = self._lsl_clock_at_buffer_end - EEG_KEEP_SECONDS
+                n_pending_before = len(self.pending_markers)
                 self.pending_markers = [
                     (mts, sk) for mts, sk in self.pending_markers
                     if float(mts) >= lsl_cutoff
                 ]
+                if self._exam_detail_log is not None and n_pending_before != len(
+                    self.pending_markers
+                ):
+                    self._exam_detail_log.write(
+                        "pending_markers_time_trim",
+                        {
+                            "before": int(n_pending_before),
+                            "after": int(len(self.pending_markers)),
+                            "lsl_cutoff": float(lsl_cutoff),
+                            "lsl_ref": float(self._lsl_clock_at_buffer_end),
+                        },
+                    )
 
         # 5) Redraw if new epochs arrived or GUI parameters changed
         if self._need_redraw_params:
@@ -1656,6 +1886,32 @@ class P300AnalyzerWindow(QMainWindow):
 
         if need_redraw:
             self._redraw_from_epochs()
+
+        if (
+            self._recording_epochs
+            and self._exam_detail_log is not None
+            and self._inlet_eeg is not None
+            and self._inlet_markers is not None
+        ):
+            self._exam_qt_tick_seq += 1
+            self._exam_detail_log.write(
+                "qt_tick",
+                {
+                    "tick_seq": int(self._exam_qt_tick_seq),
+                    "eeg_samples_this_tick": int(eeg_samples_this_tick),
+                    "marker_samples_this_tick": int(marker_samples_this_tick),
+                    "buf_len": len(self.eeg_buffer),
+                    "lsl_ref": (
+                        float(self._lsl_clock_at_buffer_end)
+                        if self._lsl_clock_at_buffer_end is not None
+                        else None
+                    ),
+                    "marker_eeg_offset": self._marker_eeg_ts_offset,
+                    "epoch_len": self._epoch_geom.epoch_len,
+                    "dt_ms": self._epoch_geom.dt_ms,
+                    "pending": pending_snapshot_for_log(self.pending_markers),
+                },
+            )
 
         self._refresh_monitor_ui(
             eeg_samples_this_tick=eeg_samples_this_tick,
