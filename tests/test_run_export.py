@@ -193,9 +193,11 @@ def test_export_run_continuous_csv_marker_via_lsl_clock_mapping() -> None:
         rows = _read_ru_csv(p)
     expected_idx = n - 1 - int(round(0.4 * srate))
     body = rows[1:]
+    # Без |off плитка считается горящей до конца записи — marker=3 от expected_idx до N-1.
     markers_nonzero = [i for i, r in enumerate(body) if _num_ru(r[-2]) != 0.0]
-    assert markers_nonzero == [expected_idx]
-    assert _num_ru(body[expected_idx][-2]) == 3.0
+    assert markers_nonzero and markers_nonzero[0] == expected_idx
+    assert markers_nonzero[-1] == n - 1
+    assert all(_num_ru(body[k][-2]) == 3.0 for k in markers_nonzero)
     assert _num_ru(body[expected_idx][-1]) == 1.0
 
 
@@ -220,9 +222,43 @@ def test_export_run_continuous_uses_precomputed_sample_idx() -> None:
         p = export_run_continuous_csv(run_data=run, output_path=base)
         rows = _read_ru_csv(p)
     body = rows[1:]
-    markers_nonzero = [i for i, r in enumerate(body) if _num_ru(r[-2]) != 0.0]
-    assert markers_nonzero == [17]
-    assert _num_ru(body[17][-2]) == 5.0
+    # Без |off плитка горит до конца записи — marker=5 с sample_idx=17 до N-1.
+    markers_nonzero_idx = [i for i, r in enumerate(body) if _num_ru(r[-2]) != 0.0]
+    assert markers_nonzero_idx[0] == 17
+    assert all(_num_ru(body[k][-2]) == 5.0 for k in markers_nonzero_idx)
+
+
+def test_export_run_continuous_marker_fills_on_to_off_range() -> None:
+    """Между |on и |off для одной и той же плитки marker = её номер на каждом отсчёте."""
+    n = 20
+    srate = 500.0
+    run = {
+        "summary": {"analysis_params": {"sampling_rate_hz": srate}},
+        "eeg_ts": [100.0 + i * 0.002 for i in range(n)],
+        "eeg_samples": [[0.0] for _ in range(n)],
+        "markers": [
+            {"ts": 100.004, "value": "7|on", "sample_idx": 2},
+            {"ts": 100.010, "value": "7|off", "sample_idx": 5},
+            {"ts": 100.020, "value": "3|on", "sample_idx": 10},
+            {"ts": 100.030, "value": "3|off", "sample_idx": 15},
+        ],
+        "epoch_segments": [],
+        "epoch_time_ms": [0.0, 2.0],
+    }
+    with TemporaryDirectory() as td:
+        base = Path(td) / "range.csv"
+        p = export_run_continuous_csv(run_data=run, output_path=base)
+        rows = _read_ru_csv(p)
+    body = rows[1:]
+    # sample_idx 2..5 → marker=7, 6..9 → 0, 10..15 → marker=3, прочее — 0.
+    for k in range(2, 6):
+        assert _num_ru(body[k][-2]) == 7.0, f"expected marker=7 at {k}, got {body[k][-2]}"
+    for k in range(6, 10):
+        assert _num_ru(body[k][-2]) == 0.0, f"expected 0 at {k}, got {body[k][-2]}"
+    for k in range(10, 16):
+        assert _num_ru(body[k][-2]) == 3.0, f"expected marker=3 at {k}, got {body[k][-2]}"
+    assert _num_ru(body[0][-2]) == 0.0
+    assert _num_ru(body[19][-2]) == 0.0
 
 
 def test_export_run_continuous_xlsx_format() -> None:

@@ -12,6 +12,35 @@ import numpy as np
 from p300_analysis.marker_parsing import marker_value_to_stim_key, stim_key_to_tile_digit
 
 
+def _parse_tile_event(value: Any) -> Optional[Tuple[int, str]]:
+    """Разбирает маркер стима плитки в пару ``(tile_digit, phase)``, где ``phase`` — ``"on"`` или ``"off"``.
+
+    Принимает строки вида ``"5|on"``, ``"5|off"``. Для ``trial_start/trial_end``
+    и отрицательных id возвращает ``None``.
+    """
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if "|" not in s:
+        return None
+    left, right = s.split("|", 1)
+    try:
+        tile = int(left.strip())
+    except ValueError:
+        return None
+    if tile < 0:
+        return None
+    phase = right.split("|", 1)[0].strip().lower()
+    if phase not in {"on", "off"}:
+        return None
+    return tile, phase
+
+
 def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -423,17 +452,25 @@ def export_run_continuous_csv(
     selected_channels: List[int] | None = None,
     epoch_window_ms: Optional[float] = None,
     file_format: str = "csv",
+    skip_pauses: bool = False,
 ) -> Path:
-    """Непрерывная ЭЭГ за прогон (включая паузы без вспышек) → один файл.
+    """Непрерывная ЭЭГ за прогон → один файл.
 
     Колонки: ``sample_idx`` (0..N от начала записи), ``t_rel_s`` (секунды от первого отсчёта),
-    ``ts`` (сырой штамп потока), ``ch_1``..``ch_N``, ``marker`` (0 — нет вспышки, иначе
-    цифра плитки на ближайшем к ``marker_ts`` отсчёте), ``in_epoch`` (1 — отсчёт попадает
-    в окно эпохи после какой-либо вспышки, 0 — пауза; окно берётся из ``epoch_window_ms``
-    либо ``epoch_time_ms``/шаблона, по умолчанию 800 мс).
+    ``ts`` (сырой штамп потока), ``ch_1``..``ch_N``, ``marker`` (0 — ни одна плитка не горит;
+    иначе — номер плитки, которая горит **на протяжении всего отрезка** от её ``|on`` до
+    ``|off`` из LSL-потока плиток), ``in_epoch`` (1 — отсчёт попадает в окно эпохи после
+    какой-либо вспышки, 0 — пауза; окно берётся из ``epoch_window_ms`` либо
+    ``epoch_time_ms``/шаблона, по умолчанию 800 мс).
 
     ``file_format``: ``csv`` (русский формат Excel: ``;`` разделитель и ``,`` дробная часть)
     или ``xlsx`` (нативные числа, Excel сам подставит запятую по локали).
+
+    ``skip_pauses``: если True — в файл пишутся только отсчёты с ``in_epoch=1``
+    (непрерывные «вспышечные» окна длиной ``epoch_window_ms`` после каждой вспышки).
+    Тогда **первая строка файла = первая вспышка**, а паузы между вспышками
+    не попадают в экспорт. Полезно, если в Excel не хочется листать «мёртвые» тысячи
+    строк в начале записи.
     """
     fmt = (file_format or "csv").lower().strip()
     if fmt not in {"csv", "xlsx"}:
@@ -502,46 +539,73 @@ def export_run_continuous_csv(
         last_lc is not None and srate is not None and srate > 0 and ref_n_int > 0
     )
 
-    marker_vals = np.zeros(n, dtype=np.float64)
-    flash_sample_idx: List[int] = []
-    for item in data.get("markers") or []:
-        sk = marker_value_to_stim_key(item.get("value"))
-        if sk is None:
-            continue
-        try:
-            d_int = int(stim_key_to_tile_digit(sk))
-        except Exception:
-            continue
-        if d_int < 0:
-            continue
-
+    def _resolve_sample_idx(item: Dict[str, Any]) -> Optional[int]:
+        """Сопоставляет маркеру (любому — on/off/trial_*) индекс отсчёта ЭЭГ."""
         pre = item.get("sample_idx")
-        j: Optional[int] = None
         if isinstance(pre, (int, np.integer)) and not isinstance(pre, bool):
-            if 0 <= int(pre) < n:
-                j = int(pre)
-
-        if j is None and can_lc_map:
+            cand = int(pre)
+            if 0 <= cand < n:
+                return cand
+        if can_lc_map:
             try:
                 ts_m = float(item.get("ts"))
+            except (TypeError, ValueError):
+                ts_m = None
+            if ts_m is not None:
                 t_mark_lc = ts_m + float(mk_offset) if mk_offset is not None else ts_m
                 seconds_back = float(last_lc) - t_mark_lc
                 cand = int(ref_n_int) - 1 - int(round(seconds_back * float(srate)))
                 if 0 <= cand < n:
-                    j = cand
-            except (TypeError, ValueError):
-                j = None
+                    return cand
+        try:
+            ts_m = float(item.get("ts"))
+        except (TypeError, ValueError):
+            return None
+        cand = int(np.argmin(np.abs(ts_arr - ts_m)))
+        if 0 <= cand < n:
+            return cand
+        return None
 
-        if j is None:
-            try:
-                ts_m = float(item.get("ts"))
-                j = int(np.argmin(np.abs(ts_arr - ts_m)))
-            except (TypeError, ValueError):
+    # Парсим события on/off в виде (sample_idx, tile, phase).
+    events: List[Tuple[int, int, str]] = []
+    for item in data.get("markers") or []:
+        parsed = _parse_tile_event(item.get("value"))
+        if parsed is None:
+            continue
+        tile, phase = parsed
+        sidx = _resolve_sample_idx(item)
+        if sidx is None:
+            continue
+        events.append((sidx, tile, phase))
+    events.sort(key=lambda x: (x[0], 0 if x[2] == "on" else 1))
+
+    # Заполняем marker: пока плитка «горит» (между её |on и |off) — её номер
+    # на каждом отсчёте, иначе 0. Если |off не пришёл (короткий прогон,
+    # остановка анализа в момент горения) — считаем, что плитка горит до конца записи.
+    marker_vals = np.zeros(n, dtype=np.int64)
+    flash_sample_idx: List[int] = []
+    # Для каждой плитки храним последний sample_idx её |on, для которого не пришёл |off.
+    open_on: Dict[int, int] = {}
+    for sidx, tile, phase in events:
+        if phase == "on":
+            # Если предыдущая |on не закрылась — закрываем её «на себе» (следующая вспышка = новый «стартовый» момент).
+            prev_on = open_on.get(tile)
+            if prev_on is not None:
+                end = min(n, sidx)
+                marker_vals[prev_on:end] = tile
+            open_on[tile] = sidx
+            flash_sample_idx.append(sidx)
+        elif phase == "off":
+            start_on = open_on.pop(tile, None)
+            if start_on is None:
+                # |off без пары |on (до начала записи или потерянный) — ставим только точку.
+                marker_vals[sidx] = tile
                 continue
-
-        if 0 <= j < n:
-            marker_vals[j] = float(d_int)
-            flash_sample_idx.append(j)
+            end = min(n, sidx + 1)  # включаем сам отсчёт |off
+            marker_vals[start_on:end] = tile
+    # Хвост: всё, что осталось открытым — тянется до конца записи.
+    for tile, start_on in open_on.items():
+        marker_vals[start_on:n] = tile
 
     if epoch_window_ms is None:
         tpl = data.get("epoch_time_ms") or []
@@ -573,6 +637,8 @@ def export_run_continuous_csv(
     for i, (t, smp, mk, ie) in enumerate(
         zip(eeg_ts, eeg_samples, marker_vals.tolist(), in_epoch.tolist())
     ):
+        if skip_pauses and int(ie) == 0:
+            continue
         vals = smp if isinstance(smp, list) else [smp]
         row: List[Any] = [int(i), float(t_rel_s[i]), float(t)]
         for k in range(max_ch):
@@ -582,11 +648,18 @@ def export_run_continuous_csv(
         rows.append(row)
 
     stem = output_path.with_suffix("")
-    suffix_tag = "" if stem.name.endswith("_continuous") else "_continuous"
-    if fmt == "xlsx":
-        p = Path(f"{stem}{suffix_tag}.xlsx")
-        _rows_to_xlsx(p, "continuous", header, rows)
+    base_name = stem.name
+    if base_name.endswith("_continuous"):
+        base_name = base_name[: -len("_continuous")]
+    if skip_pauses:
+        base_name = f"{base_name}_flashes_only"
     else:
-        p = Path(f"{stem}{suffix_tag}.csv")
+        base_name = f"{base_name}_continuous"
+    target_dir = stem.parent
+    if fmt == "xlsx":
+        p = target_dir / f"{base_name}.xlsx"
+        _rows_to_xlsx(p, "flashes" if skip_pauses else "continuous", header, rows)
+    else:
+        p = target_dir / f"{base_name}.csv"
         _rows_to_csv_ru(p, header, rows)
     return p
