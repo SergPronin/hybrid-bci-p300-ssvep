@@ -116,6 +116,9 @@ class P300AnalyzerWindow(QMainWindow):
         self._monitor_markers_win: Optional[QWidget] = None
         self._epoch_summary_win: Optional[QWidget] = None
         self._epoch_summary_text: Optional[QTextEdit] = None
+        # Метки времени последних принятых маркеров вспышек (для оценки ISI). Ось произвольная.
+        self._stimulus_marker_ts_history: Deque[float] = deque(maxlen=256)
+        self._last_stim_marker_ts: Optional[float] = None
         self._monitor_eeg_status: Optional[QLabel] = None
         self._monitor_markers_status: Optional[QLabel] = None
         self._plot_eeg_monitor: Optional[pg.PlotWidget] = None
@@ -180,6 +183,24 @@ class P300AnalyzerWindow(QMainWindow):
 
         return sorted(keys, key=sk)
 
+    def _median_isi_ms(self) -> Optional[float]:
+        """Медиана межстимульного интервала по последним маркерам |on (мс) или None."""
+        hist = sorted(self._stimulus_marker_ts_history)
+        if len(hist) < 2:
+            return None
+        diffs = [
+            (hist[i + 1] - hist[i]) * 1000.0
+            for i in range(len(hist) - 1)
+            if 0.0 < (hist[i + 1] - hist[i]) < 10.0
+        ]
+        if not diffs:
+            return None
+        diffs.sort()
+        mid = len(diffs) // 2
+        return float(
+            diffs[mid] if len(diffs) % 2 == 1 else (diffs[mid - 1] + diffs[mid]) / 2.0
+        )
+
     def _format_epoch_summary_text(self) -> str:
         lines = [
             f"Прогон записи (run_seq): {self._exp_run_seq}",
@@ -205,6 +226,31 @@ class P300AnalyzerWindow(QMainWindow):
         lines.append("")
         pend = len(self.pending_markers)
         lines.append(f"Маркеров в очереди (ждут буфер): {pend}")
+
+        isi_ms = self._median_isi_ms()
+        if isi_ms is not None:
+            wy = int(self.spin_y.value())
+            epoch_ms = int(EPOCH_DURATION_MS)
+            lines.append("")
+            lines.append(
+                f"Средний ISI между вспышками: ~{isi_ms:.0f} мс "
+                f"(по {len(self._stimulus_marker_ts_history)} маркерам)"
+            )
+            if wy > isi_ms + 10.0:
+                lines.append(
+                    f"⚠  Окно анализа Y={wy} мс длиннее ISI — в окно попадают отклики "
+                    f"следующих плиток, ERP соседних плиток «подмешиваются»."
+                )
+                lines.append(
+                    f"   Рекомендация: уменьшить Y примерно до {int(isi_ms)} мс "
+                    "(и/или увеличить число повторений)."
+                )
+            if epoch_ms > isi_ms + 10.0:
+                lines.append(
+                    f"ℹ  Эпоха {epoch_ms} мс > ISI: в каждой эпохе присутствуют "
+                    "~{} следующих вспышек других плиток (нормально для быстрой парадигмы, "
+                    "усредняется повторениями).".format(max(1, int(epoch_ms // isi_ms) - 1))
+                )
         return "\n".join(lines)
 
     def _update_epoch_summary_panel(self) -> None:
@@ -779,6 +825,9 @@ class P300AnalyzerWindow(QMainWindow):
         self._need_redraw_params = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
+        self._calib_first_marker_lsl_clock = None
+        self._stimulus_marker_ts_history.clear()
+        self._last_stim_marker_ts = None
         self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
@@ -823,6 +872,9 @@ class P300AnalyzerWindow(QMainWindow):
         self._shown_no_marker_hint = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
+        self._calib_first_marker_lsl_clock = None
+        self._stimulus_marker_ts_history.clear()
+        self._last_stim_marker_ts = None
         self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
@@ -1118,6 +1170,9 @@ class P300AnalyzerWindow(QMainWindow):
         self._need_redraw_params = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
+        self._calib_first_marker_lsl_clock = None
+        self._stimulus_marker_ts_history.clear()
+        self._last_stim_marker_ts = None
         self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
@@ -1237,6 +1292,9 @@ class P300AnalyzerWindow(QMainWindow):
         self._need_redraw_params = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
+        self._calib_first_marker_lsl_clock = None
+        self._stimulus_marker_ts_history.clear()
+        self._last_stim_marker_ts = None
         self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
@@ -1674,6 +1732,8 @@ class P300AnalyzerWindow(QMainWindow):
                             )
                         continue
                     self.pending_markers.append((tsf, stim_key))
+                    self._stimulus_marker_ts_history.append(tsf)
+                    self._last_stim_marker_ts = tsf
                     if self._exam_detail_log is not None:
                         self._exam_detail_log.write(
                             "lsl_marker_sample",
