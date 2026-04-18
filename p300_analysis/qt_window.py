@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -113,6 +114,8 @@ class P300AnalyzerWindow(QMainWindow):
 
         self._monitor_eeg_win: Optional[QWidget] = None
         self._monitor_markers_win: Optional[QWidget] = None
+        self._epoch_summary_win: Optional[QWidget] = None
+        self._epoch_summary_text: Optional[QTextEdit] = None
         self._monitor_eeg_status: Optional[QLabel] = None
         self._monitor_markers_status: Optional[QLabel] = None
         self._plot_eeg_monitor: Optional[pg.PlotWidget] = None
@@ -164,6 +167,57 @@ class P300AnalyzerWindow(QMainWindow):
     def _epoch_counts_snapshot(self) -> Dict[str, int]:
         return {k: len(v) for k, v in self.epochs_data.items()}
 
+    def _stim_keys_sorted_for_summary(self, keys: List[str]) -> List[str]:
+        def sk(k: str) -> Tuple[int, str]:
+            if k.startswith("стимул_"):
+                tail = k[len("стимул_") :]
+                try:
+                    return int(tail), k
+                except ValueError:
+                    pass
+            return 10_000_000, k
+
+        return sorted(keys, key=sk)
+
+    def _format_epoch_summary_text(self) -> str:
+        lines = [
+            f"Прогон записи (run_seq): {self._exp_run_seq}",
+            "",
+            "Эпохи по плитке (класс, маркер N|on):",
+            "",
+        ]
+        if not self.epochs_data:
+            lines.append("  (пока нет накопленных эпох)")
+        else:
+            total = 0
+            for k in self._stim_keys_sorted_for_summary(list(self.epochs_data.keys())):
+                n = len(self.epochs_data[k])
+                total += n
+                if k.startswith("стимул_"):
+                    tile = k[len("стимул_") :]
+                    line = f"  • плитка {tile} ({k}): {n} эпох"
+                else:
+                    line = f"  • {k}: {n} эпох"
+                lines.append(line)
+            lines.append("")
+            lines.append(f"Всего эпох (вспышек |on): {total}")
+        lines.append("")
+        pend = len(self.pending_markers)
+        lines.append(f"Маркеров в очереди (ждут буфер): {pend}")
+        return "\n".join(lines)
+
+    def _update_epoch_summary_panel(self) -> None:
+        if self._epoch_summary_text is None:
+            return
+        self._epoch_summary_text.setPlainText(self._format_epoch_summary_text())
+
+    def _on_epoch_summary_clicked(self) -> None:
+        if self._epoch_summary_win is None:
+            return
+        self._update_epoch_summary_panel()
+        self._epoch_summary_win.show()
+        self._position_epoch_summary_win()
+
     def _setup_stream_monitor_windows(self) -> None:
         """Два отдельных окна: ЭЭГ (нейроспектр) и маркеры плиток (PsychoPy)."""
         def _make(title: str) -> Tuple[QWidget, QLabel, pg.PlotWidget]:
@@ -203,6 +257,42 @@ class P300AnalyzerWindow(QMainWindow):
         self._monitor_eeg_win.show()
         self._monitor_markers_win.show()
 
+        self._epoch_summary_win = QWidget(None, Qt.Tool)
+        self._epoch_summary_win.setWindowTitle("Сводка: плитки и эпохи P300")
+        self._epoch_summary_win.setFixedSize(420, 320)
+        self._epoch_summary_win.setAttribute(Qt.WA_QuitOnClose, False)
+        self._epoch_summary_win.setStyleSheet("background-color: #121212; color: #e0e0e0;")
+        es_lay = QVBoxLayout(self._epoch_summary_win)
+        es_lay.setContentsMargins(8, 8, 8, 8)
+        es_hint = QLabel(
+            "Эпохи — это вспышки «id|on» по LSL; по каждой плитке показано, сколько таких эпох "
+            "накоплено с последнего сброса. «В очереди» — маркеры, ждущие хвоста буфера ЭЭГ."
+        )
+        es_hint.setWordWrap(True)
+        es_hint.setStyleSheet("color: #aaa; font-size: 11px;")
+        self._epoch_summary_text = QTextEdit()
+        self._epoch_summary_text.setReadOnly(True)
+        self._epoch_summary_text.setStyleSheet(
+            "QTextEdit { background-color: #1a1a1a; color: #e8e8e8; "
+            "font-family: monospace; font-size: 12px; border: 1px solid #444; }"
+        )
+        es_lay.addWidget(es_hint)
+        es_lay.addWidget(self._epoch_summary_text, stretch=1)
+        self._epoch_summary_win.hide()
+
+    def _position_epoch_summary_win(self) -> None:
+        if self._epoch_summary_win is None or self._monitor_eeg_win is None or self._monitor_markers_win is None:
+            return
+        g = self.geometry()
+        y = (
+            g.top()
+            + self._monitor_eeg_win.height()
+            + 12
+            + self._monitor_markers_win.height()
+            + 12
+        )
+        self._epoch_summary_win.move(g.right() + 10, y)
+
     def showEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().showEvent(event)
         if self._monitor_eeg_win and self._monitor_markers_win:
@@ -211,6 +301,8 @@ class P300AnalyzerWindow(QMainWindow):
             self._monitor_markers_win.move(
                 g.right() + 10, g.top() + self._monitor_eeg_win.height() + 12
             )
+        if self._epoch_summary_win is not None and self._epoch_summary_win.isVisible():
+            self._position_epoch_summary_win()
 
     def _setup_ui(self) -> None:
         self.setStyleSheet(
@@ -421,10 +513,27 @@ class P300AnalyzerWindow(QMainWindow):
 
         self.winner_label = QLabel("РЕЗУЛЬТАТ: ?")
         self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
-        self.winner_label.setAlignment(Qt.AlignCenter)
+        self.winner_label.setAlignment(Qt.AlignCenter | Qt.AlignTop)
+        self.winner_label.setWordWrap(True)
 
-        sidebar_layout.addSpacing(20)
-        sidebar_layout.addWidget(self.winner_label)
+        self.winner_scroll = QScrollArea()
+        self.winner_scroll.setWidgetResizable(True)
+        self.winner_scroll.setFrameShape(QFrame.StyledPanel)
+        self.winner_scroll.setStyleSheet(
+            "QScrollArea { border: 1px solid #444; background-color: #1a1a1a; }"
+        )
+        self.winner_scroll.setMinimumHeight(96)
+        self.winner_scroll.setMaximumHeight(200)
+        self.winner_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.winner_scroll.setWidget(self.winner_label)
+
+        self.btn_epoch_summary = QPushButton("Сводка по плиткам / эпохам")
+        self.btn_epoch_summary.setToolTip("Окно: в какие классы (плитки) писались эпохи и сколько вспышек |on")
+        self.btn_epoch_summary.clicked.connect(self._on_epoch_summary_clicked)
+
+        sidebar_layout.addSpacing(12)
+        sidebar_layout.addWidget(self.winner_scroll)
+        sidebar_layout.addWidget(self.btn_epoch_summary)
         sidebar_layout.addStretch(1)
 
         # Right plots: вертикальная прокрутка — иначе 4 графика сжимают подписи
@@ -651,6 +760,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._clear_plots()
         self.winner_label.setText("РЕЗУЛЬТАТ: ?")
         self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
+        self._update_epoch_summary_panel()
         self._ensure_epoch_template()
         if not self._timer.isActive():
             self._timer.start()
@@ -704,6 +814,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._clear_plots()
         self.winner_label.setText("РЕЗУЛЬТАТ: ?")
         self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
+        self._update_epoch_summary_panel()
         self._ensure_epoch_template()
         self.btn_start_analysis.setEnabled(False)
         self.btn_stop_analysis.setEnabled(True)
@@ -985,6 +1096,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._clear_plots()
         self.winner_label.setText("РЕЗУЛЬТАТ: ?")
         self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
+        self._update_epoch_summary_panel()
         self._ensure_epoch_template()
         self.btn_start_analysis.setEnabled(True)
         self.btn_stop_analysis.setEnabled(False)
@@ -1111,6 +1223,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._clear_plots()
         self.winner_label.setText("РЕЗУЛЬТАТ: ?")
         self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
+        self._update_epoch_summary_panel()
         self._reset_monitor_windows_disconnected()
         LOG.info("Сессия LSL остановлена пользователем")
 
@@ -1133,6 +1246,8 @@ class P300AnalyzerWindow(QMainWindow):
             self._monitor_eeg_win.close()
         if self._monitor_markers_win is not None:
             self._monitor_markers_win.close()
+        if self._epoch_summary_win is not None:
+            self._epoch_summary_win.close()
         LOG.info("Окно анализатора закрыто")
         super().closeEvent(event)
 
@@ -1188,6 +1303,7 @@ class P300AnalyzerWindow(QMainWindow):
             self._clear_plots()
             self.winner_label.setText("РЕЗУЛЬТАТ: ?")
             self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
+            self._update_epoch_summary_panel()
             return
 
         baseline_ms = int(self.spin_baseline.value())
@@ -1316,6 +1432,7 @@ class P300AnalyzerWindow(QMainWindow):
             f"Обновлено: baseline={baseline_ms} мс, окно=[{wx}, {wy}] мс. "
             f"Эпохи: {counts}.{need_hint}{filter_hint}"
         )
+        self._update_epoch_summary_panel()
 
     def _plot_last_single_epochs(
         self,

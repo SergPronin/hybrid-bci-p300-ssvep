@@ -51,4 +51,5 @@ Thumbs.db
 # Локальные данные / логи
 results/*.pkl
 saved_data/
+data/examination_logs/
 docs/

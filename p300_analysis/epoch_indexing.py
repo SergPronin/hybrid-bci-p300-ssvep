@@ -6,9 +6,6 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
-# Маркер новее опорного времени конца буфера — ждём следующий чанк ЭЭГ.
-MARKER_NEWER_THAN_REF_TOL_S = 0.002
-
 # Доля уникальных меток времени на хвосте буфера; ниже — не используем fallback
 # (иначе при грубом шаге 1 с несколько вспышек получают один start_idx).
 FALLBACK_MIN_UNIQUE_TS_FRACTION = 0.12
@@ -41,13 +38,14 @@ def resolve_epoch_indices_for_marker(
 ) -> Tuple[Optional[int], Optional[int], bool]:
     """Возвращает (start_idx, end_idx, wait_more).
 
-    wait_more=True — нужно дождаться ещё данных в буфере (или маркер «в будущем»).
+    wait_more=True — нужно дождаться ещё данных в буфере (эпоха ещё не помещается).
     (None, None, False) — маркер нельзя надёжно извлечь (отбросить).
     """
     mt = float(marker_ts)
     ref = float(lsl_ref)
-    if mt > ref + MARKER_NEWER_THAN_REF_TOL_S:
-        return None, None, True
+    # Не отсекаем mt > ref: при ЭЭГ и маркерах с разных ПК liblsl обычно выравнивает время,
+    # но кратковременный «зазор» + local_clock() даёт ложные «маркер из будущего» и вечный wait.
+    # Как на main: считаем индекс как есть, затем wait по end_idx > buf (см. ниже).
 
     seconds_back = ref - mt
     start_idx = int(round(buf_len - 1 - seconds_back * srate))
@@ -60,7 +58,9 @@ def resolve_epoch_indices_for_marker(
     start_past_buffer = start_idx < 0
 
     ta = np.asarray(time_arr, dtype=np.float64).reshape(-1)
-    use_fallback = eeg_timestamps_sufficient_for_fallback(ta, buf_len=buf_len)
+    # Маркер новее ref: как на main считаем только прямой индекс; fallback по eeg_times
+    # даст ложный хвост буфера, если mt вне шкалы time_arr (типично при рассинхроне ПК).
+    use_fallback = (mt <= ref) and eeg_timestamps_sufficient_for_fallback(ta, buf_len=buf_len)
 
     if use_fallback:
         candidates: list[float] = []

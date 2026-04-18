@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 
 from p300_analysis.epoch_indexing import (
-    MARKER_NEWER_THAN_REF_TOL_S,
     eeg_timestamps_sufficient_for_fallback,
     resolve_epoch_indices_for_marker,
 )
@@ -41,7 +40,7 @@ def cs() -> object:
 
 
 def test_marker_newer_than_lsl_ref_waits(cs) -> None:
-    """Маркер «в будущем» относительно ref — ждём данные, не режем ложным fallback."""
+    """Маркер заметно «впереди» ref: индекс уезжает за хвост буфера — ждём (как на main)."""
     buf_len = 500
     ta = np.linspace(0.0, (buf_len - 1) / 250.0, buf_len, dtype=np.float64)
     s, e, wait = resolve_epoch_indices_for_marker(
@@ -58,10 +57,10 @@ def test_marker_newer_than_lsl_ref_waits(cs) -> None:
     assert wait is True
 
 
-def test_marker_just_outside_future_tol_waits(cs) -> None:
-    """Ровно за пределом tol — всё ещё «будущее»."""
+def test_marker_slightly_ahead_of_ref_waits_if_epoch_beyond_buffer(cs) -> None:
+    """Небольшой mt > ref: эпоха ещё не влезает в буфер — wait_more."""
     ref = 10.0
-    mt = ref + MARKER_NEWER_THAN_REF_TOL_S + 1e-6
+    mt = ref + 0.0025
     buf_len = 400
     ta = np.linspace(0.0, (buf_len - 1) / 250.0, buf_len, dtype=np.float64)
     _, _, wait = resolve_epoch_indices_for_marker(
