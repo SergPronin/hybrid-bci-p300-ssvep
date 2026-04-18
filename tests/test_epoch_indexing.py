@@ -152,6 +152,30 @@ def test_coarse_timestamps_no_false_positive_same_window_two_markers(cs) -> None
         assert len(set(starts)) == len(starts), "одинаковый start_idx для разных маркеров — регрессия"
 
 
+def test_marker_eeg_offset_aligns_domains(cs) -> None:
+    """Разные абсолютные шкалы marker_ts и конца буфера ref — offset переводит маркер в ref."""
+    buf_len = 500
+    srate = 250.0
+    el = 50
+    ref = 1000.0
+    mt_raw = 500.0
+    off = 499.8  # t_mark = 999.8 → 0.2 с до ref → ~50 отсчётов от хвоста
+    ta = np.linspace(ref - (buf_len - 1) / srate, ref, buf_len, dtype=np.float64)
+    s, e, w = resolve_epoch_indices_for_marker(
+        marker_ts=mt_raw,
+        buf_len=buf_len,
+        srate=srate,
+        epoch_len=el,
+        lsl_ref=ref,
+        time_arr=ta,
+        marker_eeg_offset=off,
+        compute_start_index=cs,
+    )
+    assert not w
+    assert s is not None and e is not None
+    assert int(e) - int(s) == el
+
+
 def test_end_beyond_buffer_waits(cs) -> None:
     """Эпоха ещё не помещается в хвост буфера — wait_more (без грубого fallback)."""
     buf_len = 55

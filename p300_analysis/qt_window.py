@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QPoint, QTimer, Qt
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -215,8 +215,10 @@ class P300AnalyzerWindow(QMainWindow):
         if self._epoch_summary_win is None:
             return
         self._update_epoch_summary_panel()
-        self._epoch_summary_win.show()
         self._position_epoch_summary_win()
+        self._epoch_summary_win.show()
+        self._epoch_summary_win.raise_()
+        self._epoch_summary_win.activateWindow()
 
     def _setup_stream_monitor_windows(self) -> None:
         """Два отдельных окна: ЭЭГ (нейроспектр) и маркеры плиток (PsychoPy)."""
@@ -257,8 +259,11 @@ class P300AnalyzerWindow(QMainWindow):
         self._monitor_eeg_win.show()
         self._monitor_markers_win.show()
 
-        self._epoch_summary_win = QWidget(None, Qt.Tool)
+        # Отдельное окно без Qt.Tool: иначе на macOS/полном экране часто уезжает за край
+        # (позиция была g.right()+10 от главного) и не видно при нажатии кнопки.
+        self._epoch_summary_win = QDialog(self)
         self._epoch_summary_win.setWindowTitle("Сводка: плитки и эпохи P300")
+        self._epoch_summary_win.setModal(False)
         self._epoch_summary_win.setFixedSize(420, 320)
         self._epoch_summary_win.setAttribute(Qt.WA_QuitOnClose, False)
         self._epoch_summary_win.setStyleSheet("background-color: #121212; color: #e0e0e0;")
@@ -281,17 +286,39 @@ class P300AnalyzerWindow(QMainWindow):
         self._epoch_summary_win.hide()
 
     def _position_epoch_summary_win(self) -> None:
-        if self._epoch_summary_win is None or self._monitor_eeg_win is None or self._monitor_markers_win is None:
+        """Ставит окно сводки рядом с главным, но целиком в пределах availableGeometry()."""
+        if self._epoch_summary_win is None:
             return
-        g = self.geometry()
-        y = (
-            g.top()
-            + self._monitor_eeg_win.height()
-            + 12
-            + self._monitor_markers_win.height()
-            + 12
-        )
-        self._epoch_summary_win.move(g.right() + 10, y)
+        w = self._epoch_summary_win
+        margin = 12
+        top_left = self.mapToGlobal(QPoint(0, 0))
+        bot_right = self.mapToGlobal(QPoint(self.width(), self.height()))
+        pref_x = bot_right.x() + margin
+        pref_y = top_left.y() + margin
+
+        if self._monitor_eeg_win is not None and self._monitor_markers_win is not None:
+            mr_bottom = self._monitor_markers_win.frameGeometry().bottom()
+            pref_y = max(pref_y, int(mr_bottom) + margin)
+
+        scr = QApplication.screenAt(QPoint(pref_x, pref_y))
+        if scr is None:
+            scr = QApplication.screenAt(top_left)
+        if scr is None:
+            scr = QApplication.primaryScreen()
+        ag = scr.availableGeometry()
+        w_w, w_h = w.width(), w.height()
+        x, y = int(pref_x), int(pref_y)
+        if x + w_w > ag.right():
+            x = int(top_left.x()) - w_w - margin
+        if x + w_w > ag.right():
+            x = int(ag.right()) - w_w - margin
+        if x < ag.left():
+            x = int(ag.left()) + margin
+        if y + w_h > ag.bottom():
+            y = int(ag.bottom()) - w_h - margin
+        if y < ag.top():
+            y = int(ag.top()) + margin
+        w.move(x, y)
 
     def showEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().showEvent(event)
@@ -922,7 +949,7 @@ class P300AnalyzerWindow(QMainWindow):
             or self._epoch_geom.dt_ms is None
             or self._epoch_geom.time_ms_template is None
             or not self.eeg_buffer
-            or self._lsl_clock_at_buffer_end is None
+            or not self.eeg_times
             or not self.pending_markers
         ):
             return
@@ -933,7 +960,7 @@ class P300AnalyzerWindow(QMainWindow):
         srate = 1.0 / dt_s
         el = int(self._epoch_geom.epoch_len)
         buf_len = len(self.eeg_buffer)
-        lsl_ref = self._lsl_clock_at_buffer_end
+        buffer_end_ts = float(self.eeg_times[-1])
         time_arr = np.asarray(self.eeg_times, dtype=np.float64) if self.eeg_times else np.empty(0)
         buf_2d = np.stack(self.eeg_buffer)
         _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
@@ -952,7 +979,7 @@ class P300AnalyzerWindow(QMainWindow):
                 buf_len=buf_len,
                 srate=srate,
                 epoch_len=el,
-                lsl_ref=lsl_ref,
+                lsl_ref=buffer_end_ts,
                 time_arr=time_arr,
             )
             if wait_more:
@@ -1816,13 +1843,13 @@ class P300AnalyzerWindow(QMainWindow):
             and self._epoch_geom.epoch_len is not None
             and self._epoch_geom.time_ms_template is not None
             and self.eeg_buffer
-            and self._lsl_clock_at_buffer_end is not None
+            and self.eeg_times
         ):
             dt_s = float(self._epoch_geom.dt_ms) / 1000.0
             srate = 1.0 / dt_s
             el = int(self._epoch_geom.epoch_len)
             buf_len = len(self.eeg_buffer)
-            lsl_ref = self._lsl_clock_at_buffer_end
+            time_ref = float(self.eeg_times[-1])
             reserve_samples = max(1, int(EPOCH_RESERVE_MS / 1000.0 / dt_s))
 
             time_arr = np.asarray(self.eeg_times, dtype=np.float64) if self.eeg_times else np.empty(0)
@@ -1844,7 +1871,7 @@ class P300AnalyzerWindow(QMainWindow):
                     buf_len=buf_len,
                     srate=srate,
                     epoch_len=el,
-                    lsl_ref=lsl_ref,
+                    lsl_ref=time_ref,
                     time_arr=time_arr,
                 )
                 if wait_more:
@@ -1856,7 +1883,12 @@ class P300AnalyzerWindow(QMainWindow):
                                 "marker_ts": float(marker_ts),
                                 "stim_key": stim_key,
                                 "buf_len": int(buf_len),
-                                "lsl_ref": float(lsl_ref),
+                                "eeg_time_ref": float(time_ref),
+                                "lsl_local_clock": (
+                                    float(self._lsl_clock_at_buffer_end)
+                                    if self._lsl_clock_at_buffer_end is not None
+                                    else None
+                                ),
                                 "epoch_len": int(el),
                                 "srate": float(srate),
                             },
@@ -1870,7 +1902,7 @@ class P300AnalyzerWindow(QMainWindow):
                                 "marker_ts": float(marker_ts),
                                 "stim_key": stim_key,
                                 "buf_len": int(buf_len),
-                                "lsl_ref": float(lsl_ref),
+                                "eeg_time_ref": float(time_ref),
                             },
                         )
                     continue
@@ -1885,7 +1917,7 @@ class P300AnalyzerWindow(QMainWindow):
                                 "buf_len": int(buf_len),
                                 "end_idx": int(end_idx),
                                 "reserve_samples": int(reserve_samples),
-                                "lsl_ref": float(lsl_ref),
+                                "eeg_time_ref": float(time_ref),
                             },
                         )
                     continue
@@ -1919,7 +1951,9 @@ class P300AnalyzerWindow(QMainWindow):
                     self._dbg_epoch_lag_n += 1
                     # lag_ms: how far start_idx is from the ideal marker position.
                     # Ideal index = buf_len - 1 - seconds_back * srate (float, before rounding)
-                    seconds_back = lsl_ref - float(marker_ts)
+                    _off = self._marker_eeg_ts_offset
+                    _t_m = float(marker_ts) + float(_off) if _off is not None else float(marker_ts)
+                    seconds_back = time_ref - _t_m
                     ideal_idx = buf_len - 1 - seconds_back * srate
                     lag_ms = (start_idx - ideal_idx) * dt_s * 1000.0
                     span_nominal_s = (float(el) - 1.0) * dt_s
@@ -1942,11 +1976,11 @@ class P300AnalyzerWindow(QMainWindow):
                                 "run_seq": self._exp_run_seq,
                                 "stim_key": stim_key,
                                 "marker_ts": float(marker_ts),
-                                "lsl_ref": lsl_ref,
+                                "eeg_time_ref": time_ref,
                                 "seconds_back": seconds_back,
                                 "lag_ms": lag_ms,
                                 "span_nominal_s": span_nominal_s,
-                                "index_rule": "lsl_clock_direct",
+                                "index_rule": "eeg_time_end_direct",
                                 "start_idx": int(start_idx),
                                 "end_idx": int(end_idx),
                                 "buf_len": buf_len,
@@ -1965,7 +1999,7 @@ class P300AnalyzerWindow(QMainWindow):
                             "event_seq": self._dbg_epoch_lag_n,
                             "stim_key": stim_key,
                             "marker_ts": float(marker_ts),
-                            "lsl_ref": lsl_ref,
+                            "eeg_time_ref": time_ref,
                             "seconds_back": seconds_back,
                             "lag_ms": lag_ms,
                             "start_idx": int(start_idx),
@@ -1982,7 +2016,7 @@ class P300AnalyzerWindow(QMainWindow):
                                 "event_seq": int(self._dbg_epoch_lag_n),
                                 "stim_key": stim_key,
                                 "marker_ts": float(marker_ts),
-                                "lsl_ref": float(lsl_ref),
+                                "eeg_time_ref": float(time_ref),
                                 "seconds_back": float(seconds_back),
                                 "lag_ms": float(lag_ms),
                                 "start_idx": int(start_idx),
@@ -2036,14 +2070,23 @@ class P300AnalyzerWindow(QMainWindow):
                         },
                     )
 
-            # Drop pending markers that are too old (their epoch data was trimmed away)
-            if self._lsl_clock_at_buffer_end is not None:
-                lsl_cutoff = self._lsl_clock_at_buffer_end - EEG_KEEP_SECONDS
+            # Drop pending markers that are too old (их эпоха уже вышла за EEG_KEEP_SECONDS буфера).
+            # Сравниваем в шкале времени ЭЭГ: либо сырые маркеры (offset=None), либо marker_ts + offset.
+            if self.eeg_times:
+                buf_end = float(self.eeg_times[-1])
+                buf_cut_t = buf_end - float(EEG_KEEP_SECONDS)
+                off = self._marker_eeg_ts_offset
                 n_pending_before = len(self.pending_markers)
-                self.pending_markers = [
-                    (mts, sk) for mts, sk in self.pending_markers
-                    if float(mts) >= lsl_cutoff
-                ]
+                if off is None:
+                    self.pending_markers = [
+                        (mts, sk) for mts, sk in self.pending_markers if float(mts) >= buf_cut_t
+                    ]
+                else:
+                    of = float(off)
+                    self.pending_markers = [
+                        (mts, sk) for mts, sk in self.pending_markers
+                        if float(mts) + of >= buf_cut_t
+                    ]
                 if self._exam_detail_log is not None and n_pending_before != len(
                     self.pending_markers
                 ):
@@ -2052,8 +2095,9 @@ class P300AnalyzerWindow(QMainWindow):
                         {
                             "before": int(n_pending_before),
                             "after": int(len(self.pending_markers)),
-                            "lsl_cutoff": float(lsl_cutoff),
-                            "lsl_ref": float(self._lsl_clock_at_buffer_end),
+                            "eeg_cutoff_time": float(buf_cut_t),
+                            "eeg_time_end": float(buf_end),
+                            "marker_eeg_offset_applied": off is not None,
                         },
                     )
 
@@ -2093,11 +2137,12 @@ class P300AnalyzerWindow(QMainWindow):
                     "eeg_samples_this_tick": int(eeg_samples_this_tick),
                     "marker_samples_this_tick": int(marker_samples_this_tick),
                     "buf_len": len(self.eeg_buffer),
-                    "lsl_ref": (
+                    "lsl_local_clock": (
                         float(self._lsl_clock_at_buffer_end)
                         if self._lsl_clock_at_buffer_end is not None
                         else None
                     ),
+                    "eeg_time_end": float(self.eeg_times[-1]) if self.eeg_times else None,
                     "marker_eeg_offset": self._marker_eeg_ts_offset,
                     "epoch_len": self._epoch_geom.epoch_len,
                     "dt_ms": self._epoch_geom.dt_ms,

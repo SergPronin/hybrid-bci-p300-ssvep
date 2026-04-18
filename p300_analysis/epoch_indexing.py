@@ -38,16 +38,22 @@ def resolve_epoch_indices_for_marker(
 ) -> Tuple[Optional[int], Optional[int], bool]:
     """Возвращает (start_idx, end_idx, wait_more).
 
+    ``lsl_ref`` — время **последнего отсчёта ЭЭГ** в той же шкале, что и ``marker_ts`` после
+    калибровки (передавайте ``float(eeg_times[-1])``). Не ``pylsl.local_clock()`` на приёмнике,
+    если штампы ЭЭГ (Neurospectrum и т.п.) в другой оси, чем local_clock.
+
+    ``marker_eeg_offset`` — сдвиг маркера в шкалу времени ЭЭГ (см. time_alignment_calibrated в GUI).
+
     wait_more=True — нужно дождаться ещё данных в буфере (эпоха ещё не помещается).
     (None, None, False) — маркер нельзя надёжно извлечь (отбросить).
     """
-    mt = float(marker_ts)
+    mt_raw = float(marker_ts)
+    t_mark = (
+        mt_raw + float(marker_eeg_offset) if marker_eeg_offset is not None else mt_raw
+    )
     ref = float(lsl_ref)
-    # Не отсекаем mt > ref: при ЭЭГ и маркерах с разных ПК liblsl обычно выравнивает время,
-    # но кратковременный «зазор» + local_clock() даёт ложные «маркер из будущего» и вечный wait.
-    # Как на main: считаем индекс как есть, затем wait по end_idx > buf (см. ниже).
 
-    seconds_back = ref - mt
+    seconds_back = ref - t_mark
     start_idx = int(round(buf_len - 1 - seconds_back * srate))
     end_idx = int(start_idx + epoch_len)
 
@@ -58,15 +64,12 @@ def resolve_epoch_indices_for_marker(
     start_past_buffer = start_idx < 0
 
     ta = np.asarray(time_arr, dtype=np.float64).reshape(-1)
-    # Маркер новее ref: как на main считаем только прямой индекс; fallback по eeg_times
-    # даст ложный хвост буфера, если mt вне шкалы time_arr (типично при рассинхроне ПК).
-    use_fallback = (mt <= ref) and eeg_timestamps_sufficient_for_fallback(ta, buf_len=buf_len)
+    # Если t_mark всё ещё «новее» ref — только прямой индекс; fallback по time_arr
+    # с сырым mt_raw даст ложный хвост, если маркер вне шкалы ЭЭГ.
+    use_fallback = (t_mark <= ref) and eeg_timestamps_sufficient_for_fallback(ta, buf_len=buf_len)
 
     if use_fallback:
-        candidates: list[float] = []
-        if marker_eeg_offset is not None:
-            candidates.append(mt + float(marker_eeg_offset))
-        candidates.append(mt)
+        candidates: list[float] = [t_mark]
         for t_eff in candidates:
             fb_start = compute_start_index(ta, t_eff)
             if fb_start is None:
