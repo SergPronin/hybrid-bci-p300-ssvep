@@ -13,11 +13,12 @@ from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
-    QComboBox,
-    QDialogButtonBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -150,6 +151,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._last_run_export_data: Optional[Dict[str, Any]] = None
         self._exam_detail_log: Optional[ExamSessionDetailLogger] = None
         self._exam_qt_tick_seq: int = 0
+        self._recording_started_mono: float = 0.0
+        self._shown_no_marker_hint: bool = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(50)
@@ -238,6 +241,7 @@ class P300AnalyzerWindow(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
+        self.setMinimumSize(960, 560)
         root_layout = QHBoxLayout(central)
         root_layout.setContentsMargins(6, 6, 6, 6)
 
@@ -423,11 +427,18 @@ class P300AnalyzerWindow(QMainWindow):
         sidebar_layout.addWidget(self.winner_label)
         sidebar_layout.addStretch(1)
 
-        # Right plots
-        plots_container = QWidget()
-        plots_layout = QVBoxLayout(plots_container)
-        plots_layout.setContentsMargins(0, 0, 0, 0)
-        plots_layout.setSpacing(6)
+        # Right plots: вертикальная прокрутка — иначе 4 графика сжимают подписи
+        plots_scroll = QScrollArea()
+        plots_scroll.setWidgetResizable(True)
+        plots_scroll.setFrameShape(QFrame.NoFrame)
+        plots_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        plots_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        plots_scroll.setStyleSheet("QScrollArea { background: #0a0a0a; border: none; }")
+
+        plots_inner = QWidget()
+        plots_layout = QVBoxLayout(plots_inner)
+        plots_layout.setContentsMargins(0, 0, 4, 0)
+        plots_layout.setSpacing(10)
 
         self.plot_raw = pg.PlotWidget()
         self.plot_raw.setBackground("#0a0a0a")
@@ -438,28 +449,33 @@ class P300AnalyzerWindow(QMainWindow):
         self.plot_raw_last = pg.PlotWidget()
         self.plot_raw_last.setBackground("#0a0a0a")
 
-        self._setup_plot(
+        _ph = 220
+        for _pw in (
             self.plot_raw,
-            title="Сырые ERP — среднее (mean) по всем эпохам класса",
-        )
-        self._setup_plot(
             self.plot_raw_last,
-            title="Сырые ERP — последняя эпоха на класс (без усреднения)",
-        )
-        self._setup_plot(self.plot_corrected, title="После выравнивания (Baseline Correction)")
-        self._setup_plot(self.plot_integrated, title="Интегрирование по модулю (AUC)")
+            self.plot_corrected,
+            self.plot_integrated,
+        ):
+            _pw.setMinimumHeight(_ph)
 
-        plots_layout.addWidget(self.plot_raw, stretch=1)
-        plots_layout.addWidget(self.plot_raw_last, stretch=1)
-        plots_layout.addWidget(self.plot_corrected, stretch=1)
-        plots_layout.addWidget(self.plot_integrated, stretch=1)
+        self._setup_plot(self.plot_raw, title="① Mean ERP (среднее по эпохам)")
+        self._setup_plot(self.plot_raw_last, title="② Последняя эпоха (без mean)")
+        self._setup_plot(self.plot_corrected, title="③ Baseline correction")
+        self._setup_plot(self.plot_integrated, title="④ ∫|corr| (AUC)")
+
+        plots_layout.addWidget(self.plot_raw)
+        plots_layout.addWidget(self.plot_raw_last)
+        plots_layout.addWidget(self.plot_corrected)
+        plots_layout.addWidget(self.plot_integrated)
+
+        plots_scroll.setWidget(plots_inner)
 
         root_layout.addWidget(sidebar)
-        root_layout.addWidget(plots_container, stretch=1)
+        root_layout.addWidget(plots_scroll, stretch=1)
 
     @staticmethod
     def _setup_plot(plot_widget: pg.PlotWidget, *, title: str) -> None:
-        plot_widget.setTitle(title, color="#5bc0be", size="14pt")
+        plot_widget.setTitle(title, color="#5bc0be", size="10pt")
         plot_widget.showGrid(x=True, y=True, alpha=0.3)
         plot_widget.setLabel("bottom", "Время, мс")
         if "AUC" in title or "модулю" in title:
@@ -469,7 +485,7 @@ class P300AnalyzerWindow(QMainWindow):
         else:
             left_lbl = "Амплитуда (условн. ед.)"
         plot_widget.setLabel("left", left_lbl)
-        plot_widget.addLegend(offset=(10, 10))
+        plot_widget.addLegend(offset=(4, 4))
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)
@@ -665,6 +681,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._epoch_geom.reset()
         self._need_redraw_params = False
         self._recording_epochs = True
+        self._recording_started_mono = time.monotonic()
+        self._shown_no_marker_hint = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
         self._lsl_clock_at_buffer_end = None
@@ -1003,7 +1021,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._set_status("Подключение к маркерам...")
         QApplication.processEvents()
 
-        marker_streams = resolve_marker_streams(timeout=5.0, attempts=2)
+        marker_streams = resolve_marker_streams(timeout=6.0, attempts=3)
 
         if not marker_streams:
             QMessageBox.warning(
@@ -1037,7 +1055,7 @@ class P300AnalyzerWindow(QMainWindow):
             self._inlet_eeg = stream_inlet_with_buffer(eeg_info, eeg_buf_s)
             self._inlet_eeg.open_stream(timeout=1.0)
 
-            self._inlet_markers = stream_inlet_with_buffer(marker_streams[0], 20)
+            self._inlet_markers = stream_inlet_with_buffer(marker_streams[0], 60)
             self._inlet_markers.open_stream(timeout=1.0)
         except Exception as e:
             LOG.exception("Ошибка открытия LSL: %s", e)
@@ -1124,17 +1142,10 @@ class P300AnalyzerWindow(QMainWindow):
         self.plot_corrected.clear()
         self.plot_integrated.clear()
 
-        self._setup_plot(
-            self.plot_raw, title="Сырые ERP — среднее (mean) по всем эпохам класса"
-        )
-        self._setup_plot(
-            self.plot_raw_last,
-            title="Сырые ERP — последняя эпоха на класс (без усреднения)",
-        )
-        self._setup_plot(
-            self.plot_corrected, title="После выравнивания (Baseline Correction)"
-        )
-        self._setup_plot(self.plot_integrated, title="Интегрирование по модулю (AUC)")
+        self._setup_plot(self.plot_raw, title="① Mean ERP (среднее по эпохам)")
+        self._setup_plot(self.plot_raw_last, title="② Последняя эпоха (без mean)")
+        self._setup_plot(self.plot_corrected, title="③ Baseline correction")
+        self._setup_plot(self.plot_integrated, title="④ ∫|corr| (AUC)")
 
     def _ensure_epoch_template(self) -> None:
         self._epoch_geom.ensure_template(self._inlet_eeg, self.eeg_times)
@@ -1313,10 +1324,7 @@ class P300AnalyzerWindow(QMainWindow):
     ) -> None:
         """Одна последняя эпоха на каждый класс — без mean по повторениям."""
         self.plot_raw_last.clear()
-        self._setup_plot(
-            self.plot_raw_last,
-            title="Сырые ERP — последняя эпоха на класс (без усреднения)",
-        )
+        self._setup_plot(self.plot_raw_last, title="② Последняя эпоха (без mean)")
         colors = ["#ff4d4d", "#4d79ff", "#4dff88", "#ffcc33", "#b366ff", "#33ffd8"]
         t = np.asarray(time_ms, dtype=np.float64)
         for i, key in enumerate(stim_keys):
@@ -1351,9 +1359,7 @@ class P300AnalyzerWindow(QMainWindow):
 
         # Graph 1: raw averaged ERP
         self.plot_raw.clear()
-        self._setup_plot(
-            self.plot_raw, title="Сырые ERP — среднее (mean) по всем эпохам класса"
-        )
+        self._setup_plot(self.plot_raw, title="① Mean ERP (среднее по эпохам)")
         for i in range(n_stim):
             label = labels[i] if i < len(labels) else f"Стимул {i + 1}"
             self.plot_raw.plot(
@@ -1366,9 +1372,7 @@ class P300AnalyzerWindow(QMainWindow):
 
         # Graph 2: baseline corrected ERP
         self.plot_corrected.clear()
-        self._setup_plot(
-            self.plot_corrected, title="После выравнивания (Baseline Correction)"
-        )
+        self._setup_plot(self.plot_corrected, title="③ Baseline correction")
         for i in range(n_stim):
             label = labels[i] if i < len(labels) else f"Стимул {i + 1}"
             self.plot_corrected.plot(
@@ -1381,7 +1385,7 @@ class P300AnalyzerWindow(QMainWindow):
 
         # Graph 3: |corrected| integrated in the decision window
         self.plot_integrated.clear()
-        self._setup_plot(self.plot_integrated, title="Интегрирование по модулю (AUC)")
+        self._setup_plot(self.plot_integrated, title="④ ∫|corr| (AUC)")
         for i in range(n_stim):
             label = labels[i] if i < len(labels) else f"Стимул {i + 1}"
             self.plot_integrated.plot(
@@ -1943,6 +1947,20 @@ class P300AnalyzerWindow(QMainWindow):
 
         if need_redraw:
             self._redraw_from_epochs()
+
+        if (
+            self._recording_epochs
+            and not self._shown_no_marker_hint
+            and not self._has_seen_stimulus_marker_in_run
+            and len(self.eeg_times) > 200
+            and (time.monotonic() - self._recording_started_mono) > 12.0
+        ):
+            self._shown_no_marker_hint = True
+            self._set_status(
+                "ЭЭГ идёт, маркеров плиток (LSL) нет — графики ERP не появятся. "
+                "Другой ноутбук: та же LAN, без блокировки multicast, брандмауэр; "
+                "или LabRecorder на ПК со стимуляцией как мост."
+            )
 
         if (
             self._recording_epochs
