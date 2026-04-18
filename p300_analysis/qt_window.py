@@ -72,7 +72,12 @@ from p300_analysis.lsl_streams import (
     unwrap_combo_userdata,
 )
 from p300_analysis.marker_parsing import marker_value_to_stim_key, parse_trial_target_tile_id
-from p300_analysis.run_export import export_run_data
+from p300_analysis.run_export import (
+    export_run_continuous_csv,
+    export_run_data,
+    export_run_data_all_stims,
+    stim_indices_in_run,
+)
 from p300_analysis.session_recorder import SessionRecorder
 from p300_analysis.winner_selection import (
     WINNER_MODE_AUC,
@@ -825,9 +830,6 @@ class P300AnalyzerWindow(QMainWindow):
         self._need_redraw_params = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
-        self._calib_first_marker_lsl_clock = None
-        self._stimulus_marker_ts_history.clear()
-        self._last_stim_marker_ts = None
         self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
@@ -872,9 +874,6 @@ class P300AnalyzerWindow(QMainWindow):
         self._shown_no_marker_hint = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
-        self._calib_first_marker_lsl_clock = None
-        self._stimulus_marker_ts_history.clear()
-        self._last_stim_marker_ts = None
         self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
@@ -1100,6 +1099,11 @@ class P300AnalyzerWindow(QMainWindow):
             "epoch_counts_by_stim": counts,
             "n_epoch_align_logs": n_lag,
             "marker_eeg_offset": self._marker_eeg_ts_offset,
+            "lsl_clock_at_buffer_end": (
+                float(self._lsl_clock_at_buffer_end)
+                if self._lsl_clock_at_buffer_end is not None
+                else None
+            ),
             "pending_markers_count": len(self.pending_markers),
             "eeg_buffer_len": len(self.eeg_buffer),
             "eeg_times_len": len(self.eeg_times),
@@ -1170,9 +1174,6 @@ class P300AnalyzerWindow(QMainWindow):
         self._need_redraw_params = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
-        self._calib_first_marker_lsl_clock = None
-        self._stimulus_marker_ts_history.clear()
-        self._last_stim_marker_ts = None
         self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
@@ -1292,9 +1293,6 @@ class P300AnalyzerWindow(QMainWindow):
         self._need_redraw_params = False
         self._marker_eeg_ts_offset = None
         self._calib_first_marker_ts = None
-        self._calib_first_marker_lsl_clock = None
-        self._stimulus_marker_ts_history.clear()
-        self._last_stim_marker_ts = None
         self._lsl_clock_at_buffer_end = None
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
@@ -2212,10 +2210,30 @@ class P300AnalyzerWindow(QMainWindow):
         combo_format.addItem("TXT", "txt")
         combo_format.addItem("XLSX", "xlsx")
         form.addRow("Формат:", combo_format)
+        combo_mode = QComboBox()
+        combo_mode.addItem("Одна плитка (по индексу)", "one_stim")
+        combo_mode.addItem("Все плитки в один файл (эпохи по порядку вспышек)", "all_stims")
+        combo_mode.addItem(
+            "Вся ЭЭГ за прогон, включая паузы (непрерывный CSV)", "continuous"
+        )
+        form.addRow("Что сохранять:", combo_mode)
         spin_stim_index = QSpinBox()
         spin_stim_index.setRange(0, 999)
         spin_stim_index.setValue(0)
         form.addRow("Индекс плитки (stim):", spin_stim_index)
+
+        def _mode_changed(_: int = 0) -> None:
+            spin_stim_index.setEnabled(combo_mode.currentData() == "one_stim")
+            # В непрерывном режиме файл всегда CSV — форсируем.
+            is_cont = combo_mode.currentData() == "continuous"
+            combo_format.setEnabled(not is_cont)
+            if is_cont:
+                i = combo_format.findData("csv")
+                if i >= 0:
+                    combo_format.setCurrentIndex(i)
+
+        combo_mode.currentIndexChanged.connect(_mode_changed)
+        _mode_changed()
         combo_channels = QComboBox()
         combo_channels.addItem("Все каналы", "all")
         combo_channels.addItem("Только ROI-каналы (выбранные в UI)", "roi")
@@ -2231,7 +2249,12 @@ class P300AnalyzerWindow(QMainWindow):
         layout.addLayout(form)
 
         info = QLabel(
-            "Сохраняются только сырые данные ЭЭГ в моменты вспышки выбранной плитки."
+            "• «Одна плитка» — эпохи только выбранного индекса.\n"
+            "• «Все плитки» — эпохи всех плиток в порядке вспышек; колонки segment_id, "
+            "stim_key, marker_ts, sample_idx, ts, каналы.\n"
+            "• «Вся ЭЭГ за прогон» — один CSV, одна строка = один отсчёт ЭЭГ (в т.ч. "
+            "когда никакая плитка не моргает); колонки sample_idx, t_rel_s, ts, каналы, "
+            "marker (0 = пауза, иначе номер плитки), in_epoch (попал ли в эпоху)."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #aaa; font-size: 11px;")
@@ -2271,6 +2294,7 @@ class P300AnalyzerWindow(QMainWindow):
         return {
             "format": str(combo_format.currentData()),
             "stim_index": int(spin_stim_index.value()),
+            "mode": str(combo_mode.currentData()),
             "selected_channels": selected_channels,
         }
 
@@ -2294,7 +2318,13 @@ class P300AnalyzerWindow(QMainWindow):
         if opts is None:
             return
         run_seq = self._last_run_export_data.get("run_seq") or 0
-        default_name = f"exam_run_{run_seq}_stim_{opts['stim_index']}"
+        mode = str(opts.get("mode") or "one_stim")
+        if mode == "all_stims":
+            default_name = f"exam_run_{run_seq}_all_stims"
+        elif mode == "continuous":
+            default_name = f"exam_run_{run_seq}_continuous"
+        else:
+            default_name = f"exam_run_{run_seq}_stim_{opts['stim_index']}"
         suffix_hint = {"csv": ".csv", "txt": ".txt", "xlsx": ".xlsx"}.get(opts["format"], ".csv")
         default_dir = str((Path(__file__).resolve().parent.parent / "data" / "exports"))
         selected_path, _ = QFileDialog.getSaveFileName(
@@ -2307,13 +2337,35 @@ class P300AnalyzerWindow(QMainWindow):
             return
 
         try:
-            created_files = export_run_data(
-                run_data=self._last_run_export_data,
-                output_path=Path(selected_path),
-                file_format=str(opts["format"]),
-                stim_index=int(opts["stim_index"]),
-                selected_channels=opts["selected_channels"],
-            )
+            if mode == "all_stims":
+                if not stim_indices_in_run(self._last_run_export_data):
+                    QMessageBox.warning(
+                        self,
+                        "Нет эпох",
+                        "В данных обследования нет сегментов epoch_segments — нечего экспортировать.",
+                    )
+                    return
+                created_files = export_run_data_all_stims(
+                    run_data=self._last_run_export_data,
+                    output_path=Path(selected_path),
+                    file_format=str(opts["format"]),
+                    selected_channels=opts["selected_channels"],
+                )
+            elif mode == "continuous":
+                cpath = export_run_continuous_csv(
+                    run_data=self._last_run_export_data,
+                    output_path=Path(selected_path),
+                    selected_channels=opts["selected_channels"],
+                )
+                created_files = [cpath]
+            else:
+                created_files = export_run_data(
+                    run_data=self._last_run_export_data,
+                    output_path=Path(selected_path),
+                    file_format=str(opts["format"]),
+                    stim_index=int(opts["stim_index"]),
+                    selected_channels=opts["selected_channels"],
+                )
         except Exception as e:
             LOG.exception("Ошибка сохранения обследования: %s", e)
             QMessageBox.critical(self, "Ошибка сохранения", str(e))
