@@ -125,12 +125,13 @@ class P300AnalyzerWindow(QMainWindow):
         self._dbg_epoch_lag_n: int = 0
         self._dbg_winner_n: int = 0
         self._dbg_cue_n: int = 0
-        # Разные LSL-источники часто дают несовместимые шкалы времени (маркеры vs ЭЭГ).
-        # Offset хранится для диагностики; для индексации используется прямой расчёт
-        # через pylsl.local_clock() + srate (см. _update_loop, шаг 3).
+        # Offset переводит marker_ts в ось pylsl.local_clock() приёмника (ту же, что и
+        # _lsl_clock_at_buffer_end). Для индексации: seconds_back = ref - (marker_ts + offset).
         self._marker_eeg_ts_offset: Optional[float] = None
         # Первый маркер вспышки сессии (для offset), пока не сопоставили с ЭЭГ в том же тике.
         self._calib_first_marker_ts: Optional[float] = None
+        # pylsl.local_clock() на приёмнике в момент прихода первой вспышки (совместимая ось с ref).
+        self._calib_first_marker_lsl_clock: Optional[float] = None
         # LSL-clock time when the latest EEG chunk was received.
         # Used for direct sample-index calculation (bypasses coarse EEG timestamps).
         self._lsl_clock_at_buffer_end: Optional[float] = None
@@ -949,7 +950,7 @@ class P300AnalyzerWindow(QMainWindow):
             or self._epoch_geom.dt_ms is None
             or self._epoch_geom.time_ms_template is None
             or not self.eeg_buffer
-            or not self.eeg_times
+            or self._lsl_clock_at_buffer_end is None
             or not self.pending_markers
         ):
             return
@@ -960,7 +961,7 @@ class P300AnalyzerWindow(QMainWindow):
         srate = 1.0 / dt_s
         el = int(self._epoch_geom.epoch_len)
         buf_len = len(self.eeg_buffer)
-        buffer_end_ts = float(self.eeg_times[-1])
+        buffer_end_ts = float(self._lsl_clock_at_buffer_end)
         time_arr = np.asarray(self.eeg_times, dtype=np.float64) if self.eeg_times else np.empty(0)
         buf_2d = np.stack(self.eeg_buffer)
         _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
@@ -1690,6 +1691,9 @@ class P300AnalyzerWindow(QMainWindow):
                         and self._calib_first_marker_ts is None
                     ):
                         self._calib_first_marker_ts = tsf
+                        # Фиксируем момент прихода первой вспышки в оси lsl_local_clock()
+                        # приёмника — ту же, что используется для ref=_lsl_clock_at_buffer_end.
+                        self._calib_first_marker_lsl_clock = float(lsl_local_clock())
                 # prevent unbounded growth if marker producer is faster than extraction
                 if len(self.pending_markers) > 5000:
                     n_pm = len(self.pending_markers)
@@ -1756,43 +1760,21 @@ class P300AnalyzerWindow(QMainWindow):
                     if (
                         self._marker_eeg_ts_offset is None
                         and self._calib_first_marker_ts is not None
-                        and self.eeg_times
+                        and self._calib_first_marker_lsl_clock is not None
                     ):
                         fm = float(self._calib_first_marker_ts)
-                        eeg_first = float(self.eeg_times[0])
-                        eeg_last = float(self.eeg_times[-1])
-                        calib_method = "fallback_last_eeg_ts"
-
-                        # Try LSL time_correction(); validate the result before trusting it.
-                        # time_correction() fails silently when streams use incompatible
-                        # clock domains (e.g. Neurospect in Unix-epoch vs PsychoPy in
-                        # LSL local_clock) — it returns ≈0 and t_eff lands outside the
-                        # EEG buffer, making ALL start_idx = 0.
-                        try:
-                            if self._inlet_markers is not None and self._inlet_eeg is not None:
-                                marker_tc = self._inlet_markers.time_correction(timeout=0.2)
-                                eeg_tc = self._inlet_eeg.time_correction(timeout=0.2)
-                                candidate_offset = marker_tc - eeg_tc
-                                t_eff_test = fm + candidate_offset
-                                # Sanity check: does the first marker map into the EEG buffer?
-                                margin = 60.0  # seconds
-                                if eeg_first - margin <= t_eff_test <= eeg_last + margin:
-                                    self._marker_eeg_ts_offset = candidate_offset
-                                    calib_method = "lsl_time_correction"
-                                else:
-                                    LOG.warning(
-                                        "time_correction даёт t_eff=%.3f вне диапазона EEG "
-                                        "[%.3f, %.3f] — clock domains несовместимы, "
-                                        "используем fallback",
-                                        t_eff_test, eeg_first, eeg_last,
-                                    )
-                        except Exception:
-                            pass
-
-                        if calib_method != "lsl_time_correction":
-                            self._marker_eeg_ts_offset = eeg_last - fm
+                        fm_lc = float(self._calib_first_marker_lsl_clock)
+                        eeg_first = float(self.eeg_times[0]) if self.eeg_times else 0.0
+                        eeg_last = float(self.eeg_times[-1]) if self.eeg_times else 0.0
+                        # Ось времени привязки — lsl_local_clock() на приёмнике.
+                        # ref для индексации эпох тоже берётся там (self._lsl_clock_at_buffer_end),
+                        # поэтому offset переводит marker_ts в ту же ось и даёт микросекундную
+                        # точность даже когда штампы ЭЭГ (Neurospectrum) округлены до секунды.
+                        self._marker_eeg_ts_offset = fm_lc - fm
+                        calib_method = "first_flash_lsl_local_clock"
 
                         self._calib_first_marker_ts = None
+                        self._calib_first_marker_lsl_clock = None
                         LOG.info(
                             "LSL выравнивание маркер/ЭЭГ: offset=%.6f method=%s "
                             "(eeg_first=%.6f, eeg_last=%.6f, first_flash_marker=%.6f)",
@@ -1843,13 +1825,16 @@ class P300AnalyzerWindow(QMainWindow):
             and self._epoch_geom.epoch_len is not None
             and self._epoch_geom.time_ms_template is not None
             and self.eeg_buffer
-            and self.eeg_times
+            and self._lsl_clock_at_buffer_end is not None
         ):
             dt_s = float(self._epoch_geom.dt_ms) / 1000.0
             srate = 1.0 / dt_s
             el = int(self._epoch_geom.epoch_len)
             buf_len = len(self.eeg_buffer)
-            time_ref = float(self.eeg_times[-1])
+            # Опора — lsl_local_clock() на приёмнике (микросекундная точность).
+            # Штампы NeuronSpectrum в eeg_times округлены до секунды, поэтому ими как
+            # ref пользоваться нельзя — эпохи будут смещаться на ±1 сек.
+            time_ref = float(self._lsl_clock_at_buffer_end)
             reserve_samples = max(1, int(EPOCH_RESERVE_MS / 1000.0 / dt_s))
 
             time_arr = np.asarray(self.eeg_times, dtype=np.float64) if self.eeg_times else np.empty(0)
@@ -2071,9 +2056,9 @@ class P300AnalyzerWindow(QMainWindow):
                     )
 
             # Drop pending markers that are too old (их эпоха уже вышла за EEG_KEEP_SECONDS буфера).
-            # Сравниваем в шкале времени ЭЭГ: либо сырые маркеры (offset=None), либо marker_ts + offset.
-            if self.eeg_times:
-                buf_end = float(self.eeg_times[-1])
+            # Сравниваем в оси lsl_local_clock(): маркер со смещением offset и хвост буфера в той же оси.
+            if self._lsl_clock_at_buffer_end is not None:
+                buf_end = float(self._lsl_clock_at_buffer_end)
                 buf_cut_t = buf_end - float(EEG_KEEP_SECONDS)
                 off = self._marker_eeg_ts_offset
                 n_pending_before = len(self.pending_markers)
@@ -2095,8 +2080,8 @@ class P300AnalyzerWindow(QMainWindow):
                         {
                             "before": int(n_pending_before),
                             "after": int(len(self.pending_markers)),
-                            "eeg_cutoff_time": float(buf_cut_t),
-                            "eeg_time_end": float(buf_end),
+                            "lsl_cutoff_time": float(buf_cut_t),
+                            "lsl_clock_buffer_end": float(buf_end),
                             "marker_eeg_offset_applied": off is not None,
                         },
                     )
