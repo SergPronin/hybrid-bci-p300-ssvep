@@ -57,14 +57,16 @@ class StimulusApp:
         self.fixation_cross = visual.ShapeStim(self.win, vertices=((0, -config.FIXATION_CROSS_SIZE / 2), (0, config.FIXATION_CROSS_SIZE / 2), (0, 0), (-config.FIXATION_CROSS_SIZE / 2, 0), (config.FIXATION_CROSS_SIZE / 2, 0)), closeShape=False, lineWidth=2, lineColor=config.FIXATION_CROSS_COLOR, pos=(0, 0))
 
     def _build_visual_grid(self) -> None:
+        tile_size = config.TILE_SIZE_PX * 2
+        tile_spacing = config.TILE_SPACING_PX * 2
         offset = (self.grid.size - 1) / 2
         for tile in self.grid.tiles:
-            x = (tile.col - offset) * (config.TILE_SIZE_PX + config.TILE_SPACING_PX)
-            y = (offset - tile.row) * (config.TILE_SIZE_PX + config.TILE_SPACING_PX)
+            x = (tile.col - offset) * (tile_size + tile_spacing)
+            y = (offset - tile.row) * (tile_size + tile_spacing)
             rect = visual.Rect(
                 self.win,
-                width=config.TILE_SIZE_PX,
-                height=config.TILE_SIZE_PX,
+                width=tile_size,
+                height=tile_size,
                 pos=(x, y),
                 fillColor=config.TILE_DEFAULT_COLOR,
                 lineColor=config.TILE_LINE_COLOR,
@@ -74,7 +76,7 @@ class StimulusApp:
                 text=str(tile.id),
                 pos=(x, y),
                 color='white',
-                height=config.TILE_SIZE_PX * 0.25,
+                height=tile_size * 0.25,
             )
             self._tiles_visual.append(rect)
             self._tile_texts.append(tile_text)
