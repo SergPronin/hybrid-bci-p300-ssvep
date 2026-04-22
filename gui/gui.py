@@ -8,11 +8,20 @@ from core.stimulus_controller import StimulusController
 class StimulusApp:
 
     def __init__(self) -> None:
-        self.win = visual.Window(size=config.WINDOW_SIZE, color=config.WINDOW_COLOR, units='pix', fullscr=False)
+        self.win = visual.Window(size=config.WINDOW_SIZE, color=config.WINDOW_COLOR, units='pix', fullscr=True)
         self.grid = Grid(size=config.GRID_SIZE)
-        self.controller = StimulusController(self.grid, flash_duration=0.1, isi=0.05, cue_duration=2.0, ready_duration=1.5, cue_color='blue', stim_color='black')
+        self.controller = StimulusController(
+            self.grid,
+            flash_duration=0.1,
+            isi=0.05,
+            cue_duration=config.CUE_DURATION,
+            ready_duration=config.READY_DURATION,
+            cue_color=config.CUE_COLOR,
+            stim_color=config.STIM_COLOR,
+        )
         self.show_controls = True
         self._tiles_visual: list = []
+        self._tile_texts: list = []
         self._active_colors: Dict[int, str] = {}
         self._build_visual_grid()
         self.start_button = visual.Rect(self.win, width=config.BUTTON_WIDTH, height=config.BUTTON_HEIGHT, pos=config.START_BUTTON_POS, fillColor='green')
@@ -32,6 +41,19 @@ class StimulusApp:
         self.seq_slider = visual.Slider(self.win, ticks=config.SEQUENCES_RANGE, labels=['1', '20'], pos=config.PANEL_SEQ_SLIDER_POS, size=config.SLIDER_SIZE, granularity=1, style='slider', color='white')
         self.seq_slider.markerPos = config.DEFAULT_SEQUENCES
         self.seq_value = visual.TextStim(self.win, text=str(config.DEFAULT_SEQUENCES), pos=config.PANEL_SEQ_VALUE_POS, color='white', height=config.TEXT_HEIGHT)
+        self.target_label = visual.TextStim(self.win, text='Цель (0-8)', pos=(450, -100), color='white', height=config.TEXT_HEIGHT)
+        self.target_slider = visual.Slider(
+            self.win,
+            ticks=list(range(len(self.grid.tiles))),
+            labels=['0', str(len(self.grid.tiles) - 1)],
+            pos=(450, -140),
+            size=config.SLIDER_SIZE,
+            granularity=1,
+            style='slider',
+            color='white',
+        )
+        self.target_slider.markerPos = 0
+        self.target_value = visual.TextStim(self.win, text='0', pos=(450, -160), color='white', height=config.TEXT_HEIGHT)
         self.fixation_cross = visual.ShapeStim(self.win, vertices=((0, -config.FIXATION_CROSS_SIZE / 2), (0, config.FIXATION_CROSS_SIZE / 2), (0, 0), (-config.FIXATION_CROSS_SIZE / 2, 0), (config.FIXATION_CROSS_SIZE / 2, 0)), closeShape=False, lineWidth=2, lineColor=config.FIXATION_CROSS_COLOR, pos=(0, 0))
 
     def _build_visual_grid(self) -> None:
@@ -39,11 +61,26 @@ class StimulusApp:
         for tile in self.grid.tiles:
             x = (tile.col - offset) * (config.TILE_SIZE_PX + config.TILE_SPACING_PX)
             y = (offset - tile.row) * (config.TILE_SIZE_PX + config.TILE_SPACING_PX)
-            rect = visual.Rect(self.win, width=config.TILE_SIZE_PX, height=config.TILE_SIZE_PX, pos=(x, y), fillColor='white', lineColor=config.TILE_LINE_COLOR)
+            rect = visual.Rect(
+                self.win,
+                width=config.TILE_SIZE_PX,
+                height=config.TILE_SIZE_PX,
+                pos=(x, y),
+                fillColor=config.TILE_DEFAULT_COLOR,
+                lineColor=config.TILE_LINE_COLOR,
+            )
+            tile_text = visual.TextStim(
+                self.win,
+                text=str(tile.id),
+                pos=(x, y),
+                color='white',
+                height=config.TILE_SIZE_PX * 0.25,
+            )
             self._tiles_visual.append(rect)
+            self._tile_texts.append(tile_text)
 
     def _draw(self) -> None:
-        for (tile, rect) in zip(self.grid.tiles, self._tiles_visual):
+        for (tile, rect, tile_text) in zip(self.grid.tiles, self._tiles_visual, self._tile_texts):
             if tile.active:
                 if not self.show_controls:
                     if self.controller.get_target_id() == tile.id and self.controller.get_target_color():
@@ -51,10 +88,11 @@ class StimulusApp:
                     else:
                         rect.fillColor = self.controller.get_stim_color()
                 else:
-                    rect.fillColor = 'white'
+                    rect.fillColor = config.TILE_DEFAULT_COLOR
             else:
-                rect.fillColor = 'white'
+                rect.fillColor = config.TILE_DEFAULT_COLOR
             rect.draw()
+            tile_text.draw()
         if self.show_controls:
             self.start_button.draw()
             self.stop_button.draw()
@@ -72,6 +110,11 @@ class StimulusApp:
             self.seq_slider.draw()
             self.seq_value.text = str(int(self.seq_slider.getRating() or config.DEFAULT_SEQUENCES))
             self.seq_value.draw()
+            self.target_label.draw()
+            self.target_slider.draw()
+            selected_target = int(self.target_slider.getRating() or 0)
+            self.target_value.text = str(selected_target)
+            self.target_value.draw()
         else:
             self.fixation_cross.draw()
 
@@ -91,9 +134,11 @@ class StimulusApp:
                     sequences = int(new_seq)
                 else:
                     sequences = config.DEFAULT_SEQUENCES
+                selected_target = self.target_slider.getRating()
+                target_tile_id = int(selected_target) if selected_target is not None else 0
                 self.show_controls = False
                 self.win.mouseVisible = False
-                self.controller.start_experiment(sequences)
+                self.controller.start_experiment(sequences, target_tile_id=target_tile_id)
                 core.wait(0.2)
             if self.mouse.isPressedIn(self.stop_button):
                 self.controller.stop()

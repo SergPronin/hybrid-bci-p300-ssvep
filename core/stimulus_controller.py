@@ -60,12 +60,15 @@ class StimulusController:
     def is_running(self) -> bool:
         return self._running
 
-    def start_experiment(self, sequences: int) -> None:
+    def start_experiment(self, sequences: int, target_tile_id: Optional[int] = None) -> None:
         if sequences <= 0:
             return
         self.sequences = sequences
         self._blocks_completed = 0
-        self.target_tile = random.choice(self.grid.tiles)
+        if target_tile_id is not None and 0 <= target_tile_id < len(self.grid.tiles):
+            self.target_tile = self.grid.tiles[target_tile_id]
+        else:
+            self.target_tile = random.choice(self.grid.tiles)
         self._running = True
         self._state = "cue"
         self._state_start = self._clock.getTime()
