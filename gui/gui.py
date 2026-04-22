@@ -57,8 +57,8 @@ class StimulusApp:
         self.fixation_cross = visual.ShapeStim(self.win, vertices=((0, -config.FIXATION_CROSS_SIZE / 2), (0, config.FIXATION_CROSS_SIZE / 2), (0, 0), (-config.FIXATION_CROSS_SIZE / 2, 0), (config.FIXATION_CROSS_SIZE / 2, 0)), closeShape=False, lineWidth=2, lineColor=config.FIXATION_CROSS_COLOR, pos=(0, 0))
 
     def _build_visual_grid(self) -> None:
-        tile_size = config.TILE_SIZE_PX * 2
-        tile_spacing = config.TILE_SPACING_PX * 2
+        tile_size = config.TILE_SIZE_PX * 2.5
+        tile_spacing = config.TILE_SPACING_PX * 2.5
         offset = (self.grid.size - 1) / 2
         for tile in self.grid.tiles:
             x = (tile.col - offset) * (tile_size + tile_spacing)
