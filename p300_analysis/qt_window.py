@@ -625,6 +625,14 @@ class P300AnalyzerWindow(QMainWindow):
         sidebar_layout.addWidget(self.btn_epoch_summary)
         sidebar_layout.addStretch(1)
 
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setFrameShape(QFrame.NoFrame)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sidebar_scroll.setStyleSheet("QScrollArea { background: #0a0a0a; border: none; }")
+        sidebar_scroll.setWidget(sidebar)
+
         # Right plots: вертикальная прокрутка — иначе 4 графика сжимают подписи
         plots_scroll = QScrollArea()
         plots_scroll.setWidgetResizable(True)
@@ -668,7 +676,7 @@ class P300AnalyzerWindow(QMainWindow):
 
         plots_scroll.setWidget(plots_inner)
 
-        root_layout.addWidget(sidebar)
+        root_layout.addWidget(sidebar_scroll)
         root_layout.addWidget(plots_scroll, stretch=1)
 
     @staticmethod
@@ -1598,7 +1606,7 @@ class P300AnalyzerWindow(QMainWindow):
         """Одна последняя эпоха на каждый класс — без mean по повторениям."""
         self.plot_raw_last.clear()
         self._setup_plot(self.plot_raw_last, title="② Последняя эпоха (без mean)")
-        colors = ["#ff4d4d", "#4d79ff", "#4dff88", "#ffcc33", "#b366ff", "#33ffd8"]
+        n_colors = max(1, len(stim_keys))
         t = np.asarray(time_ms, dtype=np.float64)
         for i, key in enumerate(stim_keys):
             epochs = self.epochs_data.get(key, [])
@@ -1612,7 +1620,7 @@ class P300AnalyzerWindow(QMainWindow):
             self.plot_raw_last.plot(
                 t[:n],
                 last[:n],
-                pen=pg.mkPen(colors[i % len(colors)], width=2),
+                pen=pg.mkPen(pg.intColor(i, hues=n_colors, values=1).name(), width=2),
                 name=label,
             )
         self.plot_raw_last.setXRange(0, 800)
@@ -1627,8 +1635,8 @@ class P300AnalyzerWindow(QMainWindow):
         time_ms: np.ndarray,
         time_crop: np.ndarray,
     ) -> None:
-        colors = ["#ff4d4d", "#4d79ff", "#4dff88", "#ffcc33", "#b366ff", "#33ffd8"]
         n_stim = raw.shape[0]
+        n_colors = max(1, n_stim)
 
         # Graph 1: raw averaged ERP
         self.plot_raw.clear()
@@ -1638,7 +1646,7 @@ class P300AnalyzerWindow(QMainWindow):
             self.plot_raw.plot(
                 time_ms,
                 raw[i],
-                pen=pg.mkPen(colors[i % len(colors)], width=2),
+                pen=pg.mkPen(pg.intColor(i, hues=n_colors, values=1).name(), width=2),
                 name=label,
             )
         self.plot_raw.setXRange(0, 800)
@@ -1651,7 +1659,7 @@ class P300AnalyzerWindow(QMainWindow):
             self.plot_corrected.plot(
                 time_ms,
                 corrected[i],
-                pen=pg.mkPen(colors[i % len(colors)], width=2),
+                pen=pg.mkPen(pg.intColor(i, hues=n_colors, values=1).name(), width=2),
                 name=label,
             )
         self.plot_corrected.setXRange(0, 800)
@@ -1664,7 +1672,7 @@ class P300AnalyzerWindow(QMainWindow):
             self.plot_integrated.plot(
                 time_crop,
                 integrated[i],
-                pen=pg.mkPen(colors[i % len(colors)], width=2),
+                pen=pg.mkPen(pg.intColor(i, hues=n_colors, values=1).name(), width=2),
                 name=label,
             )
         if time_crop.size:
