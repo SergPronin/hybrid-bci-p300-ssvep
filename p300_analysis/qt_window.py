@@ -4,6 +4,8 @@
 
 import logging
 import time
+import xml.etree.ElementTree as ET
+import csv
 from collections import deque
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
@@ -134,9 +136,11 @@ class P300AnalyzerWindow(QMainWindow):
         self._monitor_selected_status: Optional[QLabel] = None
         self._plot_eeg_monitor: Optional[pg.PlotWidget] = None
         self._plot_marker_monitor: Optional[pg.PlotWidget] = None
-        self._plot_selected_monitor: Optional[pg.PlotWidget] = None
+        self._selected_channels_scroll_layout: Optional[QVBoxLayout] = None
+        self._selected_channel_plot_widgets: Dict[int, pg.PlotWidget] = {}
         self._selected_channel_curves: Dict[int, Any] = {}
         self._eeg_channel_monitor_bufs: List[Deque[float]] = []
+        self._channel_labels: List[str] = []
 
         self._recording_epochs: bool = False
         self._dbg_epoch_lag_n: int = 0
@@ -323,15 +327,33 @@ class P300AnalyzerWindow(QMainWindow):
             pen=None, symbol="o", symbolBrush="#ff6b6b", symbolSize=6
         )
 
-        self._monitor_selected_win, self._monitor_selected_status, self._plot_selected_monitor = _make(
-            "Монитор: выбранные каналы ROI"
-        )
-        self._plot_selected_monitor.setLabel("left", "Ампл.")
-        self._plot_selected_monitor.addLegend(offset=(4, 4))
+        self._monitor_selected_win = QWidget(None, Qt.Tool)
+        self._monitor_selected_win.setWindowTitle("Монитор: выбранные каналы ROI")
+        self._monitor_selected_win.setFixedSize(520, 520)
+        self._monitor_selected_win.setAttribute(Qt.WA_QuitOnClose, False)
+        self._monitor_selected_win.setStyleSheet("background-color: #121212; color: #e0e0e0;")
+        selected_lay = QVBoxLayout(self._monitor_selected_win)
+        selected_lay.setContentsMargins(8, 8, 8, 8)
+        self._monitor_selected_status = QLabel("ROI: каналы не выбраны.")
+        self._monitor_selected_status.setWordWrap(True)
+        self._monitor_selected_status.setStyleSheet("color: #aaa; font-size: 11px;")
+        selected_lay.addWidget(self._monitor_selected_status)
+        selected_scroll = QScrollArea()
+        selected_scroll.setWidgetResizable(True)
+        selected_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        selected_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        selected_scroll.setStyleSheet("QScrollArea { border: 1px solid #333; background: #0a0a0a; }")
+        selected_inner = QWidget()
+        self._selected_channels_scroll_layout = QVBoxLayout(selected_inner)
+        self._selected_channels_scroll_layout.setContentsMargins(4, 4, 4, 4)
+        self._selected_channels_scroll_layout.setSpacing(6)
+        self._selected_channels_scroll_layout.addStretch(1)
+        selected_scroll.setWidget(selected_inner)
+        selected_lay.addWidget(selected_scroll)
 
         self._monitor_eeg_win.show()
         self._monitor_markers_win.show()
-        self._monitor_selected_win.show()
+        self._monitor_selected_win.hide()
 
         # Отдельное окно без Qt.Tool: иначе на macOS/полном экране часто уезжает за край
         # (позиция была g.right()+10 от главного) и не видно при нажатии кнопки.
@@ -512,6 +534,14 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_save_exam.clicked.connect(self._on_save_exam_clicked)
         sidebar_layout.addWidget(self.btn_save_exam)
 
+        self.btn_load_continuous_csv = QPushButton("Загрузить continuous CSV")
+        self.btn_load_continuous_csv.setStyleSheet(
+            "QPushButton { background-color: #6f42c1; color: white; font-weight: bold; padding: 10px 12px; border-radius: 6px; } "
+            "QPushButton:hover { background-color: #5f36a9; }"
+        )
+        self.btn_load_continuous_csv.clicked.connect(self._on_load_continuous_csv_clicked)
+        sidebar_layout.addWidget(self.btn_load_continuous_csv)
+
         self.btn_disconnect = QPushButton("Отключить LSL")
         self.btn_disconnect.setStyleSheet(
             "QPushButton { background-color: #dc3545; color: white; font-weight: bold; padding: 10px 12px; border-radius: 6px; } "
@@ -520,6 +550,14 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_disconnect.setEnabled(False)
         self.btn_disconnect.clicked.connect(self._on_disconnect_clicked)
         sidebar_layout.addWidget(self.btn_disconnect)
+
+        self.btn_selected_channels_window = QPushButton("Окно выбранных каналов")
+        self.btn_selected_channels_window.setStyleSheet(
+            "QPushButton { background-color: #17a2b8; color: white; font-weight: bold; padding: 10px 12px; border-radius: 6px; } "
+            "QPushButton:hover { background-color: #138496; }"
+        )
+        self.btn_selected_channels_window.clicked.connect(self._on_selected_channels_window_clicked)
+        sidebar_layout.addWidget(self.btn_selected_channels_window)
 
         sidebar_layout.addSpacing(10)
         sidebar_layout.addWidget(QLabel("Параметры анализа:"))
@@ -539,7 +577,6 @@ class P300AnalyzerWindow(QMainWindow):
         btn_clear_ch.clicked.connect(lambda: self._set_all_channels(False))
         btn_ch_layout.addWidget(btn_all_ch)
         btn_ch_layout.addWidget(btn_clear_ch)
-
         self.scroll_channels = QScrollArea()
         self.scroll_channels.setWidgetResizable(True)
         self.scroll_channels.setMaximumHeight(180)
@@ -740,9 +777,12 @@ class P300AnalyzerWindow(QMainWindow):
             self._curve_eeg_monitor.setData([], [])
         if self._curve_marker_monitor:
             self._curve_marker_monitor.setData([], [])
-        if self._plot_selected_monitor:
-            self._plot_selected_monitor.clear()
-            self._plot_selected_monitor.addLegend(offset=(4, 4))
+        for pw in self._selected_channel_plot_widgets.values():
+            try:
+                pw.deleteLater()
+            except Exception:
+                pass
+        self._selected_channel_plot_widgets.clear()
         self._selected_channel_curves.clear()
         for dq in self._eeg_channel_monitor_bufs:
             dq.clear()
@@ -808,37 +848,15 @@ class P300AnalyzerWindow(QMainWindow):
                 span = float(xs[-1]) if xs.size else 1.0
                 self._plot_marker_monitor.setXRange(0, max(span, 0.5))
 
-        if self._plot_selected_monitor is not None and self._monitor_selected_status is not None:
+        if self._monitor_selected_status is not None:
             selected = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
             if not selected:
                 self._monitor_selected_status.setText("ROI: каналы не выбраны.")
             else:
                 self._monitor_selected_status.setText(
-                    "ROI: " + ", ".join(f"ch{ch + 1}" for ch in selected)
+                    "ROI: " + ", ".join(self._channel_name(ch) for ch in selected)
                 )
-            for ch in selected:
-                if ch >= len(self._eeg_channel_monitor_bufs):
-                    continue
-                y = np.asarray(self._eeg_channel_monitor_bufs[ch], dtype=np.float64)
-                if y.size == 0:
-                    continue
-                curve = self._selected_channel_curves.get(ch)
-                if curve is None:
-                    curve = self._plot_selected_monitor.plot(
-                        pen=pg.mkPen(pg.intColor(ch, hues=max(9, len(self.channel_checkboxes))), width=1.4),
-                        name=f"ch{ch + 1}",
-                    )
-                    self._selected_channel_curves[ch] = curve
-                curve.setData(np.arange(y.size, dtype=np.float64), y)
-            # Remove curves for channels no longer selected.
-            for ch in list(self._selected_channel_curves.keys()):
-                if ch in selected:
-                    continue
-                curve = self._selected_channel_curves.pop(ch)
-                try:
-                    self._plot_selected_monitor.removeItem(curve)
-                except Exception:
-                    pass
+            self._refresh_selected_channels_plots(selected)
 
         now = time.monotonic()
         if now - self._last_monitor_log_t >= MONITOR_LOG_INTERVAL_S:
@@ -873,15 +891,20 @@ class P300AnalyzerWindow(QMainWindow):
         self._set_status(f"Найдено потоков: {len(eeg_candidates)}")
         self._update_markers_presence_label()
 
-    def _build_channel_checkboxes(self, count: int) -> None:
+    def _build_channel_checkboxes(self, count: int, labels: Optional[List[str]] = None) -> None:
         while self.channels_cb_layout.count():
             item = self.channels_cb_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self.channel_checkboxes.clear()
+        self._channel_labels = (
+            list(labels[:count]) if labels is not None else [f"Канал {i + 1}" for i in range(count)]
+        )
+        if len(self._channel_labels) < count:
+            self._channel_labels.extend([f"Канал {i + 1}" for i in range(len(self._channel_labels), count)])
 
         for i in range(count):
-            cb = QCheckBox(f"Канал {i + 1}")
+            cb = QCheckBox(self._channel_labels[i])
             cb.setChecked(True)
             cb.setStyleSheet("color: white;")
             cb.stateChanged.connect(self._on_params_changed)
@@ -890,9 +913,107 @@ class P300AnalyzerWindow(QMainWindow):
         self.channels_cb_layout.addStretch()
         self._eeg_channel_monitor_bufs = [deque(maxlen=MONITOR_EEG_PLOT_MAX) for _ in range(count)]
         self._selected_channel_curves.clear()
-        if self._plot_selected_monitor is not None:
-            self._plot_selected_monitor.clear()
-            self._plot_selected_monitor.addLegend(offset=(4, 4))
+        for pw in self._selected_channel_plot_widgets.values():
+            try:
+                pw.deleteLater()
+            except Exception:
+                pass
+        self._selected_channel_plot_widgets.clear()
+
+    def _channel_name(self, ch_idx: int) -> str:
+        if 0 <= ch_idx < len(self._channel_labels):
+            return self._channel_labels[ch_idx]
+        return f"Канал {ch_idx + 1}"
+
+    @staticmethod
+    def _stream_channel_labels(info: StreamInfo, count: int) -> List[str]:
+        labels: List[str] = []
+        try:
+            channels = info.desc().child("channels")
+            ch = channels.child("channel")
+            for i in range(count):
+                if ch is None:
+                    break
+                label = (
+                    ch.child_value("label")
+                    or ch.child_value("name")
+                    or ch.child_value("channel")
+                    or ""
+                )
+                label = str(label).strip()
+                labels.append(label if label else f"Канал {i + 1}")
+                nxt = ch.next_sibling()
+                if nxt is None:
+                    break
+                ch = nxt
+        except Exception:
+            labels = []
+        # NeuroSpectr and some LSL producers may expose channel labels only in XML.
+        if len(labels) < count:
+            try:
+                root = ET.fromstring(info.as_xml())
+                for ch_el in root.findall(".//channels/channel"):
+                    if len(labels) >= count:
+                        break
+                    label = (
+                        (ch_el.findtext("label") or "").strip()
+                        or (ch_el.findtext("name") or "").strip()
+                        or (ch_el.findtext("channel") or "").strip()
+                    )
+                    labels.append(label if label else f"Канал {len(labels) + 1}")
+            except Exception:
+                pass
+        if len(labels) < count:
+            labels.extend([f"Канал {i + 1}" for i in range(len(labels), count)])
+        return labels[:count]
+
+    def _on_selected_channels_window_clicked(self) -> None:
+        if self._monitor_selected_win is None:
+            return
+        self._monitor_selected_win.show()
+        self._monitor_selected_win.raise_()
+        self._monitor_selected_win.activateWindow()
+
+    def _refresh_selected_channels_plots(self, selected: List[int]) -> None:
+        if self._selected_channels_scroll_layout is None:
+            return
+        # Remove widgets for channels that are no longer selected.
+        for ch in list(self._selected_channel_plot_widgets.keys()):
+            if ch in selected:
+                continue
+            pw = self._selected_channel_plot_widgets.pop(ch)
+            self._selected_channel_curves.pop(ch, None)
+            try:
+                self._selected_channels_scroll_layout.removeWidget(pw)
+                pw.deleteLater()
+            except Exception:
+                pass
+
+        # Add/update widgets for selected channels.
+        for ch in selected:
+            if ch >= len(self._eeg_channel_monitor_bufs):
+                continue
+            pw = self._selected_channel_plot_widgets.get(ch)
+            if pw is None:
+                pw = pg.PlotWidget()
+                pw.setBackground("#0a0a0a")
+                pw.showGrid(x=True, y=True, alpha=0.25)
+                pw.setMinimumHeight(120)
+                pw.setLabel("left", self._channel_name(ch))
+                pw.setLabel("bottom", "Сэмпл")
+                self._selected_channels_scroll_layout.insertWidget(
+                    max(0, self._selected_channels_scroll_layout.count() - 1),
+                    pw,
+                )
+                self._selected_channel_plot_widgets[ch] = pw
+                self._selected_channel_curves[ch] = pw.plot(
+                    pen=pg.mkPen(pg.intColor(ch, hues=max(9, len(self.channel_checkboxes))), width=1.4)
+                )
+
+            y = np.asarray(self._eeg_channel_monitor_bufs[ch], dtype=np.float64)
+            curve = self._selected_channel_curves.get(ch)
+            if curve is not None and y.size:
+                curve.setData(np.arange(y.size, dtype=np.float64), y)
 
     def _set_all_channels(self, state: bool) -> None:
         for cb in self.channel_checkboxes:
@@ -1403,7 +1524,9 @@ class P300AnalyzerWindow(QMainWindow):
             return
 
         # Генерируем чекбоксы каналов по количеству каналов в ЭЭГ
-        self._build_channel_checkboxes(eeg_info.channel_count())
+        ch_count = eeg_info.channel_count()
+        ch_labels = self._stream_channel_labels(eeg_info, ch_count)
+        self._build_channel_checkboxes(ch_count, labels=ch_labels)
         LOG.info("Inlet открыты: ЭЭГ + Markers")
         self._begin_connection_session()
 
@@ -2631,3 +2754,127 @@ class P300AnalyzerWindow(QMainWindow):
             )
 
         QMessageBox.information(self, "Сохранено: сводка по маркерам", text)
+
+    def _on_load_continuous_csv_clicked(self) -> None:
+        selected_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите continuous CSV",
+            str(Path.home()),
+            "CSV (*.csv);;All files (*.*)",
+        )
+        if not selected_path:
+            return
+        try:
+            self._load_continuous_csv_for_analysis(Path(selected_path))
+        except Exception as e:
+            LOG.exception("Ошибка загрузки continuous CSV: %s", e)
+            QMessageBox.critical(self, "Ошибка загрузки CSV", str(e))
+
+    def _load_continuous_csv_for_analysis(self, path: Path) -> None:
+        if not path.exists():
+            raise RuntimeError(f"Файл не найден: {path}")
+
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            first = f.readline().strip()
+        delim = ";" if first.startswith("sep=;") else ","
+
+        rows: List[List[str]] = []
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.reader(f, delimiter=delim)
+            for row in reader:
+                if row:
+                    rows.append(row)
+        if not rows:
+            raise RuntimeError("Файл пуст.")
+        if rows and rows[0] and rows[0][0].startswith("sep="):
+            rows = rows[1:]
+        if not rows:
+            raise RuntimeError("В файле нет данных после строки sep=.")
+
+        header = rows[0]
+        data_rows = rows[1:]
+        idx = {c: i for i, c in enumerate(header)}
+        if "marker" not in idx or "t_rel_s" not in idx:
+            raise RuntimeError("Ожидались колонки marker и t_rel_s.")
+
+        channel_cols = [c for c in header if c.startswith("ch_")]
+        if not channel_cols:
+            raise RuntimeError("В файле нет колонок ch_1..ch_N.")
+
+        selected = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
+        if not selected:
+            selected = list(range(len(channel_cols)))
+        selected = [ch for ch in selected if 0 <= ch < len(channel_cols)]
+        if not selected:
+            raise RuntimeError("Нет валидных выбранных каналов для офлайн-анализа.")
+
+        def _parse_num(s: str) -> Optional[float]:
+            try:
+                return float(str(s).strip().replace(",", "."))
+            except Exception:
+                return None
+
+        t_rel: List[float] = []
+        marker_vals: List[int] = []
+        signal_avg: List[float] = []
+
+        for row in data_rows:
+            if len(row) < len(header):
+                continue
+            tr = _parse_num(row[idx["t_rel_s"]])
+            mv = _parse_num(row[idx["marker"]])
+            if tr is None or mv is None:
+                continue
+            vals: List[float] = []
+            for ch_idx in selected:
+                col_idx = idx.get(f"ch_{ch_idx + 1}")
+                if col_idx is None or col_idx >= len(row):
+                    continue
+                v = _parse_num(row[col_idx])
+                if v is not None:
+                    vals.append(v)
+            if not vals:
+                continue
+            t_rel.append(float(tr))
+            marker_vals.append(int(round(float(mv))))
+            signal_avg.append(float(np.mean(vals)))
+
+        if len(t_rel) < 200:
+            raise RuntimeError("Слишком мало валидных данных в CSV.")
+
+        # Reset online state and run offline redraw.
+        self._recording_epochs = False
+        self.pending_markers = []
+        self.epochs_data = {}
+        self.eeg_buffer = []
+        self.eeg_times = list(t_rel)
+        self._lsl_cue_target_id = None
+        self._epoch_geom.reset()
+        self._ensure_epoch_template()
+        if self._epoch_geom.epoch_len is None:
+            raise RuntimeError("Не удалось вычислить длину эпохи из t_rel_s.")
+
+        epoch_len = int(self._epoch_geom.epoch_len)
+        sig = np.asarray(signal_avg, dtype=np.float64)
+
+        onsets = 0
+        prev = 0
+        for i, m in enumerate(marker_vals):
+            # Начало пачки marker>0 считаем началом вспышки плитки m.
+            if m > 0 and (prev == 0 or prev != m):
+                end = i + epoch_len
+                if end <= sig.size:
+                    stim_key = f"стимул_{m}"
+                    self.epochs_data.setdefault(stim_key, []).append(sig[i:end].copy())
+                    onsets += 1
+            prev = m
+
+        if onsets == 0:
+            raise RuntimeError("В файле нет валидных onset marker>0 для построения эпох.")
+
+        self._redraw_from_epochs()
+        self.btn_save_exam.setEnabled(False)
+        self._set_status(
+            f"Загружен {path.name}: эпох={onsets}, классов={len(self.epochs_data)}. "
+            "Построены графики и рассчитан winner офлайн."
+        )
