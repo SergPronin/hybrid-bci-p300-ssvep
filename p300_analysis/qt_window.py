@@ -123,6 +123,7 @@ class P300AnalyzerWindow(QMainWindow):
 
         self._monitor_eeg_win: Optional[QWidget] = None
         self._monitor_markers_win: Optional[QWidget] = None
+        self._monitor_selected_win: Optional[QWidget] = None
         self._epoch_summary_win: Optional[QWidget] = None
         self._epoch_summary_text: Optional[QTextEdit] = None
         # Метки времени последних принятых маркеров вспышек (для оценки ISI). Ось произвольная.
@@ -130,8 +131,12 @@ class P300AnalyzerWindow(QMainWindow):
         self._last_stim_marker_ts: Optional[float] = None
         self._monitor_eeg_status: Optional[QLabel] = None
         self._monitor_markers_status: Optional[QLabel] = None
+        self._monitor_selected_status: Optional[QLabel] = None
         self._plot_eeg_monitor: Optional[pg.PlotWidget] = None
         self._plot_marker_monitor: Optional[pg.PlotWidget] = None
+        self._plot_selected_monitor: Optional[pg.PlotWidget] = None
+        self._selected_channel_curves: Dict[int, Any] = {}
+        self._eeg_channel_monitor_bufs: List[Deque[float]] = []
 
         self._recording_epochs: bool = False
         self._dbg_epoch_lag_n: int = 0
@@ -318,8 +323,15 @@ class P300AnalyzerWindow(QMainWindow):
             pen=None, symbol="o", symbolBrush="#ff6b6b", symbolSize=6
         )
 
+        self._monitor_selected_win, self._monitor_selected_status, self._plot_selected_monitor = _make(
+            "Монитор: выбранные каналы ROI"
+        )
+        self._plot_selected_monitor.setLabel("left", "Ампл.")
+        self._plot_selected_monitor.addLegend(offset=(4, 4))
+
         self._monitor_eeg_win.show()
         self._monitor_markers_win.show()
+        self._monitor_selected_win.show()
 
         # Отдельное окно без Qt.Tool: иначе на macOS/полном экране часто уезжает за край
         # (позиция была g.right()+10 от главного) и не видно при нажатии кнопки.
@@ -728,12 +740,29 @@ class P300AnalyzerWindow(QMainWindow):
             self._curve_eeg_monitor.setData([], [])
         if self._curve_marker_monitor:
             self._curve_marker_monitor.setData([], [])
+        if self._plot_selected_monitor:
+            self._plot_selected_monitor.clear()
+            self._plot_selected_monitor.addLegend(offset=(4, 4))
+        self._selected_channel_curves.clear()
+        for dq in self._eeg_channel_monitor_bufs:
+            dq.clear()
 
     def _append_eeg_monitor_samples(self, ch0: np.ndarray) -> None:
         if ch0.size == 0:
             return
         flat = np.asarray(ch0, dtype=np.float64).ravel()
         self._eeg_monitor_buf.extend(flat.tolist())
+
+    def _append_selected_channel_samples(self, arr_2d: np.ndarray) -> None:
+        if arr_2d.ndim != 2 or arr_2d.size == 0:
+            return
+        n_channels = arr_2d.shape[1]
+        if len(self._eeg_channel_monitor_bufs) != n_channels:
+            self._eeg_channel_monitor_bufs = [deque(maxlen=MONITOR_EEG_PLOT_MAX) for _ in range(n_channels)]
+        for ch in range(n_channels):
+            self._eeg_channel_monitor_bufs[ch].extend(
+                np.asarray(arr_2d[:, ch], dtype=np.float64).ravel().tolist()
+            )
 
     def _append_marker_monitor_events(self, n_markers: int) -> None:
         now = time.monotonic()
@@ -778,6 +807,38 @@ class P300AnalyzerWindow(QMainWindow):
             if self._plot_marker_monitor:
                 span = float(xs[-1]) if xs.size else 1.0
                 self._plot_marker_monitor.setXRange(0, max(span, 0.5))
+
+        if self._plot_selected_monitor is not None and self._monitor_selected_status is not None:
+            selected = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
+            if not selected:
+                self._monitor_selected_status.setText("ROI: каналы не выбраны.")
+            else:
+                self._monitor_selected_status.setText(
+                    "ROI: " + ", ".join(f"ch{ch + 1}" for ch in selected)
+                )
+            for ch in selected:
+                if ch >= len(self._eeg_channel_monitor_bufs):
+                    continue
+                y = np.asarray(self._eeg_channel_monitor_bufs[ch], dtype=np.float64)
+                if y.size == 0:
+                    continue
+                curve = self._selected_channel_curves.get(ch)
+                if curve is None:
+                    curve = self._plot_selected_monitor.plot(
+                        pen=pg.mkPen(pg.intColor(ch, hues=max(9, len(self.channel_checkboxes))), width=1.4),
+                        name=f"ch{ch + 1}",
+                    )
+                    self._selected_channel_curves[ch] = curve
+                curve.setData(np.arange(y.size, dtype=np.float64), y)
+            # Remove curves for channels no longer selected.
+            for ch in list(self._selected_channel_curves.keys()):
+                if ch in selected:
+                    continue
+                curve = self._selected_channel_curves.pop(ch)
+                try:
+                    self._plot_selected_monitor.removeItem(curve)
+                except Exception:
+                    pass
 
         now = time.monotonic()
         if now - self._last_monitor_log_t >= MONITOR_LOG_INTERVAL_S:
@@ -827,6 +888,11 @@ class P300AnalyzerWindow(QMainWindow):
             self.channel_checkboxes.append(cb)
             self.channels_cb_layout.addWidget(cb)
         self.channels_cb_layout.addStretch()
+        self._eeg_channel_monitor_bufs = [deque(maxlen=MONITOR_EEG_PLOT_MAX) for _ in range(count)]
+        self._selected_channel_curves.clear()
+        if self._plot_selected_monitor is not None:
+            self._plot_selected_monitor.clear()
+            self._plot_selected_monitor.addLegend(offset=(4, 4))
 
     def _set_all_channels(self, state: bool) -> None:
         for cb in self.channel_checkboxes:
@@ -1667,16 +1733,28 @@ class P300AnalyzerWindow(QMainWindow):
         # Graph 3: |corrected| integrated in the decision window
         self.plot_integrated.clear()
         self._setup_plot(self.plot_integrated, title="④ ∫|corr| (AUC)")
+        x_auc = np.asarray(time_crop, dtype=np.float64)
+        use_index_axis = (
+            x_auc.size < 2
+            or not np.all(np.isfinite(x_auc))
+            or np.any(np.diff(x_auc) <= 0)
+            or float(x_auc[-1] - x_auc[0]) < 1e-6
+        )
+        if use_index_axis:
+            x_auc = np.arange(integrated.shape[1], dtype=np.float64)
+            self.plot_integrated.setLabel("bottom", "Отсчёт окна")
+        else:
+            self.plot_integrated.setLabel("bottom", "Время, мс")
         for i in range(n_stim):
             label = labels[i] if i < len(labels) else f"Стимул {i + 1}"
             self.plot_integrated.plot(
-                time_crop,
+                x_auc,
                 integrated[i],
                 pen=pg.mkPen(pg.intColor(i, hues=n_colors, values=1).name(), width=2),
                 name=label,
             )
-        if time_crop.size:
-            self.plot_integrated.setXRange(float(time_crop[0]), float(time_crop[-1]))
+        if x_auc.size >= 2:
+            self.plot_integrated.setXRange(float(x_auc[0]), float(x_auc[-1]))
 
     def _update_loop(self) -> None:
         need_redraw = False
@@ -1875,6 +1953,7 @@ class P300AnalyzerWindow(QMainWindow):
                     ch0 = np.mean(arr_2d, axis=1)
 
                 self._append_eeg_monitor_samples(ch0)
+                self._append_selected_channel_samples(arr_2d)
                 if self._recording_epochs:
                     # Store ALL channels per timepoint (channel averaging deferred to epoch extraction)
                     self.eeg_buffer.extend(arr_2d)
