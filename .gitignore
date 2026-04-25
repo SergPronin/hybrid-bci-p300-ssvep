@@ -58,8 +58,9 @@ examination_logs/
 *_continuous.csv
 *_recording_*.csv
 
-# Docs (AI logs, project notes — local only)
-docs/
+# Docs: ignore generated/temp files but keep the project log
+docs/*
+!docs/AI_LOG.md
 
 # EEG data files
 *.edf
