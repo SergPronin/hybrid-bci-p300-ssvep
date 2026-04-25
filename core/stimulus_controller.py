@@ -18,6 +18,7 @@ class StimulusController:
         isi: float = 0.05,
         cue_duration: float = 2.0,
         ready_duration: float = 1.5,
+        inter_block_s: float = 0.8,
         cue_color: str = "blue",
         stim_color: str = "white",
     ) -> None:
@@ -26,6 +27,7 @@ class StimulusController:
         self.isi = isi
         self.cue_duration = cue_duration
         self.ready_duration = ready_duration
+        self.inter_block_s = inter_block_s
         self.cue_color = cue_color
         self.stim_color = stim_color
         self._clock = core.Clock()
@@ -95,7 +97,7 @@ class StimulusController:
             self._substate_start = now
 
     def _advance_block_or_finish(self, now: float) -> Optional[Dict[str, object]]:
-        """Увеличить счётчик блоков или завершить trial."""
+        """Увеличить счётчик блоков или завершить trial; между раундами — пауза inter_block_s."""
         self._blocks_completed += 1
         if self._blocks_completed >= self.sequences:
             self._state = "end"
@@ -103,8 +105,9 @@ class StimulusController:
             self._running = False
             self.grid.reset()
             return {"event": "trial_end"}  # следующий тик: _state «end» → idle
-        self._generate_next_block()
-        return self._try_flash_next_tile(now)
+        self._substate = "block_break"
+        self._substate_start = now
+        return None
 
     def _try_flash_next_tile(self, now: float) -> Optional[Dict[str, object]]:
         """Перейти к следующей вспышке в блоке или к следующему блоку."""
@@ -140,6 +143,11 @@ class StimulusController:
 
     def _update_stim(self, now: float) -> Optional[Dict[str, object]]:
         self._ensure_stim_substate(now)
+        if self._substate == "block_break":
+            if now - self._substate_start >= self.inter_block_s:
+                self._generate_next_block()
+                return self._try_flash_next_tile(now)
+            return None
         if self._substate == "isi":
             if now - self._substate_start >= self.isi:
                 return self._try_flash_next_tile(now)
