@@ -8,6 +8,21 @@ from typing import Any, Optional, Tuple
 import numpy as np
 
 
+def decode_stim_tile_id(raw_id: int) -> Optional[int]:
+    """Decode tile id from LSL marker payload.
+
+    Supported formats:
+    - New: 100..108 -> 0..8
+    - Legacy: 0..8 -> 0..8
+    """
+    if raw_id < 0:
+        return None
+    tile_id = raw_id - 100 if raw_id >= 100 else raw_id
+    if 0 <= tile_id <= 8:
+        return tile_id
+    return None
+
+
 def marker_value_to_stim_key(marker_value: Any) -> Optional[str]:
     """
     Ключ класса эпохи, например «стимул_3».
@@ -26,10 +41,12 @@ def marker_value_to_stim_key(marker_value: Any) -> Optional[str]:
         mv = mv.decode("utf-8", errors="ignore")
 
     if isinstance(mv, (int, np.integer)):
-        return f"стимул_{int(mv)}"
+        tile_id = decode_stim_tile_id(int(mv))
+        return f"стимул_{tile_id}" if tile_id is not None else None
 
     if isinstance(mv, (float, np.floating)):
-        return f"стимул_{int(round(float(mv)))}"
+        tile_id = decode_stim_tile_id(int(round(float(mv))))
+        return f"стимул_{tile_id}" if tile_id is not None else None
 
     if isinstance(mv, str):
         s = mv.strip()
@@ -39,13 +56,16 @@ def marker_value_to_stim_key(marker_value: Any) -> Optional[str]:
             left, right = s.split("|", 1)
             left, right = left.strip(), right.strip()
             try:
-                tile_id = int(left)
+                raw_id = int(left)
             except ValueError:
-                tile_id = None
-            if tile_id is not None and tile_id < 0:
+                raw_id = None
+            if raw_id is not None and raw_id < 0:
                 return None
             first_seg = right.split("|", 1)[0].strip()
-            if tile_id is not None:
+            if raw_id is not None:
+                tile_id = decode_stim_tile_id(raw_id)
+                if tile_id is None:
+                    return None
                 if first_seg == "on":
                     return f"стимул_{tile_id}"
                 if first_seg == "off":

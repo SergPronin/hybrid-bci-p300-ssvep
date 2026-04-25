@@ -21,7 +21,10 @@ class LslMarkerSender:
     def send(self, tile_id: int, event: str) -> None:
         if self._outlet is None:
             return
-        marker = f'{tile_id}|{event}'
+        # Avoid conflict: 0 in exported continuous CSV means "no active flash".
+        # Encode stimulus tile ids as 100..108, keep service ids negative.
+        marker_id = (100 + tile_id) if tile_id >= 0 else tile_id
+        marker = f'{marker_id}|{event}'
         try:
             self._outlet.push_sample([marker])
         except Exception as e:

@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from p300_analysis.marker_parsing import (
+    decode_stim_tile_id,
     marker_value_to_stim_key,
     parse_trial_target_tile_id,
     stim_key_to_tile_digit,
@@ -34,10 +35,13 @@ def _parse_tile_event(value: Any) -> Optional[Tuple[int, str]]:
         return None
     left, right = s.split("|", 1)
     try:
-        tile = int(left.strip())
+        raw_id = int(left.strip())
     except ValueError:
         return None
-    if tile < 0:
+    if raw_id < 0:
+        return None
+    tile = decode_stim_tile_id(raw_id)
+    if tile is None:
         return None
     phase = right.split("|", 1)[0].strip().lower()
     if phase not in {"on", "off"}:
@@ -596,20 +600,20 @@ def export_run_continuous_csv(
             prev_on = open_on.get(tile)
             if prev_on is not None:
                 end = min(n, sidx)
-                marker_vals[prev_on:end] = tile
+                marker_vals[prev_on:end] = 100 + tile
             open_on[tile] = sidx
             flash_sample_idx.append(sidx)
         elif phase == "off":
             start_on = open_on.pop(tile, None)
             if start_on is None:
                 # |off без пары |on (до начала записи или потерянный) — ставим только точку.
-                marker_vals[sidx] = tile
+                marker_vals[sidx] = 100 + tile
                 continue
             end = min(n, sidx + 1)  # включаем сам отсчёт |off
-            marker_vals[start_on:end] = tile
+            marker_vals[start_on:end] = 100 + tile
     # Хвост: всё, что осталось открытым — тянется до конца записи.
     for tile, start_on in open_on.items():
-        marker_vals[start_on:n] = tile
+        marker_vals[start_on:n] = 100 + tile
 
     if epoch_window_ms is None:
         tpl = data.get("epoch_time_ms") or []

@@ -40,6 +40,7 @@ _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from p300_analysis.marker_parsing import decode_stim_tile_id
 from p300_analysis.signal_processing import bandpass_filter, common_average_reference, detect_bad_channels
 from p300_analysis.erp_compute import (
     build_averaged_erp,
@@ -175,16 +176,19 @@ def analyse_file(
 
     # Extract per-channel epochs (epoch_len, n_ch)
     epochs_data: Dict[str, List[np.ndarray]] = {}
-    prev = 0
+    prev_tile: Optional[int] = None
     onset_count = 0
     for i, m in enumerate(marker_vals):
-        if m > 0 and (prev == 0 or prev != m):
+        tile_id = decode_stim_tile_id(int(m))
+        if int(m) == 0:
+            tile_id = None
+        if tile_id is not None and (prev_tile is None or prev_tile != tile_id):
             end = i + epoch_len
             if end <= sig_2d.shape[0]:
-                stim_key = f"стимул_{m}"
+                stim_key = f"стимул_{tile_id}"
                 epochs_data.setdefault(stim_key, []).append(sig_2d[i:end, :].copy())
                 onset_count += 1
-        prev = m
+        prev_tile = tile_id
 
     if onset_count == 0:
         raise RuntimeError(f"No onset markers found in {path.name}")
@@ -275,8 +279,10 @@ def main() -> None:
                         help="Epoch rejection threshold µV (0 = off). Default 60 µV for hardware-filtered (LPF 35 Hz) data")
     parser.add_argument("--channels", type=str, default="",
                         help="Comma-separated 1-based channel indices, e.g. 1,2,4")
+    parser.add_argument("--car", action="store_true",
+                        help="Enable Common Average Reference (CAR). Default is OFF.")
     parser.add_argument("--no-car", action="store_true",
-                        help="Disable Common Average Reference (CAR). CAR is on by default.")
+                        help="Disable Common Average Reference (CAR). Default is already OFF.")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -303,7 +309,7 @@ def main() -> None:
                 y_ms=args.y_ms,
                 artifact_uv=args.artifact_uv,
                 channel_indices=channel_indices,
-                use_car=not args.no_car,
+                use_car=(args.car and not args.no_car),
             )
             results.append(r)
         except Exception as e:

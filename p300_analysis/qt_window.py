@@ -77,6 +77,7 @@ from p300_analysis.lsl_streams import (
     unwrap_combo_userdata,
 )
 from p300_analysis.marker_parsing import (
+    decode_stim_tile_id,
     marker_value_to_stim_key,
     parse_trial_target_tile_id,
     stim_key_to_tile_digit,
@@ -3198,17 +3199,20 @@ class P300AnalyzerWindow(QMainWindow):
             sig_2d = common_average_reference(sig_2d)
 
         onsets = 0
-        prev = 0
+        prev_tile: Optional[int] = None
         for i, m in enumerate(marker_vals):
+            tile_id = decode_stim_tile_id(int(m))
+            if int(m) == 0:
+                tile_id = None
             # Начало пачки marker>0 считаем началом вспышки плитки m.
-            if m > 0 and (prev == 0 or prev != m):
+            if tile_id is not None and (prev_tile is None or prev_tile != tile_id):
                 end = i + epoch_len
                 if end <= sig_2d.shape[0]:
-                    stim_key = f"стимул_{m}"
+                    stim_key = f"стимул_{tile_id}"
                     epoch = sig_2d[i:end, :]  # (epoch_len, n_ch)
                     self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
                     onsets += 1
-            prev = m
+            prev_tile = tile_id
 
         if onsets == 0:
             raise RuntimeError("В файле нет валидных onset marker>0 для построения эпох.")
