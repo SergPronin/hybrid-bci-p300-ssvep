@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -97,6 +97,34 @@ def parse_trial_target_tile_id(marker_value: Any) -> Optional[int]:
     if not m:
         return None
     return int(m.group(1))
+
+
+def parse_trial_config_payload(marker_value: Any) -> Optional[Dict[str, str]]:
+    """Parse marker ``-3|trial_config|k=v;...`` into a dict.
+
+    Returns None if marker is not a trial_config marker.
+    """
+    mv = marker_value
+    if isinstance(mv, (list, tuple, np.ndarray)) and len(mv) == 1:
+        mv = mv[0]
+    if isinstance(mv, (bytes, bytearray)):
+        mv = mv.decode("utf-8", errors="ignore")
+    if not isinstance(mv, str):
+        return None
+    s = mv.strip()
+    if "trial_config|" not in s:
+        return None
+    payload = s.split("trial_config|", 1)[1].strip()
+    if not payload:
+        return {}
+    out: Dict[str, str] = {}
+    for part in payload.split(";"):
+        p = part.strip()
+        if not p or "=" not in p:
+            continue
+        k, v = p.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
 
 
 def stim_key_sort_key(stim_key: str) -> Tuple[int, str]:

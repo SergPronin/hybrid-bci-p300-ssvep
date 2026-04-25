@@ -7,6 +7,7 @@ import logging
 import time
 import xml.etree.ElementTree as ET
 import csv
+import json
 from collections import deque
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
@@ -79,6 +80,7 @@ from p300_analysis.lsl_streams import (
 from p300_analysis.marker_parsing import (
     decode_stim_tile_id,
     marker_value_to_stim_key,
+    parse_trial_config_payload,
     parse_trial_target_tile_id,
     stim_key_to_tile_digit,
 )
@@ -177,6 +179,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._exp_run_seq: int = 0
         self._exp_trial_targets: List[int] = []
         self._exp_last_winner_digit: Optional[int] = None
+        # Конфигурация стимулятора, если пришёл marker -3|trial_config|...
+        self._stimulus_params: Dict[str, Any] = {}
         # LSL trial_start: отсечь вспышки до cue (см. chk_epochs_after_trial)
         self._marker_ts_last_trial_start: Optional[float] = None
         self._session_recorder = SessionRecorder()
@@ -1330,6 +1334,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._lsl_clock_buffer_end_n_samples = 0
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
+        self._stimulus_params = {}
         self._eeg_monitor_buf.clear()
         self._marker_mono_buf.clear()
         self._last_monitor_log_t = 0.0
@@ -1376,6 +1381,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._lsl_clock_buffer_end_n_samples = 0
         self._lsl_cue_target_id = None
         self._marker_ts_last_trial_start = None
+        self._stimulus_params = {}
         self._dbg_epoch_lag_n = 0
         self._dbg_winner_n = 0
         self._dbg_cue_n = 0
@@ -1422,6 +1428,7 @@ class P300AnalyzerWindow(QMainWindow):
             "markers_stream_name": (
                 self._inlet_markers.info().name() if self._inlet_markers else None
             ),
+            "stimulus_params": dict(self._stimulus_params),
             "recorder_file": str(self._session_recorder.output_path),
         }
         self._session_run_id = self._session_recorder.start_run(run_meta)
@@ -1615,10 +1622,13 @@ class P300AnalyzerWindow(QMainWindow):
             "pending_markers_count": len(self.pending_markers),
             "eeg_buffer_len": len(self.eeg_buffer),
             "eeg_times_len": len(self.eeg_times),
+            "stimulus_params": dict(self._stimulus_params),
             "analysis_params": {
                 "baseline_ms": int(self.spin_baseline.value()),
                 "window_x_ms": int(self.spin_x.value()),
                 "window_y_ms": int(self.spin_y.value()),
+                "artifact_threshold_uv": int(self.spin_artifact_thresh.value()),
+                "use_car": bool(self.chk_car.isChecked()),
                 "epochs_after_trial_only": bool(self.chk_epochs_after_trial.isChecked()),
                 "sampling_rate_hz": (
                     float(self._inlet_eeg.info().nominal_srate())
@@ -2274,6 +2284,25 @@ class P300AnalyzerWindow(QMainWindow):
                                     "pending_markers_count": len(self.pending_markers),
                                     "epoch_counts_by_stim": self._epoch_counts_snapshot(),
                                 },
+                            )
+                    cfg = parse_trial_config_payload(sample)
+                    if cfg is not None:
+                        cfg_norm: Dict[str, Any] = {}
+                        for k, v in cfg.items():
+                            vv: Any = v
+                            try:
+                                if str(v).strip().isdigit():
+                                    vv = int(str(v).strip())
+                                else:
+                                    vv = float(str(v).strip().replace(",", "."))
+                            except Exception:
+                                vv = v
+                            cfg_norm[k] = vv
+                        self._stimulus_params = dict(cfg_norm)
+                        if self._exam_detail_log is not None:
+                            self._exam_detail_log.write(
+                                "stimulus_config",
+                                {"marker_ts": float(ts), "stimulus_params": dict(self._stimulus_params)},
                             )
                         # endregion
                     stim_key = marker_value_to_stim_key(sample)
@@ -2971,7 +3000,16 @@ class P300AnalyzerWindow(QMainWindow):
                     file_format=cont_format,
                 )
                 created_files = [cpath]
+                meta_path = self._save_continuous_meta_sidecar(cpath, export_options=opts)
+                if meta_path is not None:
+                    created_files.append(meta_path)
                 self._show_continuous_diagnostics(cpath)
+                files_txt = "\n".join(str(p) for p in created_files)
+                QMessageBox.information(
+                    self,
+                    "Сохранено",
+                    f"Обследование сохранено.\n\n{files_txt}",
+                )
                 return
             else:
                 created_files = export_run_data(
@@ -2992,6 +3030,38 @@ class P300AnalyzerWindow(QMainWindow):
             "Сохранено",
             f"Обследование сохранено.\n\n{files_txt}",
         )
+
+    def _save_continuous_meta_sidecar(
+        self,
+        csv_or_xlsx_path: Path,
+        *,
+        export_options: Dict[str, Any],
+    ) -> Optional[Path]:
+        """Save full run context next to continuous export for reproducible offline analysis."""
+        run = self._last_run_export_data or {}
+        if not run:
+            return None
+        summary = dict(run.get("summary") or {})
+        payload = {
+            "schema": "p300_continuous_meta_v1",
+            "saved_at_ms": int(time.time() * 1000),
+            "continuous_file": str(csv_or_xlsx_path),
+            "run_seq": run.get("run_seq"),
+            "export_options": dict(export_options),
+            "summary": summary,
+            "stimulus_params": dict(summary.get("stimulus_params") or {}),
+            "analysis_params": dict(summary.get("analysis_params") or {}),
+            "markers_count": len(run.get("markers") or []),
+            "winner_updates_count": len(run.get("winner_updates") or []),
+            "epoch_counts_by_stim": dict(summary.get("epoch_counts_by_stim") or {}),
+            "last_winner_update": (run.get("winner_updates") or [None])[-1],
+            "markers_preview_head": (run.get("markers") or [])[:20],
+            "markers_preview_tail": (run.get("markers") or [])[-20:],
+        }
+        meta_path = csv_or_xlsx_path.with_suffix(".meta.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return meta_path
 
     def _show_continuous_diagnostics(self, saved_path: Path) -> None:
         """После сохранения непрерывного экспорта показываем сводку: сколько вспышек
@@ -3119,6 +3189,33 @@ class P300AnalyzerWindow(QMainWindow):
         if "marker" not in idx or "t_rel_s" not in idx:
             raise RuntimeError("Ожидались колонки marker и t_rel_s.")
 
+        # Restore analysis/stimulus params from enriched continuous CSV if present.
+        def _first_num(col: str) -> Optional[float]:
+            j = idx.get(col)
+            if j is None:
+                return None
+            for r in data_rows:
+                if j >= len(r):
+                    continue
+                try:
+                    return float(str(r[j]).strip().replace(",", "."))
+                except Exception:
+                    continue
+            return None
+
+        def _apply_spin(spin: QSpinBox, col: str) -> None:
+            v = _first_num(col)
+            if v is not None:
+                spin.setValue(int(round(v)))
+
+        _apply_spin(self.spin_baseline, "baseline_ms")
+        _apply_spin(self.spin_x, "window_x_ms")
+        _apply_spin(self.spin_y, "window_y_ms")
+        _apply_spin(self.spin_artifact_thresh, "artifact_threshold_uv")
+        use_car_v = _first_num("use_car")
+        if use_car_v is not None:
+            self.chk_car.setChecked(bool(int(round(use_car_v))))
+
         channel_cols = [c for c in header if c.startswith("ch_")]
         if not channel_cols:
             raise RuntimeError("В файле нет колонок ch_1..ch_N.")
@@ -3184,6 +3281,11 @@ class P300AnalyzerWindow(QMainWindow):
         self.eeg_buffer = []
         self.eeg_times = list(t_rel)
         self._lsl_cue_target_id = csv_target  # show target in winner panel
+        self._stimulus_params = {}
+        for col in ("stim_target", "stim_sequences", "stim_isi_s", "stim_flash_s", "stim_cue_s", "stim_ready_s", "stim_inter_block_s"):
+            v = _first_num(col)
+            if v is not None:
+                self._stimulus_params[col] = int(round(v)) if col in {"stim_target", "stim_sequences"} else float(v)
         self._epoch_geom.reset()
         self._ensure_epoch_template()
         if self._epoch_geom.epoch_len is None:
@@ -3219,7 +3321,17 @@ class P300AnalyzerWindow(QMainWindow):
 
         self._redraw_from_epochs()
         self.btn_save_exam.setEnabled(False)
+        stim_info_parts: List[str] = []
+        for col in ("stim_target", "stim_sequences", "stim_isi_s", "stim_flash_s", "stim_inter_block_s"):
+            v = _first_num(col)
+            if v is None:
+                continue
+            if col in {"stim_target", "stim_sequences"}:
+                stim_info_parts.append(f"{col}={int(round(v))}")
+            else:
+                stim_info_parts.append(f"{col}={v:.3g}")
+        stim_info = (" Параметры стима: " + ", ".join(stim_info_parts) + ".") if stim_info_parts else ""
         self._set_status(
             f"Загружен {path.name}: эпох={onsets}, классов={len(self.epochs_data)}. "
-            "Построены графики и рассчитан winner офлайн."
+            f"Построены графики и рассчитан winner офлайн.{stim_info}"
         )

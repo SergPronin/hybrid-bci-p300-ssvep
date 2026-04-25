@@ -663,7 +663,49 @@ def export_run_continuous_csv(
     max_ch = max((len(x) for x in eeg_samples if isinstance(x, list)), default=0)
     if max_ch == 0:
         max_ch = 1
+    stim = dict(summary.get("stimulus_params") or {})
+    last_cue = summary.get("last_lsl_cue")
+    ui_winner = summary.get("ui_winner_tile_id")
+    run_seq = run_data.get("run_seq")
+    saved_at_ms = run_data.get("saved_at_ms")
+    const_meta = [
+        run_seq,
+        saved_at_ms,
+        ap.get("baseline_ms"),
+        ap.get("window_x_ms"),
+        ap.get("window_y_ms"),
+        ap.get("artifact_threshold_uv"),
+        ap.get("use_car"),
+        ap.get("epochs_after_trial_only"),
+        last_cue,
+        ui_winner,
+        stim.get("target"),
+        stim.get("sequences"),
+        stim.get("isi_s"),
+        stim.get("flash_s"),
+        stim.get("cue_s"),
+        stim.get("ready_s"),
+        stim.get("inter_block_s"),
+    ]
+
     header = ["sample_idx", "t_rel_s", "ts"] + [f"ch_{i+1}" for i in range(max_ch)] + [
+        "run_seq",
+        "saved_at_ms",
+        "baseline_ms",
+        "window_x_ms",
+        "window_y_ms",
+        "artifact_threshold_uv",
+        "use_car",
+        "epochs_after_trial_only",
+        "last_lsl_cue",
+        "ui_winner_tile_id",
+        "stim_target",
+        "stim_sequences",
+        "stim_isi_s",
+        "stim_flash_s",
+        "stim_cue_s",
+        "stim_ready_s",
+        "stim_inter_block_s",
         "marker",
         "in_epoch",
         "target_tile_id",
@@ -678,6 +720,7 @@ def export_run_continuous_csv(
         row: List[Any] = [int(i), float(t_rel_s[i]), float(t)]
         for k in range(max_ch):
             row.append(vals[k] if k < len(vals) else None)
+        row.extend(const_meta)
         row.append(int(mk))
         row.append(int(ie))
         row.append(int(tgt))

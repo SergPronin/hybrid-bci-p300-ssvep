@@ -133,16 +133,10 @@ def test_export_run_continuous_csv_marker_and_in_epoch() -> None:
         p2 = export_run_continuous_csv(run_data=run, output_path=base2)
         assert p2.name == "runX_continuous.csv"
         rows = _read_ru_csv(p)
-        assert rows[0] == [
-            "sample_idx",
-            "t_rel_s",
-            "ts",
-            "ch_1",
-            "ch_2",
-            "marker",
-            "in_epoch",
-            "target_tile_id",
-        ]
+        assert rows[0][:5] == ["sample_idx", "t_rel_s", "ts", "ch_1", "ch_2"]
+        assert rows[0][-3:] == ["marker", "in_epoch", "target_tile_id"]
+        assert "stim_target" in rows[0]
+        assert "window_x_ms" in rows[0]
         # строка 3 (sample_idx=2) — ближайшая к маркеру 100.004
         assert _num_ru(rows[3][0]) == 2.0
         assert _num_ru(rows[3][-3]) == 108.0   # marker = 100 + tile_id (8)
@@ -313,16 +307,10 @@ def test_export_run_continuous_xlsx_format() -> None:
         wb = openpyxl.load_workbook(p)
         ws = wb.active
         header = [c.value for c in ws[1]]
-        assert header == [
-            "sample_idx",
-            "t_rel_s",
-            "ts",
-            "ch_1",
-            "ch_2",
-            "marker",
-            "in_epoch",
-            "target_tile_id",
-        ]
+        assert header[:5] == ["sample_idx", "t_rel_s", "ts", "ch_1", "ch_2"]
+        assert header[-3:] == ["marker", "in_epoch", "target_tile_id"]
+        assert "stim_target" in header
+        assert "window_x_ms" in header
         # строка 4 (sample_idx=2) — вспышка
         row2 = [c.value for c in ws[4]]
         assert row2[0] == 2

@@ -268,6 +268,13 @@ class StimulusApp:
                 sequences, target_tile_id = self._read_settings()
                 if sequences <= 0:
                     return
+                cfg_payload = (
+                    f"trial_config|target={target_tile_id};sequences={sequences};"
+                    f"isi_s={self.controller.isi:.3f};flash_s={self.controller.flash_duration:.3f};"
+                    f"cue_s={self.controller.cue_duration:.3f};ready_s={self.controller.ready_duration:.3f};"
+                    f"inter_block_s={self.controller.inter_block_s:.3f};grid={self.grid.size}x{self.grid.size}"
+                )
+                self.win.callOnFlip(self.controller.lsl.send, -3, cfg_payload)
                 self.show_controls = False
                 self.win.mouseVisible = False
                 self.controller.start_experiment(sequences, target_tile_id=target_tile_id)
