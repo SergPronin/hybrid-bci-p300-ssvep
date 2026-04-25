@@ -124,6 +124,30 @@ def baseline_correction(raw: np.ndarray, time_ms: np.ndarray, baseline_ms: int) 
     return raw - baseline_val
 
 
+def time_window_to_indices(
+    time_ms: np.ndarray,
+    window_x_ms: int,
+    window_y_ms: int,
+) -> Tuple[int, int]:
+    """Преобразует окно в мс в [start, end) индексы по реальной оси времени."""
+    if time_ms.ndim != 1:
+        raise ValueError("time_ms must be 1D array")
+    if time_ms.size == 0:
+        raise ValueError("time_ms must not be empty")
+
+    wx = float(window_x_ms)
+    wy = float(window_y_ms)
+    if wy <= wx:
+        wy = wx + 1.0
+
+    x_idx = int(np.searchsorted(time_ms, wx, side="left"))
+    y_idx = int(np.searchsorted(time_ms, wy, side="right"))
+
+    x_idx = max(0, min(x_idx, time_ms.shape[0] - 1))
+    y_idx = max(x_idx + 1, min(y_idx, time_ms.shape[0]))
+    return x_idx, y_idx
+
+
 def integrated_cumsum(
     corrected: np.ndarray,
     time_ms: np.ndarray,
@@ -138,13 +162,7 @@ def integrated_cumsum(
     if corrected.shape[-1] != time_ms.shape[0]:
         raise ValueError("corrected and time_ms length mismatch")
 
-    dt_ms = float(time_ms[1] - time_ms[0]) if time_ms.shape[0] > 1 else 1.0
-    x_idx = int(round(float(window_x_ms) / dt_ms))
-    y_idx = int(round(float(window_y_ms) / dt_ms)) + 1
-
-    x_idx = max(0, min(x_idx, time_ms.shape[0] - 1))
-    y_idx = max(x_idx + 1, min(y_idx, time_ms.shape[0]))
-
+    x_idx, y_idx = time_window_to_indices(time_ms, window_x_ms, window_y_ms)
     segment = corrected[..., x_idx:y_idx]
     integrated = np.cumsum(np.abs(segment), axis=-1)
     time_crop = time_ms[x_idx:y_idx]

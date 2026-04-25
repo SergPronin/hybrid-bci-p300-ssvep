@@ -16,7 +16,7 @@ the ``marker`` column value if the column is absent/all-negative.
 
 Parameters (can be tweaked via CLI flags):
     --baseline-ms   Pre-stimulus baseline window (default 100 ms)
-    --x-ms          AUC window start after stimulus (default 200 ms)
+    --x-ms          AUC window start after stimulus (default 500 ms)
     --y-ms          AUC window end after stimulus   (default 600 ms)
     --artifact-uv   Epoch artifact rejection threshold µV (default 150, 0=off)
     --channels      Comma-separated 1-based channel indices to use, e.g. 1,2,4
@@ -86,7 +86,7 @@ def analyse_file(
     path: Path,
     *,
     baseline_ms: int = 100,
-    x_ms: int = 200,
+    x_ms: int = 500,
     y_ms: int = 600,
     artifact_uv: float = 60.0,
     channel_indices: Optional[List[int]] = None,
@@ -273,7 +273,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="+", help="CSV files or directories")
     parser.add_argument("--baseline-ms", type=int, default=100, metavar="MS")
-    parser.add_argument("--x-ms", type=int, default=200, metavar="MS")
+    parser.add_argument("--x-ms", type=int, default=500, metavar="MS")
     parser.add_argument("--y-ms", type=int, default=600, metavar="MS")
     parser.add_argument("--artifact-uv", type=float, default=60.0, metavar="UV",
                         help="Epoch rejection threshold µV (0 = off). Default 60 µV for hardware-filtered (LPF 35 Hz) data")

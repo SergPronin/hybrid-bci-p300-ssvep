@@ -8,7 +8,12 @@ import numpy as np
 
 from p300_analysis.constants import MIN_EPOCHS_TO_DECIDE
 from p300_analysis.marker_parsing import stim_key_sort_key, stim_key_to_tile_digit
-from p300_analysis.signal_processing import baseline_correction, integrated_cumsum, normalize_channels
+from p300_analysis.signal_processing import (
+    baseline_correction,
+    integrated_cumsum,
+    normalize_channels,
+    time_window_to_indices,
+)
 from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_SIGNED_MEAN
 
 
@@ -121,10 +126,7 @@ def compute_winner_metrics(
     Дополнительно вычисляет margin = (top1 - top2) / top1 для индикатора уверенности.
     """
     dt_m = float(time_ms[1] - time_ms[0]) if time_ms.shape[0] > 1 else 1.0
-    xi0 = int(round(float(window_x_ms) / dt_m))
-    xi1 = int(round(float(window_y_ms) / dt_m)) + 1
-    xi0 = max(0, min(xi0, time_ms.shape[0] - 1))
-    xi1 = max(xi0 + 1, min(xi1, time_ms.shape[0]))
+    xi0, xi1 = time_window_to_indices(time_ms, window_x_ms, window_y_ms)
     corr_win = corrected[:, xi0:xi1]
     abs_auc_values = np.sum(np.abs(corr_win), axis=1) * dt_m
     signed_mean_values = np.mean(corr_win, axis=1) if corr_win.size else np.zeros(len(stim_keys))
@@ -162,6 +164,7 @@ def compute_winner_metrics(
         "window_index": [xi0, xi1],
         "dt_ms": float(dt_m),
         "window_ms": [window_x_ms, window_y_ms],
+        "window_time_ms_actual": [float(time_ms[xi0]), float(time_ms[xi1 - 1])],
         "corr_abs_max": [float(x) for x in abs_max_values],
         "corr_mean_in_window": [float(x) for x in signed_mean_values],
         "corr_window_shape": [int(corr_win.shape[0]), int(corr_win.shape[1])],

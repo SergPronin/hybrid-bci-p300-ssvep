@@ -8,7 +8,12 @@ from p300_analysis.erp_compute import (
     compute_corrected_and_integrated,
     compute_winner_metrics,
 )
-from p300_analysis.signal_processing import common_average_reference, normalize_channels
+from p300_analysis.signal_processing import (
+    common_average_reference,
+    integrated_cumsum,
+    normalize_channels,
+    time_window_to_indices,
+)
 from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_SIGNED_MEAN
 
 
@@ -140,3 +145,46 @@ def test_artifact_reject_epochs_2d() -> None:
     assert n_rej == 1
     assert len(clean) == 1
     assert np.array_equal(clean[0], good)
+
+
+def test_time_window_to_indices_respects_negative_time_axis() -> None:
+    time_ms = np.array([-100.0, 0.0, 100.0, 200.0, 300.0], dtype=np.float64)
+    x_idx, y_idx = time_window_to_indices(time_ms, 200, 300)
+    assert (x_idx, y_idx) == (3, 5)
+
+
+def test_integrated_cumsum_uses_actual_time_values_with_baseline_offset() -> None:
+    time_ms = np.array([-100.0, 0.0, 100.0, 200.0, 300.0], dtype=np.float64)
+    corrected = np.array([[1.0, 2.0, 3.0, 4.0, 5.0]], dtype=np.float64)
+
+    integrated, time_crop = integrated_cumsum(corrected, time_ms, window_x_ms=200, window_y_ms=300)
+
+    np.testing.assert_allclose(time_crop, np.array([200.0, 300.0]))
+    np.testing.assert_allclose(integrated, np.array([[4.0, 9.0]]))
+
+
+def test_winner_metrics_uses_actual_time_values_with_baseline_offset() -> None:
+    stim_keys = ["стимул_0", "стимул_1"]
+    time_ms = np.array([-100.0, 0.0, 100.0, 200.0, 300.0], dtype=np.float64)
+    corrected = np.array(
+        [
+            [0.0, 0.0, 8.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 3.0, 3.0],
+        ],
+        dtype=np.float64,
+    )
+
+    winner_idx, _, dbg = compute_winner_metrics(
+        stim_keys,
+        raw_averaged=corrected,
+        corrected=corrected,
+        time_ms=time_ms,
+        window_x_ms=200,
+        window_y_ms=300,
+        winner_mode=WINNER_MODE_AUC,
+    )
+
+    assert winner_idx == 1
+    np.testing.assert_allclose(dbg["abs_auc_values"], [0.0, 600.0])
+    assert dbg["window_index"] == [3, 5]
+    assert dbg["window_time_ms_actual"] == [200.0, 300.0]

@@ -747,7 +747,7 @@ class P300AnalyzerWindow(QMainWindow):
 
         self.spin_x = QSpinBox()
         self.spin_x.setRange(0, 799)
-        self.spin_x.setValue(200)
+        self.spin_x.setValue(500)
         self.spin_x.setSuffix(" мс")
         self.spin_x.setKeyboardTracking(False)
         self.spin_x.valueChanged.connect(self._on_params_changed)
