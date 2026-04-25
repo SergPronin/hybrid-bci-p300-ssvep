@@ -268,8 +268,8 @@ def main() -> None:
     parser.add_argument("--baseline-ms", type=int, default=100, metavar="MS")
     parser.add_argument("--x-ms", type=int, default=200, metavar="MS")
     parser.add_argument("--y-ms", type=int, default=400, metavar="MS")
-    parser.add_argument("--artifact-uv", type=float, default=150.0, metavar="UV",
-                        help="Epoch rejection threshold µV (0 = off)")
+    parser.add_argument("--artifact-uv", type=float, default=60.0, metavar="UV",
+                        help="Epoch rejection threshold µV (0 = off). Default 60 µV for hardware-filtered (LPF 35 Hz) data")
     parser.add_argument("--channels", type=str, default="",
                         help="Comma-separated 1-based channel indices, e.g. 1,2,4")
     parser.add_argument("--verbose", "-v", action="store_true")

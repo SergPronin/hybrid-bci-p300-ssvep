@@ -784,7 +784,7 @@ class P300AnalyzerWindow(QMainWindow):
         sidebar_layout.addWidget(QLabel("Порог артефактов (мкВ, 0=выкл):"))
         self.spin_artifact_thresh = QSpinBox()
         self.spin_artifact_thresh.setRange(0, 5000)
-        self.spin_artifact_thresh.setValue(150)
+        self.spin_artifact_thresh.setValue(60)  # 60 мкВ — для данных с аппаратным ФНЧ 35 Гц
         self.spin_artifact_thresh.setKeyboardTracking(False)
         self.spin_artifact_thresh.setToolTip(
             "Эпохи с пиком амплитуды выше порога отбрасываются перед усреднением ERP.\n"
