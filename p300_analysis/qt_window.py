@@ -3121,9 +3121,11 @@ class P300AnalyzerWindow(QMainWindow):
             except Exception:
                 return None
 
+        has_target_col = "target_tile_id" in idx
         t_rel: List[float] = []
         marker_vals: List[int] = []
         signal_rows: List[np.ndarray] = []  # per-sample (n_ch,) arrays
+        target_ids_csv: List[int] = []
 
         for row in data_rows:
             if len(row) < len(header):
@@ -3145,9 +3147,20 @@ class P300AnalyzerWindow(QMainWindow):
             t_rel.append(float(tr))
             marker_vals.append(int(round(float(mv))))
             signal_rows.append(np.array(vals, dtype=np.float64))
+            if has_target_col:
+                tgt = _parse_num(row[idx["target_tile_id"]])
+                target_ids_csv.append(int(round(float(tgt))) if tgt is not None else -1)
 
         if len(t_rel) < 200:
             raise RuntimeError("Слишком мало валидных данных в CSV.")
+
+        # Extract target tile from CSV column
+        csv_target: Optional[int] = None
+        if has_target_col and target_ids_csv:
+            valid_targets = [t for t in target_ids_csv if t >= 0]
+            if valid_targets:
+                from collections import Counter
+                csv_target = Counter(valid_targets).most_common(1)[0][0]
 
         # Reset online state and run offline redraw.
         self._recording_epochs = False
@@ -3155,7 +3168,7 @@ class P300AnalyzerWindow(QMainWindow):
         self.epochs_data = {}
         self.eeg_buffer = []
         self.eeg_times = list(t_rel)
-        self._lsl_cue_target_id = None
+        self._lsl_cue_target_id = csv_target  # show target in winner panel
         self._epoch_geom.reset()
         self._ensure_epoch_template()
         if self._epoch_geom.epoch_len is None:

@@ -40,8 +40,13 @@ _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from p300_analysis.signal_processing import bandpass_filter, baseline_correction, detect_bad_channels
-from p300_analysis.erp_compute import build_averaged_erp, compute_winner_metrics
+from p300_analysis.signal_processing import bandpass_filter, detect_bad_channels
+from p300_analysis.erp_compute import (
+    build_averaged_erp,
+    compute_corrected_and_integrated,
+    compute_winner_metrics,
+)
+from p300_analysis.winner_selection import WINNER_MODE_AUC
 
 
 # ---------------------------------------------------------------------------
@@ -165,23 +170,23 @@ def analyse_file(
             from collections import Counter
             expected_tile = Counter(valid_targets).most_common(1)[0][0]
 
-    # Extract epochs
+    # Extract per-channel epochs (epoch_len, n_ch)
     epochs_data: Dict[str, List[np.ndarray]] = {}
     prev = 0
     onset_count = 0
     for i, m in enumerate(marker_vals):
         if m > 0 and (prev == 0 or prev != m):
             end = i + epoch_len
-            if end <= sig.size:
+            if end <= sig_2d.shape[0]:
                 stim_key = f"стимул_{m}"
-                epochs_data.setdefault(stim_key, []).append(sig[i:end].copy())
+                epochs_data.setdefault(stim_key, []).append(sig_2d[i:end, :].copy())
                 onset_count += 1
         prev = m
 
     if onset_count == 0:
         raise RuntimeError(f"No onset markers found in {path.name}")
 
-    # Build averaged ERP + winner
+    # Build averaged ERP
     stim_keys, raw_averaged, rejected = build_averaged_erp(
         epochs_data,
         epoch_len,
@@ -190,19 +195,26 @@ def analyse_file(
     if not stim_keys:
         raise RuntimeError(f"No ERP data after artifact rejection in {path.name}")
 
-    # Time axis for the epoch
+    # Time axis: from -baseline_ms to epoch end
     time_ms = np.arange(epoch_len, dtype=np.float64) * (dt * 1000.0) - baseline_ms
 
-    metrics, debug = compute_winner_metrics(
-        stim_keys=stim_keys,
-        raw_averaged=raw_averaged,
-        time_ms=time_ms,
-        baseline_ms=baseline_ms,
-        window_x_ms=x_ms,
-        window_y_ms=y_ms,
+    # Baseline correction + integration
+    corrected, integrated, time_crop, wx, wy = compute_corrected_and_integrated(
+        raw_averaged, time_ms, baseline_ms, x_ms, y_ms
     )
 
-    winner_key = max(metrics, key=lambda k: metrics[k]) if metrics else None
+    # Winner selection
+    winner_idx, mode_used, debug = compute_winner_metrics(
+        stim_keys=stim_keys,
+        raw_averaged=raw_averaged,
+        corrected=corrected,
+        time_ms=time_ms,
+        window_x_ms=wx,
+        window_y_ms=wy,
+        winner_mode=WINNER_MODE_AUC,
+    )
+
+    winner_key = stim_keys[winner_idx] if stim_keys else None
     winner_digit: Optional[int] = None
     if winner_key:
         try:
