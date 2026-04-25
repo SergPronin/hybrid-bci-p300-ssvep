@@ -141,14 +141,16 @@ def test_export_run_continuous_csv_marker_and_in_epoch() -> None:
             "ch_2",
             "marker",
             "in_epoch",
+            "target_tile_id",
         ]
         # строка 3 (sample_idx=2) — ближайшая к маркеру 100.004
         assert _num_ru(rows[3][0]) == 2.0
-        assert _num_ru(rows[3][-2]) == 8.0  # marker = 8
-        assert _num_ru(rows[3][-1]) == 1.0  # in_epoch = 1
+        assert _num_ru(rows[3][-3]) == 8.0   # marker = 8
+        assert _num_ru(rows[3][-2]) == 1.0   # in_epoch = 1
+        assert _num_ru(rows[3][-1]) == -1.0  # target_tile_id = -1 (нет trial_start)
         # пауза до вспышки
+        assert _num_ru(rows[1][-3]) == 0.0
         assert _num_ru(rows[1][-2]) == 0.0
-        assert _num_ru(rows[1][-1]) == 0.0
         # t_rel_s от начала
         assert abs(_num_ru(rows[1][1]) - 0.0) < 1e-9
         assert abs(_num_ru(rows[3][1]) - 0.004) < 1e-9
@@ -194,11 +196,11 @@ def test_export_run_continuous_csv_marker_via_lsl_clock_mapping() -> None:
     expected_idx = n - 1 - int(round(0.4 * srate))
     body = rows[1:]
     # Без |off плитка считается горящей до конца записи — marker=3 от expected_idx до N-1.
-    markers_nonzero = [i for i, r in enumerate(body) if _num_ru(r[-2]) != 0.0]
+    markers_nonzero = [i for i, r in enumerate(body) if _num_ru(r[-3]) != 0.0]
     assert markers_nonzero and markers_nonzero[0] == expected_idx
     assert markers_nonzero[-1] == n - 1
-    assert all(_num_ru(body[k][-2]) == 3.0 for k in markers_nonzero)
-    assert _num_ru(body[expected_idx][-1]) == 1.0
+    assert all(_num_ru(body[k][-3]) == 3.0 for k in markers_nonzero)
+    assert _num_ru(body[expected_idx][-2]) == 1.0
 
 
 def test_export_run_continuous_uses_precomputed_sample_idx() -> None:
@@ -223,9 +225,9 @@ def test_export_run_continuous_uses_precomputed_sample_idx() -> None:
         rows = _read_ru_csv(p)
     body = rows[1:]
     # Без |off плитка горит до конца записи — marker=5 с sample_idx=17 до N-1.
-    markers_nonzero_idx = [i for i, r in enumerate(body) if _num_ru(r[-2]) != 0.0]
+    markers_nonzero_idx = [i for i, r in enumerate(body) if _num_ru(r[-3]) != 0.0]
     assert markers_nonzero_idx[0] == 17
-    assert all(_num_ru(body[k][-2]) == 5.0 for k in markers_nonzero_idx)
+    assert all(_num_ru(body[k][-3]) == 5.0 for k in markers_nonzero_idx)
 
 
 def test_export_run_continuous_marker_fills_on_to_off_range() -> None:
@@ -252,13 +254,44 @@ def test_export_run_continuous_marker_fills_on_to_off_range() -> None:
     body = rows[1:]
     # sample_idx 2..5 → marker=7, 6..9 → 0, 10..15 → marker=3, прочее — 0.
     for k in range(2, 6):
-        assert _num_ru(body[k][-2]) == 7.0, f"expected marker=7 at {k}, got {body[k][-2]}"
+        assert _num_ru(body[k][-3]) == 7.0, f"expected marker=7 at {k}, got {body[k][-3]}"
     for k in range(6, 10):
-        assert _num_ru(body[k][-2]) == 0.0, f"expected 0 at {k}, got {body[k][-2]}"
+        assert _num_ru(body[k][-3]) == 0.0, f"expected 0 at {k}, got {body[k][-3]}"
     for k in range(10, 16):
-        assert _num_ru(body[k][-2]) == 3.0, f"expected marker=3 at {k}, got {body[k][-2]}"
-    assert _num_ru(body[0][-2]) == 0.0
-    assert _num_ru(body[19][-2]) == 0.0
+        assert _num_ru(body[k][-3]) == 3.0, f"expected marker=3 at {k}, got {body[k][-3]}"
+    assert _num_ru(body[0][-3]) == 0.0
+    assert _num_ru(body[19][-3]) == 0.0
+
+
+def test_export_run_continuous_target_tile_id() -> None:
+    """target_tile_id должен быть равен N из trial_start|target=N, -1 до начала и после trial_end."""
+    n = 20
+    srate = 500.0
+    run = {
+        "summary": {"analysis_params": {"sampling_rate_hz": srate}},
+        "eeg_ts": [100.0 + i * 0.002 for i in range(n)],
+        "eeg_samples": [[0.0] for _ in range(n)],
+        "markers": [
+            {"ts": 100.004, "value": "-1|trial_start|target=5", "sample_idx": 2},
+            {"ts": 100.010, "value": "3|on", "sample_idx": 5},
+            {"ts": 100.030, "value": "-2|trial_end", "sample_idx": 15},
+        ],
+        "epoch_segments": [],
+        "epoch_time_ms": [0.0, 2.0],
+    }
+    with TemporaryDirectory() as td:
+        p = export_run_continuous_csv(run_data=run, output_path=Path(td) / "tgt.csv")
+        rows = _read_ru_csv(p)
+    body = rows[1:]
+    # До trial_start (sample 0,1) — target_tile_id = -1
+    assert _num_ru(body[0][-1]) == -1.0
+    assert _num_ru(body[1][-1]) == -1.0
+    # После trial_start (sample 2..14) — target_tile_id = 5
+    for k in range(2, 15):
+        assert _num_ru(body[k][-1]) == 5.0, f"expected 5 at sample {k}, got {body[k][-1]}"
+    # После trial_end (sample 15..19) — target_tile_id = -1
+    for k in range(15, n):
+        assert _num_ru(body[k][-1]) == -1.0, f"expected -1 at sample {k}, got {body[k][-1]}"
 
 
 def test_export_run_continuous_xlsx_format() -> None:
@@ -288,9 +321,11 @@ def test_export_run_continuous_xlsx_format() -> None:
             "ch_2",
             "marker",
             "in_epoch",
+            "target_tile_id",
         ]
         # строка 4 (sample_idx=2) — вспышка
         row2 = [c.value for c in ws[4]]
         assert row2[0] == 2
-        assert row2[-2] == 2
-        assert row2[-1] == 1
+        assert row2[-3] == 2    # marker
+        assert row2[-2] == 1    # in_epoch
+        assert row2[-1] == -1   # target_tile_id (нет trial_start)

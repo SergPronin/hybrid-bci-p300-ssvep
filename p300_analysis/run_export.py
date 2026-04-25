@@ -9,7 +9,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from p300_analysis.marker_parsing import marker_value_to_stim_key, stim_key_to_tile_digit
+from p300_analysis.marker_parsing import (
+    marker_value_to_stim_key,
+    parse_trial_target_tile_id,
+    stim_key_to_tile_digit,
+)
 
 
 def _parse_tile_event(value: Any) -> Optional[Tuple[int, str]]:
@@ -626,16 +630,43 @@ def export_run_continuous_csv(
     for j in flash_sample_idx:
         in_epoch[j : min(n, j + win_samples)] = 1
 
+    # Build per-sample target_tile_id: value of the last trial_start|target=N marker seen.
+    # -1 means no trial has started yet; resets to -1 on trial_end.
+    target_events: List[Tuple[int, int]] = []  # (sample_idx, target_id), -1 = trial_end
+    for item in data.get("markers") or []:
+        val = item.get("value")
+        target = parse_trial_target_tile_id(val)
+        if target is not None:
+            sidx = _resolve_sample_idx(item)
+            if sidx is not None:
+                target_events.append((sidx, target))
+        elif isinstance(val, str) and "trial_end" in val:
+            sidx = _resolve_sample_idx(item)
+            if sidx is not None:
+                target_events.append((sidx, -1))
+    target_events.sort(key=lambda x: x[0])
+
+    target_tile_id_vals = np.full(n, -1, dtype=np.int64)
+    current_target = -1
+    ev_iter = iter(target_events)
+    next_ev = next(ev_iter, None)
+    for i in range(n):
+        while next_ev is not None and next_ev[0] <= i:
+            current_target = next_ev[1]
+            next_ev = next(ev_iter, None)
+        target_tile_id_vals[i] = current_target
+
     max_ch = max((len(x) for x in eeg_samples if isinstance(x, list)), default=0)
     if max_ch == 0:
         max_ch = 1
     header = ["sample_idx", "t_rel_s", "ts"] + [f"ch_{i+1}" for i in range(max_ch)] + [
         "marker",
         "in_epoch",
+        "target_tile_id",
     ]
     rows: List[List[Any]] = []
-    for i, (t, smp, mk, ie) in enumerate(
-        zip(eeg_ts, eeg_samples, marker_vals.tolist(), in_epoch.tolist())
+    for i, (t, smp, mk, ie, tgt) in enumerate(
+        zip(eeg_ts, eeg_samples, marker_vals.tolist(), in_epoch.tolist(), target_tile_id_vals.tolist())
     ):
         if skip_pauses and int(ie) == 0:
             continue
@@ -645,6 +676,7 @@ def export_run_continuous_csv(
             row.append(vals[k] if k < len(vals) else None)
         row.append(int(mk))
         row.append(int(ie))
+        row.append(int(tgt))
         rows.append(row)
 
     stem = output_path.with_suffix("")
