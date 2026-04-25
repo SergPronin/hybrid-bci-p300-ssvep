@@ -67,6 +67,7 @@ from p300_analysis.erp_compute import (
     compute_winner_metrics,
     winner_display_lines,
 )
+from p300_analysis.signal_processing import bandpass_filter, detect_bad_channels
 from p300_analysis.lsl_streams import (
     find_allowed_eeg_streams,
     resolve_marker_streams,
@@ -633,6 +634,26 @@ class P300AnalyzerWindow(QMainWindow):
         self.combo_winner_mode.setCurrentIndex(0)
         self.combo_winner_mode.currentIndexChanged.connect(self._on_params_changed)
         sidebar_layout.addWidget(self.combo_winner_mode)
+
+        sidebar_layout.addSpacing(6)
+        sidebar_layout.addWidget(QLabel("Порог артефактов (мкВ, 0=выкл):"))
+        self.spin_artifact_thresh = QSpinBox()
+        self.spin_artifact_thresh.setRange(0, 5000)
+        self.spin_artifact_thresh.setValue(150)
+        self.spin_artifact_thresh.setKeyboardTracking(False)
+        self.spin_artifact_thresh.setToolTip(
+            "Эпохи с пиком амплитуды выше порога отбрасываются перед усреднением ERP.\n"
+            "0 — не отбрасывать."
+        )
+        self.spin_artifact_thresh.valueChanged.connect(self._on_params_changed)
+        sidebar_layout.addWidget(self.spin_artifact_thresh)
+
+        self._bad_ch_label = QLabel("")
+        self._bad_ch_label.setWordWrap(True)
+        self._bad_ch_label.setStyleSheet(
+            "QLabel { color: #ff8c00; font-size: 11px; padding: 2px; }"
+        )
+        sidebar_layout.addWidget(self._bad_ch_label)
 
         self.chk_epochs_after_trial = QCheckBox(
             "Накапливать эпохи только после trial_start (cue из LSL)"
@@ -1223,7 +1244,8 @@ class P300AnalyzerWindow(QMainWindow):
         buf_len = len(self.eeg_buffer)
         buffer_end_ts = float(self._lsl_clock_at_buffer_end)
         time_arr = np.asarray(self.eeg_times, dtype=np.float64) if self.eeg_times else np.empty(0)
-        buf_2d = np.stack(self.eeg_buffer)
+        buf_2d_raw = np.stack(self.eeg_buffer)
+        buf_2d = bandpass_filter(buf_2d_raw, srate)
         _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
         _valid = [c for c in _roi if 0 <= c < buf_2d.shape[1]] if buf_2d.ndim == 2 else []
         if buf_2d.ndim == 2 and _valid:
@@ -1251,7 +1273,7 @@ class P300AnalyzerWindow(QMainWindow):
             if epoch.shape[0] != el:
                 continue
             self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
-            raw_segment = buf_2d[start_idx:end_idx]
+            raw_segment = buf_2d_raw[start_idx:end_idx]
             if raw_segment.ndim == 2:
                 raw_epoch_samples = raw_segment.astype(np.float64).tolist()
             else:
@@ -1651,7 +1673,28 @@ class P300AnalyzerWindow(QMainWindow):
         if el is None or time_ms is None:
             return
 
-        stim_keys, raw_averaged = build_averaged_erp(self.epochs_data, el)
+        artifact_thresh = float(getattr(self, "spin_artifact_thresh", None) and self.spin_artifact_thresh.value() or 0)
+        stim_keys, raw_averaged, rejected_counts = build_averaged_erp(
+            self.epochs_data, el, artifact_threshold_uv=artifact_thresh if artifact_thresh > 0 else None
+        )
+
+        # Автодетекция шумных каналов по данным из eeg_buffer (онлайн) или из эпох (офлайн).
+        bad_ch_text = ""
+        if self.eeg_buffer:
+            try:
+                buf_snap = np.stack(self.eeg_buffer[-2000:])
+                bad_idx, abs_means, stds = detect_bad_channels(buf_snap)
+                ch_labels = [
+                    cb.text() for cb in getattr(self, "channel_checkboxes", [])
+                ]
+                if bad_idx:
+                    names = [ch_labels[i] if i < len(ch_labels) else f"ch_{i+1}" for i in bad_idx]
+                    bad_ch_text = "⚠ Шумные каналы: " + ", ".join(names)
+            except Exception:
+                pass
+        if hasattr(self, "_bad_ch_label"):
+            self._bad_ch_label.setText(bad_ch_text)
+
         if not stim_keys:
             self._clear_plots()
             self.winner_label.setText("РЕЗУЛЬТАТ: ?")
@@ -1692,9 +1735,11 @@ class P300AnalyzerWindow(QMainWindow):
             dbg["marker_eeg_offset"] = self._marker_eeg_ts_offset
             dbg["pending_markers_count"] = len(self.pending_markers)
             dbg["epoch_counts_by_stim"] = {k: len(self.epochs_data.get(k, [])) for k in stim_keys}
+            dbg["artifact_rejected"] = rejected_counts
             debug_ndjson({"hypothesisId": "H1_metric", "message": "winner_compare", "data": dbg})
             lines, win_digit, match_lsl = winner_display_lines(
-                winner_key, mode_to_short_label(mode_used), self._lsl_cue_target_id
+                winner_key, mode_to_short_label(mode_used), self._lsl_cue_target_id,
+                margin=dbg.get("margin"),
             )
             self._exp_last_winner_digit = win_digit
             self._run_winners_export.append(
@@ -2182,7 +2227,8 @@ class P300AnalyzerWindow(QMainWindow):
 
             time_arr = np.asarray(self.eeg_times, dtype=np.float64) if self.eeg_times else np.empty(0)
             # eeg_buffer stores (n_channels,) per timepoint; average ROI channels here
-            buf_2d = np.stack(self.eeg_buffer)  # (n_timepoints, n_channels)
+            buf_2d_raw = np.stack(self.eeg_buffer)  # (n_timepoints, n_channels)
+            buf_2d = bandpass_filter(buf_2d_raw, srate)
             _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
             _valid = [c for c in _roi if 0 <= c < buf_2d.shape[1]] if buf_2d.ndim == 2 else []
             if buf_2d.ndim == 2 and _valid:
@@ -2254,7 +2300,7 @@ class P300AnalyzerWindow(QMainWindow):
                 if epoch.shape[0] == el:
                     n_epochs_before = sum(len(v) for v in self.epochs_data.values())
                     self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
-                    raw_segment = buf_2d[start_idx:end_idx]
+                    raw_segment = buf_2d_raw[start_idx:end_idx]
                     if raw_segment.ndim == 2:
                         raw_epoch_samples = raw_segment.astype(np.float64).tolist()
                     else:
@@ -2855,7 +2901,10 @@ class P300AnalyzerWindow(QMainWindow):
             raise RuntimeError("Не удалось вычислить длину эпохи из t_rel_s.")
 
         epoch_len = int(self._epoch_geom.epoch_len)
-        sig = np.asarray(signal_avg, dtype=np.float64)
+        dt = float(np.median(np.diff(t_rel))) if len(t_rel) > 1 else 0.002
+        fs_csv = 1.0 / dt if dt > 0 else 500.0
+        sig_raw = np.asarray(signal_avg, dtype=np.float64)
+        sig = bandpass_filter(sig_raw, fs_csv)
 
         onsets = 0
         prev = 0

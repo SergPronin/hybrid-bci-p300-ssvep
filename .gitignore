@@ -53,3 +53,14 @@ results/*.pkl
 saved_data/
 data/examination_logs/
 docs/
+.gitnexus
+__pycache__/
+*.pyc
+repomix-output.xml
+.cursor/
+claude.json
+AGENTS.md
+CLAUDE.md
+/.claude/
+/.codegraph/
+/.claude.json

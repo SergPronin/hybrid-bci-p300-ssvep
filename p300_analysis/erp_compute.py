@@ -12,21 +12,58 @@ from p300_analysis.signal_processing import baseline_correction, integrated_cums
 from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_SIGNED_MEAN
 
 
+def artifact_reject_epochs(
+    epochs: List[np.ndarray],
+    threshold_uv: float,
+) -> Tuple[List[np.ndarray], int]:
+    """Отбрасывает эпохи, в которых амплитуда превышает порог.
+
+    epochs: список 1D массивов (epoch_len,)
+    threshold_uv: порог в мкВ (например 150.0)
+    Возвращает (clean_epochs, n_rejected).
+    """
+    if threshold_uv <= 0:
+        return epochs, 0
+    clean: List[np.ndarray] = []
+    rejected = 0
+    for ep in epochs:
+        if np.max(np.abs(ep)) <= threshold_uv:
+            clean.append(ep)
+        else:
+            rejected += 1
+    return clean, rejected
+
+
 def build_averaged_erp(
     epochs_data: Dict[str, List[np.ndarray]],
     epoch_len: int,
-) -> Tuple[List[str], np.ndarray]:
+    artifact_threshold_uv: Optional[float] = None,
+) -> Tuple[List[str], np.ndarray, Dict[str, int]]:
+    """Усредняет эпохи по каждому стимулу после опциональной отбраковки артефактов.
+
+    Возвращает (stim_keys, raw_averaged, rejected_counts).
+    rejected_counts — dict stim_key → количество отброшенных эпох.
+    """
     stim_keys = [k for k, v in epochs_data.items() if v]
     stim_keys.sort(key=stim_key_sort_key)
     n_stim = len(stim_keys)
     raw_averaged = np.zeros((n_stim, epoch_len), dtype=np.float64)
+    rejected_counts: Dict[str, int] = {}
+
     for i, key in enumerate(stim_keys):
         epochs = epochs_data.get(key, [])
         if not epochs:
             continue
+        if artifact_threshold_uv is not None and artifact_threshold_uv > 0:
+            epochs, n_rej = artifact_reject_epochs(epochs, artifact_threshold_uv)
+            rejected_counts[key] = n_rej
+        if not epochs:
+            rejected_counts[key] = rejected_counts.get(key, 0)
+            continue
         stack = np.stack([e[:epoch_len] for e in epochs], axis=0)
         raw_averaged[i, :] = np.mean(stack, axis=0)
-    return stim_keys, raw_averaged
+
+    return stim_keys, raw_averaged, rejected_counts
 
 
 def compute_corrected_and_integrated(
@@ -65,7 +102,10 @@ def compute_winner_metrics(
     window_y_ms: int,
     winner_mode: str = WINNER_MODE_AUC,
 ) -> Tuple[int, str, Dict[str, Any]]:
-    """Возвращает winner_idx, mode_used, data для debug_ndjson (winner_compare)."""
+    """Возвращает winner_idx, mode_used, data для debug_ndjson (winner_compare).
+
+    Дополнительно вычисляет margin = (top1 - top2) / top1 для индикатора уверенности.
+    """
     dt_m = float(time_ms[1] - time_ms[0]) if time_ms.shape[0] > 1 else 1.0
     xi0 = int(round(float(window_x_ms) / dt_m))
     xi1 = int(round(float(window_y_ms) / dt_m)) + 1
@@ -85,6 +125,13 @@ def compute_winner_metrics(
 
     winner_idx = int(np.argmax(final_metric_values))
     auc_winner_idx = int(np.argmax(abs_auc_values))
+
+    # Margin: уверенность решения (0..1). 0 — невозможно выбрать, 1 — явный лидер.
+    sorted_vals = np.sort(final_metric_values)[::-1]
+    top1 = float(sorted_vals[0]) if sorted_vals.size > 0 else 0.0
+    top2 = float(sorted_vals[1]) if sorted_vals.size > 1 else 0.0
+    margin = (top1 - top2) / abs(top1) if abs(top1) > 1e-9 else 0.0
+
     abs_max_values = np.max(np.abs(corr_win), axis=1) if corr_win.size else np.zeros(len(stim_keys))
     debug_payload = {
         "winner_rule": mode_used,
@@ -97,6 +144,7 @@ def compute_winner_metrics(
         "auc_winner_idx": auc_winner_idx,
         "auc_winner_key": stim_keys[auc_winner_idx],
         "positive_peak_values": [float(x) for x in positive_peak_values],
+        "margin": margin,
         "window_index": [xi0, xi1],
         "dt_ms": float(dt_m),
         "window_ms": [window_x_ms, window_y_ms],
@@ -111,9 +159,14 @@ def winner_display_lines(
     winner_key: str,
     mode_short: str,
     lsl_cue_target_id: Optional[int],
+    margin: Optional[float] = None,
 ) -> Tuple[List[str], int, bool]:
     win_digit = stim_key_to_tile_digit(winner_key)
     lines = ["РЕЗУЛЬТАТ:", f"ПЛИТКА {win_digit}", f"режим: {mode_short}"]
+    if margin is not None:
+        pct = int(round(margin * 100))
+        confidence = "высокая" if pct >= 30 else ("средняя" if pct >= 12 else "низкая ⚠")
+        lines.append(f"уверенность: {pct}% ({confidence})")
     if lsl_cue_target_id is not None:
         lines.append(f"цель LSL: {lsl_cue_target_id}")
     match_lsl = lsl_cue_target_id is None or win_digit == lsl_cue_target_id
