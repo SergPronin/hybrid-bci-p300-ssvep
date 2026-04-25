@@ -9,6 +9,7 @@ from p300_analysis.erp_compute import (
     compute_winner_metrics,
 )
 from p300_analysis.signal_processing import (
+    baseline_correction,
     common_average_reference,
     integrated_cumsum,
     normalize_channels,
@@ -161,6 +162,15 @@ def test_integrated_cumsum_uses_actual_time_values_with_baseline_offset() -> Non
 
     np.testing.assert_allclose(time_crop, np.array([200.0, 300.0]))
     np.testing.assert_allclose(integrated, np.array([[4.0, 9.0]]))
+
+
+def test_baseline_correction_uses_negative_time_window_when_available() -> None:
+    time_ms = np.array([-100.0, 0.0, 100.0, 200.0], dtype=np.float64)
+    raw = np.array([[5.0, 100.0, 100.0, 100.0]], dtype=np.float64)
+
+    corrected = baseline_correction(raw, time_ms, baseline_ms=100)
+
+    np.testing.assert_allclose(corrected, np.array([[0.0, 95.0, 95.0, 95.0]]))
 
 
 def test_winner_metrics_uses_actual_time_values_with_baseline_offset() -> None:

@@ -35,6 +35,7 @@ def resolve_epoch_indices_for_marker(
     time_arr: np.ndarray,
     marker_eeg_offset: Optional[float],
     compute_start_index: Callable[[np.ndarray, float], Optional[int]],
+    pre_event_s: float = 0.0,
 ) -> Tuple[Optional[int], Optional[int], bool]:
     """Возвращает (start_idx, end_idx, wait_more).
 
@@ -51,9 +52,10 @@ def resolve_epoch_indices_for_marker(
     t_mark = (
         mt_raw + float(marker_eeg_offset) if marker_eeg_offset is not None else mt_raw
     )
+    t_start = t_mark - max(0.0, float(pre_event_s))
     ref = float(lsl_ref)
 
-    seconds_back = ref - t_mark
+    seconds_back = ref - t_start
     start_idx = int(round(buf_len - 1 - seconds_back * srate))
     end_idx = int(start_idx + epoch_len)
 
@@ -66,10 +68,10 @@ def resolve_epoch_indices_for_marker(
     ta = np.asarray(time_arr, dtype=np.float64).reshape(-1)
     # Если t_mark всё ещё «новее» ref — только прямой индекс; fallback по time_arr
     # с сырым mt_raw даст ложный хвост, если маркер вне шкалы ЭЭГ.
-    use_fallback = (t_mark <= ref) and eeg_timestamps_sufficient_for_fallback(ta, buf_len=buf_len)
+    use_fallback = (t_start <= ref) and eeg_timestamps_sufficient_for_fallback(ta, buf_len=buf_len)
 
     if use_fallback:
-        candidates: list[float] = [t_mark]
+        candidates: list[float] = [t_start]
         for t_eff in candidates:
             fb_start = compute_start_index(ta, t_eff)
             if fb_start is None:

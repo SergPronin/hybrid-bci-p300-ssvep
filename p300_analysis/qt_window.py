@@ -267,7 +267,10 @@ class P300AnalyzerWindow(QMainWindow):
         isi_ms = self._median_isi_ms()
         if isi_ms is not None:
             wy = int(self.spin_y.value())
-            epoch_ms = int(EPOCH_DURATION_MS)
+            if self._epoch_geom.time_ms_template is not None and self._epoch_geom.time_ms_template.size > 1:
+                epoch_ms = int(round(float(self._epoch_geom.time_ms_template[-1] - self._epoch_geom.time_ms_template[0])))
+            else:
+                epoch_ms = int(EPOCH_DURATION_MS + self.spin_baseline.value())
             lines.append("")
             lines.append(
                 f"Средний ISI между вспышками: ~{isi_ms:.0f} мс "
@@ -747,14 +750,14 @@ class P300AnalyzerWindow(QMainWindow):
 
         self.spin_x = QSpinBox()
         self.spin_x.setRange(0, 799)
-        self.spin_x.setValue(500)
+        self.spin_x.setValue(625)
         self.spin_x.setSuffix(" мс")
         self.spin_x.setKeyboardTracking(False)
         self.spin_x.valueChanged.connect(self._on_params_changed)
 
         self.spin_y = QSpinBox()
         self.spin_y.setRange(1, 800)
-        self.spin_y.setValue(600)
+        self.spin_y.setValue(800)
         self.spin_y.setKeyboardTracking(False)
         self.spin_y.valueChanged.connect(self._on_params_changed)
 
@@ -1919,7 +1922,8 @@ class P300AnalyzerWindow(QMainWindow):
         self._setup_plot(self.plot_integrated, title="④ ∫|corr| (AUC)")
 
     def _ensure_epoch_template(self) -> None:
-        self._epoch_geom.ensure_template(self._inlet_eeg, self.eeg_times)
+        baseline_ms = int(self.spin_baseline.value()) if hasattr(self, "spin_baseline") else 0
+        self._epoch_geom.ensure_template(self._inlet_eeg, self.eeg_times, baseline_ms=baseline_ms)
 
     def _compute_epoch_start_index(
         self, time_arr: np.ndarray, t_eff: float
@@ -1937,6 +1941,9 @@ class P300AnalyzerWindow(QMainWindow):
         time_arr: np.ndarray,
     ) -> Tuple[Optional[int], Optional[int], bool]:
         """Return (start_idx, end_idx, wait_more_data). См. p300_analysis.epoch_indexing."""
+        pre_event_s = 0.0
+        if self._epoch_geom.time_ms_template is not None and self._epoch_geom.time_ms_template.size:
+            pre_event_s = max(0.0, -float(self._epoch_geom.time_ms_template[0]) / 1000.0)
         return resolve_epoch_indices_for_marker(
             marker_ts=marker_ts,
             buf_len=buf_len,
@@ -1946,6 +1953,7 @@ class P300AnalyzerWindow(QMainWindow):
             time_arr=time_arr,
             marker_eeg_offset=self._marker_eeg_ts_offset,
             compute_start_index=self._compute_epoch_start_index,
+            pre_event_s=pre_event_s,
         )
 
     def _redraw_from_epochs(self) -> None:
@@ -2141,7 +2149,8 @@ class P300AnalyzerWindow(QMainWindow):
                 pen=pg.mkPen(pg.intColor(i, hues=n_colors, values=1).name(), width=2),
                 name=label,
             )
-        self.plot_raw_last.setXRange(0, 800)
+        if t.size >= 2:
+            self.plot_raw_last.setXRange(float(t[0]), float(t[-1]))
 
     def _plot_all(
         self,
@@ -2167,7 +2176,8 @@ class P300AnalyzerWindow(QMainWindow):
                 pen=pg.mkPen(pg.intColor(i, hues=n_colors, values=1).name(), width=2),
                 name=label,
             )
-        self.plot_raw.setXRange(0, 800)
+        if time_ms.size >= 2:
+            self.plot_raw.setXRange(float(time_ms[0]), float(time_ms[-1]))
 
         # Graph 2: baseline corrected ERP
         self.plot_corrected.clear()
@@ -2180,7 +2190,8 @@ class P300AnalyzerWindow(QMainWindow):
                 pen=pg.mkPen(pg.intColor(i, hues=n_colors, values=1).name(), width=2),
                 name=label,
             )
-        self.plot_corrected.setXRange(0, 800)
+        if time_ms.size >= 2:
+            self.plot_corrected.setXRange(float(time_ms[0]), float(time_ms[-1]))
 
         # Graph 3: |corrected| integrated in the decision window
         self.plot_integrated.clear()
@@ -3294,6 +3305,9 @@ class P300AnalyzerWindow(QMainWindow):
         epoch_len = int(self._epoch_geom.epoch_len)
         dt = float(np.median(np.diff(t_rel))) if len(t_rel) > 1 else 0.002
         fs_csv = 1.0 / dt if dt > 0 else 500.0
+        pre_samples = 0
+        if self._epoch_geom.time_ms_template is not None and self._epoch_geom.time_ms_template.size:
+            pre_samples = int(round(max(0.0, -float(self._epoch_geom.time_ms_template[0])) / (dt * 1000.0)))
         # Build 2D signal array (T, n_ch) and apply bandpass
         sig_raw_2d = np.stack(signal_rows)  # (T, n_ch)
         sig_2d = bandpass_filter(sig_raw_2d, fs_csv)
@@ -3308,10 +3322,11 @@ class P300AnalyzerWindow(QMainWindow):
                 tile_id = None
             # Начало пачки marker>0 считаем началом вспышки плитки m.
             if tile_id is not None and (prev_tile is None or prev_tile != tile_id):
-                end = i + epoch_len
-                if end <= sig_2d.shape[0]:
+                start = i - pre_samples
+                end = start + epoch_len
+                if start >= 0 and end <= sig_2d.shape[0]:
                     stim_key = f"стимул_{tile_id}"
-                    epoch = sig_2d[i:end, :]  # (epoch_len, n_ch)
+                    epoch = sig_2d[start:end, :]  # (epoch_len, n_ch)
                     self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
                     onsets += 1
             prev_tile = tile_id

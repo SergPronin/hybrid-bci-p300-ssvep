@@ -17,11 +17,13 @@ class EpochGeometry:
         self._dt_ms: Optional[float] = None
         self._epoch_len: Optional[int] = None
         self._time_ms_template: Optional[np.ndarray] = None
+        self._baseline_ms: Optional[int] = None
 
     def reset(self) -> None:
         self._dt_ms = None
         self._epoch_len = None
         self._time_ms_template = None
+        self._baseline_ms = None
 
     @property
     def dt_ms(self) -> Optional[float]:
@@ -39,7 +41,9 @@ class EpochGeometry:
         self,
         inlet_eeg: Optional[StreamInlet],
         eeg_times: List[float],
+        baseline_ms: int = 0,
     ) -> None:
+        baseline_ms = max(0, int(baseline_ms))
         if self._time_ms_template is not None and self._epoch_len is not None and self._dt_ms is not None:
             return
 
@@ -63,8 +67,10 @@ class EpochGeometry:
             return
 
         self._dt_ms = dt_ms
-        self._epoch_len = int(round(EPOCH_DURATION_MS / dt_ms)) + 1
-        self._time_ms_template = np.arange(self._epoch_len, dtype=np.float64) * dt_ms
+        self._baseline_ms = baseline_ms
+        epoch_total_ms = float(EPOCH_DURATION_MS + baseline_ms)
+        self._epoch_len = int(round(epoch_total_ms / dt_ms)) + 1
+        self._time_ms_template = np.arange(self._epoch_len, dtype=np.float64) * dt_ms - baseline_ms
 
     def compute_start_index(self, time_arr: np.ndarray, t_eff: float) -> Optional[int]:
         """Возвращает индекс начала эпохи в time_arr, ближайший к t_eff.

@@ -116,11 +116,18 @@ def baseline_correction(raw: np.ndarray, time_ms: np.ndarray, baseline_ms: int) 
     if raw.shape[-1] != time_ms.shape[0]:
         raise ValueError("raw and time_ms length mismatch")
 
-    dt_ms = float(time_ms[1] - time_ms[0]) if time_ms.shape[0] > 1 else 1.0
-    baseline_idx = int(round(float(baseline_ms) / dt_ms))
-    baseline_idx = max(1, min(baseline_idx, time_ms.shape[0]))
+    baseline_start_idx = int(np.searchsorted(time_ms, -float(baseline_ms), side="left"))
+    baseline_end_idx = int(np.searchsorted(time_ms, 0.0, side="left"))
 
-    baseline_val = np.median(raw[..., :baseline_idx], axis=-1, keepdims=True)
+    if baseline_end_idx > baseline_start_idx:
+        baseline_slice = raw[..., baseline_start_idx:baseline_end_idx]
+    else:
+        dt_ms = float(time_ms[1] - time_ms[0]) if time_ms.shape[0] > 1 else 1.0
+        baseline_idx = int(round(float(baseline_ms) / dt_ms))
+        baseline_idx = max(1, min(baseline_idx, time_ms.shape[0]))
+        baseline_slice = raw[..., :baseline_idx]
+
+    baseline_val = np.median(baseline_slice, axis=-1, keepdims=True)
     return raw - baseline_val
 
 

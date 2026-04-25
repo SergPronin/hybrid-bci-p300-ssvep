@@ -16,8 +16,8 @@ the ``marker`` column value if the column is absent/all-negative.
 
 Parameters (can be tweaked via CLI flags):
     --baseline-ms   Pre-stimulus baseline window (default 100 ms)
-    --x-ms          AUC window start after stimulus (default 500 ms)
-    --y-ms          AUC window end after stimulus   (default 600 ms)
+    --x-ms          AUC window start after stimulus (default 625 ms)
+    --y-ms          AUC window end after stimulus   (default 800 ms)
     --artifact-uv   Epoch artifact rejection threshold µV (default 150, 0=off)
     --channels      Comma-separated 1-based channel indices to use, e.g. 1,2,4
                     Default: all channels in the file.
@@ -41,6 +41,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from p300_analysis.marker_parsing import decode_stim_tile_id
+from p300_analysis.constants import EPOCH_DURATION_MS
 from p300_analysis.signal_processing import bandpass_filter, common_average_reference, detect_bad_channels
 from p300_analysis.erp_compute import (
     build_averaged_erp,
@@ -86,8 +87,8 @@ def analyse_file(
     path: Path,
     *,
     baseline_ms: int = 100,
-    x_ms: int = 500,
-    y_ms: int = 600,
+    x_ms: int = 625,
+    y_ms: int = 800,
     artifact_uv: float = 60.0,
     channel_indices: Optional[List[int]] = None,
     use_car: bool = False,
@@ -159,11 +160,10 @@ def analyse_file(
     if use_car:
         sig_2d = common_average_reference(sig_2d)
 
-    # Average selected channels → 1-D (same as qt_window offline path)
-    sig = sig_2d.mean(axis=1)
-
     # Compute epoch length
-    epoch_len = int(round((baseline_ms + y_ms) / (dt * 1000.0))) + 1
+    post_stim_ms = max(int(y_ms), int(EPOCH_DURATION_MS))
+    epoch_len = int(round((baseline_ms + post_stim_ms) / (dt * 1000.0))) + 1
+    pre_samples = int(round(float(baseline_ms) / (dt * 1000.0)))
 
     # Determine expected target from target_tile_id column
     expected_tile: Optional[int] = None
@@ -183,10 +183,11 @@ def analyse_file(
         if int(m) == 0:
             tile_id = None
         if tile_id is not None and (prev_tile is None or prev_tile != tile_id):
-            end = i + epoch_len
-            if end <= sig_2d.shape[0]:
+            start = i - pre_samples
+            end = start + epoch_len
+            if start >= 0 and end <= sig_2d.shape[0]:
                 stim_key = f"стимул_{tile_id}"
-                epochs_data.setdefault(stim_key, []).append(sig_2d[i:end, :].copy())
+                epochs_data.setdefault(stim_key, []).append(sig_2d[start:end, :].copy())
                 onset_count += 1
         prev_tile = tile_id
 
@@ -273,8 +274,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="+", help="CSV files or directories")
     parser.add_argument("--baseline-ms", type=int, default=100, metavar="MS")
-    parser.add_argument("--x-ms", type=int, default=500, metavar="MS")
-    parser.add_argument("--y-ms", type=int, default=600, metavar="MS")
+    parser.add_argument("--x-ms", type=int, default=625, metavar="MS")
+    parser.add_argument("--y-ms", type=int, default=800, metavar="MS")
     parser.add_argument("--artifact-uv", type=float, default=60.0, metavar="UV",
                         help="Epoch rejection threshold µV (0 = off). Default 60 µV for hardware-filtered (LPF 35 Hz) data")
     parser.add_argument("--channels", type=str, default="",

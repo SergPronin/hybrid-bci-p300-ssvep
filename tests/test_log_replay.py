@@ -184,6 +184,7 @@ def extract_epochs_with_method(
     fallback_offset: Optional[float] = None,
     lsl_to_unix_offset: Optional[float] = None,
     last_eeg_event_unix_s: Optional[float] = None,
+    pre_event_s: float = 0.0,
 ) -> Tuple[Dict[str, List[np.ndarray]], List[int]]:
     """
     Extract epochs from *buf* for each marker.
@@ -205,21 +206,21 @@ def extract_epochs_with_method(
             assert calib_offset is not None
             t_eff = marker_ts + calib_offset
             t0 = float(ts_arr[0])
-            i_nom = int(round((t_eff - t0) / dt_s))
+            i_nom = int(round((t_eff - pre_event_s - t0) / dt_s))
             start_idx = max(0, min(i_nom, n - epoch_len))
 
         elif method == "fallback":
             assert fallback_offset is not None
             t_eff = marker_ts + fallback_offset
             t0 = float(ts_arr[0])
-            i_nom = int(round((t_eff - t0) / dt_s))
+            i_nom = int(round((t_eff - pre_event_s - t0) / dt_s))
             start_idx = max(0, min(i_nom, n - epoch_len))
 
         elif method == "lsl_clock_sim":
             assert lsl_to_unix_offset is not None
             assert last_eeg_event_unix_s is not None
             lsl_ref = last_eeg_event_unix_s - lsl_to_unix_offset
-            seconds_back = lsl_ref - marker_ts
+            seconds_back = lsl_ref - (marker_ts - pre_event_s)
             start_idx = int(round(n - 1 - seconds_back * srate))
             start_idx = max(0, min(start_idx, n - epoch_len))
 
@@ -246,7 +247,7 @@ def compute_winner_from_epochs(
     stim_keys, raw_avg = build_averaged_erp(epochs_data, epoch_len)
     if not stim_keys:
         return None, None, {}
-    time_ms = np.arange(epoch_len, dtype=np.float64) * (1000.0 / srate)
+    time_ms = np.arange(epoch_len, dtype=np.float64) * (1000.0 / srate) - baseline_ms
     corrected, integrated, time_crop, wx, wy = compute_corrected_and_integrated(
         raw_avg, time_ms, baseline_ms, window_x_ms, window_y_ms,
     )
@@ -299,12 +300,13 @@ class TestOldMethodBroken:
         if abs(rd["calib_offset"]) > 1.0:
             pytest.skip("run used fallback offset (large), not broken time_correction")
         srate = rd["srate"]
-        epoch_len = int(round(EPOCH_DURATION_MS / (1000.0 / srate))) + 1
+        epoch_len = int(round((rd["baseline_ms"] + EPOCH_DURATION_MS) / (1000.0 / srate))) + 1
 
         _, indices = extract_epochs_with_method(
             rd["buf"], rd["ts_arr"], rd["markers"],
             srate, epoch_len, method="old_broken",
             calib_offset=rd["calib_offset"],
+            pre_event_s=rd["baseline_ms"] / 1000.0,
         )
         # The bug: nearly ALL indices should be 0 (because offset ≈ 0
         # but clocks are in different domains).
@@ -326,13 +328,14 @@ class TestFallbackOffset:
         if rd["calib_eeg_last"] is None or rd["calib_marker_ts"] is None:
             pytest.skip("no calibration data")
         srate = rd["srate"]
-        epoch_len = int(round(EPOCH_DURATION_MS / (1000.0 / srate))) + 1
+        epoch_len = int(round((rd["baseline_ms"] + EPOCH_DURATION_MS) / (1000.0 / srate))) + 1
         fallback_offset = rd["calib_eeg_last"] - rd["calib_marker_ts"]
 
         _, indices = extract_epochs_with_method(
             rd["buf"], rd["ts_arr"], rd["markers"],
             srate, epoch_len, method="fallback",
             fallback_offset=fallback_offset,
+            pre_event_s=rd["baseline_ms"] / 1000.0,
         )
         unique_idx = len(set(indices))
         total = len(indices)
@@ -356,7 +359,7 @@ class TestLslClockSimulation:
             pytest.skip("no eeg event timestamps")
 
         srate = rd["srate"]
-        epoch_len = int(round(EPOCH_DURATION_MS / (1000.0 / srate))) + 1
+        epoch_len = int(round((rd["baseline_ms"] + EPOCH_DURATION_MS) / (1000.0 / srate))) + 1
         lsl_to_unix = rd["calib_eeg_last"] - rd["calib_marker_ts"]
 
         _, indices = extract_epochs_with_method(
@@ -364,6 +367,7 @@ class TestLslClockSimulation:
             srate, epoch_len, method="lsl_clock_sim",
             lsl_to_unix_offset=lsl_to_unix,
             last_eeg_event_unix_s=rd["last_eeg_event_unix_s"],
+            pre_event_s=rd["baseline_ms"] / 1000.0,
         )
         unique_idx = len(set(indices))
         zero_count = sum(1 for i in indices if i == 0)
@@ -392,7 +396,7 @@ class TestLslClockSimulation:
             pytest.skip("no target in log")
 
         srate = rd["srate"]
-        epoch_len = int(round(EPOCH_DURATION_MS / (1000.0 / srate))) + 1
+        epoch_len = int(round((rd["baseline_ms"] + EPOCH_DURATION_MS) / (1000.0 / srate))) + 1
         lsl_to_unix = rd["calib_eeg_last"] - rd["calib_marker_ts"]
 
         epochs_data, indices = extract_epochs_with_method(
@@ -400,6 +404,7 @@ class TestLslClockSimulation:
             srate, epoch_len, method="lsl_clock_sim",
             lsl_to_unix_offset=lsl_to_unix,
             last_eeg_event_unix_s=rd["last_eeg_event_unix_s"],
+            pre_event_s=rd["baseline_ms"] / 1000.0,
         )
 
         winner_digit, winner_key, dbg = compute_winner_from_epochs(
@@ -446,7 +451,7 @@ class TestEpochsNotIdentical:
             pytest.skip("no eeg event timestamps")
 
         srate = rd["srate"]
-        epoch_len = int(round(EPOCH_DURATION_MS / (1000.0 / srate))) + 1
+        epoch_len = int(round((rd["baseline_ms"] + EPOCH_DURATION_MS) / (1000.0 / srate))) + 1
         lsl_to_unix = rd["calib_eeg_last"] - rd["calib_marker_ts"]
 
         # --- old method: all epochs should be identical (when offset ≈ 0) ---
@@ -457,6 +462,7 @@ class TestEpochsNotIdentical:
             rd["buf"], rd["ts_arr"], rd["markers"],
             srate, epoch_len, method="old_broken",
             calib_offset=rd["calib_offset"] if rd["calib_offset"] is not None else 0.0,
+            pre_event_s=rd["baseline_ms"] / 1000.0,
         )
         old_all = []
         for v in old_epochs.values():
@@ -472,6 +478,7 @@ class TestEpochsNotIdentical:
             srate, epoch_len, method="lsl_clock_sim",
             lsl_to_unix_offset=lsl_to_unix,
             last_eeg_event_unix_s=rd["last_eeg_event_unix_s"],
+            pre_event_s=rd["baseline_ms"] / 1000.0,
         )
         new_all = []
         for v in new_epochs.values():

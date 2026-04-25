@@ -109,6 +109,42 @@ def test_direct_indexing_distinct_starts_for_close_markers(cs) -> None:
     assert abs((a2 or 0) - (a1 or 0)) >= 4  # ~20 мс * 250 ≈ 5 отсчётов
 
 
+def test_pre_event_offset_moves_epoch_start_earlier(cs) -> None:
+    buf_len = 800
+    srate = 250.0
+    el = 50
+    lsl_ref = 5.0
+    marker_ts = 4.5
+    ta = np.linspace(0.0, (buf_len - 1) / srate, buf_len, dtype=np.float64)
+
+    s0, e0, w0 = resolve_epoch_indices_for_marker(
+        marker_ts=marker_ts,
+        buf_len=buf_len,
+        srate=srate,
+        epoch_len=el,
+        lsl_ref=lsl_ref,
+        time_arr=ta,
+        marker_eeg_offset=None,
+        compute_start_index=cs,
+    )
+    s1, e1, w1 = resolve_epoch_indices_for_marker(
+        marker_ts=marker_ts,
+        buf_len=buf_len,
+        srate=srate,
+        epoch_len=el,
+        lsl_ref=lsl_ref,
+        time_arr=ta,
+        marker_eeg_offset=None,
+        compute_start_index=cs,
+        pre_event_s=0.1,
+    )
+
+    assert not w0 and not w1
+    assert s0 is not None and s1 is not None and e0 is not None and e1 is not None
+    assert s1 == s0 - 25
+    assert e1 == e0 - 25
+
+
 def test_coarse_eeg_timestamps_disable_fallback() -> None:
     """Грубые метки (мало уникальных значений) — fallback отключён."""
     buf_len = 400
