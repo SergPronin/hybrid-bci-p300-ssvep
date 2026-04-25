@@ -1151,15 +1151,41 @@ class P300AnalyzerWindow(QMainWindow):
         self._ch_health_win.activateWindow()
 
     def _refresh_ch_health(self) -> None:
-        """Rebuild the channel-health grid from the last ~4 s of raw EEG buffer."""
+        """Rebuild the channel-health grid. Uses per-channel monitor bufs (always live)
+        with a bandpass filter to remove DC offset before evaluating noise."""
         if self._ch_health_win is None or self._ch_health_grid is None:
             return
 
-        buf = list(self.eeg_buffer)
-        if len(buf) < 50:
+        # Prefer per-channel monitor bufs: populated whenever LSL is connected,
+        # independent of _recording_epochs flag.
+        bufs = self._eeg_channel_monitor_bufs
+        if bufs and all(len(dq) >= 50 for dq in bufs):
+            take = min(min(len(dq) for dq in bufs), 2000)
+            data = np.column_stack(
+                [np.asarray(list(dq)[-take:], dtype=np.float64) for dq in bufs]
+            )  # (T, C)
+        elif self.eeg_buffer and len(self.eeg_buffer) >= 50:
+            raw = self.eeg_buffer[-min(len(self.eeg_buffer), 2000):]
+            data = np.stack(raw)
+        else:
+            # No data yet — clear grid and show placeholder
+            while self._ch_health_grid.count():
+                item = self._ch_health_grid.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            ph = QLabel("Нет данных. Подключитесь к LSL и начните запись.")
+            ph.setStyleSheet("color: #888; padding: 8px;")
+            self._ch_health_grid.addWidget(ph, 0, 0)
             return
 
-        data = np.stack(buf[-min(len(buf), 2000):])  # (T, C)
+        # Apply bandpass to remove DC offset before noise assessment
+        dt_ms = self._epoch_geom.dt_ms
+        srate = (1000.0 / float(dt_ms)) if dt_ms else 250.0
+        try:
+            data = bandpass_filter(data, float(srate))
+        except Exception:
+            pass
+
         bad_indices, abs_means, stds = detect_bad_channels(data)
 
         labels = getattr(self, "_channel_labels", None) or [
@@ -1211,11 +1237,20 @@ class P300AnalyzerWindow(QMainWindow):
 
     def _on_disable_bad_channels(self) -> None:
         """Uncheck all bad channels in the ROI checkbox list."""
+        changed = False
         for row in self._ch_health_rows:
             if row["is_bad"]:
                 idx = row["ch_idx"]
                 if idx < len(self.channel_checkboxes):
-                    self.channel_checkboxes[idx].setChecked(False)
+                    cb = self.channel_checkboxes[idx]
+                    if cb.isChecked():
+                        cb.blockSignals(True)
+                        cb.setChecked(False)
+                        cb.blockSignals(False)
+                        changed = True
+        if changed:
+            # Trigger analysis redraw without flooding via the normal signal path
+            self._on_params_changed()
 
     def _refresh_selected_channels_plots(self, selected: List[int]) -> None:
         if self._selected_channels_scroll_layout is None:
