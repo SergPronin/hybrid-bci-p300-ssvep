@@ -1,0 +1,41 @@
+---
+description: P300 EEG algorithm correctness rules. Apply when editing p300_analysis files.
+globs: p300_analysis/**/*.py
+alwaysApply: false
+---
+
+# P300 Algorithm Rules
+
+## Signal processing — invariants (never break these)
+
+- **Baseline**: always use `np.median`, never `np.mean` (robust to artifacts)
+- **Filter**: always `bandpass_filter(X, fs, lo=0.5, hi=20.0)` using `filtfilt` (zero-phase)
+- **Epoch extraction**: filter the full buffer BEFORE slicing epochs
+- **Export**: `raw_segment` must come from `buf_2d_raw` (unfiltered), not `buf_2d`
+- **Artifact rejection**: default threshold 150 µV; configurable via `spin_artifact_thresh`
+
+## Winner selection — required behavior
+
+- Always compute `margin = (top1 - top2) / |top1|`
+- If `margin < 0.15` → label result as "низкая уверенность ⚠"
+- Display margin % in winner label
+- Bad channels (std > 4×median OR abs_mean > 3×median) → show in `_bad_ch_label`
+
+## Channel handling
+
+- Channels averaged **after** filtering, not before
+- `detect_bad_channels()` must be called in `_redraw_from_epochs`
+- Bad channel checkboxes must be visually marked (disabled or orange text)
+
+## Epoch window defaults
+
+- Epoch duration: 800 ms
+- Baseline: first 100 ms
+- AUC window: 200–600 ms
+- Minimum epochs to decide: 10 per class
+
+## What to check before changing erp_compute.py or signal_processing.py
+
+1. `build_averaged_erp` signature: must return `(stim_keys, raw_averaged, rejected_counts)`
+2. `winner_display_lines` signature: must accept `margin=` kwarg
+3. All callers of changed functions must be updated

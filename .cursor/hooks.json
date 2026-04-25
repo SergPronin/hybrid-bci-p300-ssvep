@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "hooks": {
+    "afterFileEdit": [
+      {
+        "command": ".cursor/hooks/syntax-check.sh",
+        "matcher": "p300_analysis",
+        "failClosed": false
+      }
+    ],
+    "stop": [
+      {
+        "type": "prompt",
+        "prompt": "The agent has finished its task. If any files in p300_analysis/ or core/ or gui/ were modified, remind the agent (in Russian) to: 1) run gitnexus detect_changes, 2) append an entry to docs/AI_LOG.md using the session-logger agent format. Keep the reminder under 3 sentences."
+      }
+    ]
+  }
+}

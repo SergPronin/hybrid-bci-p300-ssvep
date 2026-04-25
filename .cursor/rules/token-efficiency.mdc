@@ -1,0 +1,40 @@
+---
+description: Token efficiency rules. Always apply to minimize context usage.
+alwaysApply: true
+---
+
+# Token Efficiency Rules
+
+## Reading code
+
+- Use `Grep` for finding symbols — never `Read` a whole file to find one function
+- Use `Read` with `offset` + `limit` to read only the needed lines
+- Use `Glob` to find files by pattern before reading
+- Use `gitnexus query/context` first — often replaces reading 3–5 files
+
+## Editing code
+
+- `StrReplace` for targeted edits — never rewrite an entire file unless <80 lines
+- One `StrReplace` call per logical change
+- Batch independent tool calls in a single message
+
+## Shell
+
+- Combine commands with `&&` in one Shell call instead of sequential calls
+- Use `head -n 20` or `grep` to inspect large outputs instead of reading everything
+
+## Analysis
+
+- Run Python analysis inline in Shell — do NOT create temporary `.py` files
+- Reuse computed data within a single shell call rather than chaining multiple calls
+
+## Subagent delegation
+
+- Delegate CSV analysis to `p300-analyst` agent (saves repeating the algorithm)
+- Delegate code review to `eeg-reviewer` agent (saves repeating impact rules)
+- Delegate logging to `session-logger` agent after each task
+
+## Context hygiene
+
+- Never repeat information already established in the conversation
+- Reference `docs/AI_LOG.md` for project history instead of re-explaining
