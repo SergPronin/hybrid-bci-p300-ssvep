@@ -43,6 +43,19 @@ def bandpass_filter(
     return filtfilt(b, a, X, axis=0).astype(X.dtype)
 
 
+def common_average_reference(X: np.ndarray) -> np.ndarray:
+    """Common Average Reference (CAR): вычитает среднее по каналам из каждого отсчёта.
+
+    X: (n_samples, n_channels)
+    Убирает общий дрейф/шум, присутствующий на всех каналах одновременно
+    (движение головы, дыхание, помехи от провода питания).
+    Усиливает локальные сигналы (P300 на теменно-затылочных каналах).
+    """
+    if X.ndim != 2 or X.shape[1] < 2:
+        return X
+    return X - X.mean(axis=1, keepdims=True)
+
+
 def normalize_channels(X: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     """Нормализация по каналу: делит каждый канал на его std.
 

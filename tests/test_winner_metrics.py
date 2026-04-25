@@ -8,7 +8,7 @@ from p300_analysis.erp_compute import (
     compute_corrected_and_integrated,
     compute_winner_metrics,
 )
-from p300_analysis.signal_processing import normalize_channels
+from p300_analysis.signal_processing import common_average_reference, normalize_channels
 from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_SIGNED_MEAN
 
 
@@ -115,6 +115,19 @@ def test_normalize_channels_equalizes_amplitudes() -> None:
     Xn = normalize_channels(X)
     # После нормализации std каждого столбца ≈ 1
     np.testing.assert_allclose(np.std(Xn, axis=0), [1.0, 1.0], atol=1e-9)
+
+
+def test_common_average_reference_removes_common_drift() -> None:
+    """CAR вычитает среднее по каналам из каждого отсчёта."""
+    rng = np.random.default_rng(42)
+    signal = rng.normal(0, 1.0, (100, 4))
+    drift = rng.normal(0, 10.0, (100, 1))  # общий дрейф
+    X = signal + drift
+    X_car = common_average_reference(X)
+    # После CAR строковое среднее должно быть ≈ 0
+    np.testing.assert_allclose(X_car.mean(axis=1), np.zeros(100), atol=1e-10)
+    # Форма сохраняется
+    assert X_car.shape == X.shape
 
 
 def test_artifact_reject_epochs_2d() -> None:

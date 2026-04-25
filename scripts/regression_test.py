@@ -17,7 +17,7 @@ the ``marker`` column value if the column is absent/all-negative.
 Parameters (can be tweaked via CLI flags):
     --baseline-ms   Pre-stimulus baseline window (default 100 ms)
     --x-ms          AUC window start after stimulus (default 200 ms)
-    --y-ms          AUC window end after stimulus   (default 400 ms)
+    --y-ms          AUC window end after stimulus   (default 600 ms)
     --artifact-uv   Epoch artifact rejection threshold µV (default 150, 0=off)
     --channels      Comma-separated 1-based channel indices to use, e.g. 1,2,4
                     Default: all channels in the file.
@@ -40,7 +40,7 @@ _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from p300_analysis.signal_processing import bandpass_filter, detect_bad_channels
+from p300_analysis.signal_processing import bandpass_filter, common_average_reference, detect_bad_channels
 from p300_analysis.erp_compute import (
     build_averaged_erp,
     compute_corrected_and_integrated,
@@ -86,9 +86,10 @@ def analyse_file(
     *,
     baseline_ms: int = 100,
     x_ms: int = 200,
-    y_ms: int = 400,
-    artifact_uv: float = 150.0,
+    y_ms: int = 600,
+    artifact_uv: float = 60.0,
     channel_indices: Optional[List[int]] = None,
+    use_car: bool = False,
 ) -> Dict:
     """Run P300 pipeline on one continuous CSV and return a result dict."""
     header, data_rows = _read_csv(path)
@@ -152,8 +153,10 @@ def analyse_file(
     # Build 2-D signal array (T, C)
     sig_2d = np.stack(signal_rows)  # (T, C)
 
-    # Bandpass filter
+    # Bandpass filter + CAR
     sig_2d = bandpass_filter(sig_2d, fs)
+    if use_car:
+        sig_2d = common_average_reference(sig_2d)
 
     # Average selected channels → 1-D (same as qt_window offline path)
     sig = sig_2d.mean(axis=1)
@@ -267,11 +270,13 @@ def main() -> None:
     parser.add_argument("paths", nargs="+", help="CSV files or directories")
     parser.add_argument("--baseline-ms", type=int, default=100, metavar="MS")
     parser.add_argument("--x-ms", type=int, default=200, metavar="MS")
-    parser.add_argument("--y-ms", type=int, default=400, metavar="MS")
+    parser.add_argument("--y-ms", type=int, default=600, metavar="MS")
     parser.add_argument("--artifact-uv", type=float, default=60.0, metavar="UV",
                         help="Epoch rejection threshold µV (0 = off). Default 60 µV for hardware-filtered (LPF 35 Hz) data")
     parser.add_argument("--channels", type=str, default="",
                         help="Comma-separated 1-based channel indices, e.g. 1,2,4")
+    parser.add_argument("--no-car", action="store_true",
+                        help="Disable Common Average Reference (CAR). CAR is on by default.")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -298,6 +303,7 @@ def main() -> None:
                 y_ms=args.y_ms,
                 artifact_uv=args.artifact_uv,
                 channel_indices=channel_indices,
+                use_car=not args.no_car,
             )
             results.append(r)
         except Exception as e:

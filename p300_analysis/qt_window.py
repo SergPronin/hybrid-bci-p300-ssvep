@@ -69,7 +69,7 @@ from p300_analysis.erp_compute import (
     compute_winner_metrics,
     winner_display_lines,
 )
-from p300_analysis.signal_processing import bandpass_filter, detect_bad_channels
+from p300_analysis.signal_processing import bandpass_filter, common_average_reference, detect_bad_channels
 from p300_analysis.lsl_streams import (
     find_allowed_eeg_streams,
     resolve_marker_streams,
@@ -793,6 +793,16 @@ class P300AnalyzerWindow(QMainWindow):
         self.spin_artifact_thresh.valueChanged.connect(self._on_params_changed)
         sidebar_layout.addWidget(self.spin_artifact_thresh)
 
+        self.chk_car = QCheckBox("CAR (Common Average Reference)")
+        self.chk_car.setChecked(False)
+        self.chk_car.setToolTip(
+            "Вычитает среднее по всем каналам из каждого отсчёта.\n"
+            "Полезно при 32+ каналах. При 4–8 каналах P300 присутствует\n"
+            "на большинстве каналов — CAR ослабит сигнал."
+        )
+        self.chk_car.stateChanged.connect(self._on_params_changed)
+        sidebar_layout.addWidget(self.chk_car)
+
         self._bad_ch_label = QLabel("")
         self._bad_ch_label.setWordWrap(True)
         self._bad_ch_label.setStyleSheet(
@@ -1504,6 +1514,8 @@ class P300AnalyzerWindow(QMainWindow):
         time_arr = np.asarray(self.eeg_times, dtype=np.float64) if self.eeg_times else np.empty(0)
         buf_2d_raw = np.stack(self.eeg_buffer)
         buf_2d = bandpass_filter(buf_2d_raw, srate)
+        if self.chk_car.isChecked():
+            buf_2d = common_average_reference(buf_2d)
         _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
         _valid = [c for c in _roi if 0 <= c < buf_2d.shape[1]] if buf_2d.ndim == 2 else []
 
@@ -2490,6 +2502,8 @@ class P300AnalyzerWindow(QMainWindow):
             # eeg_buffer stores (n_channels,) per timepoint; keep per-channel for epoch storage
             buf_2d_raw = np.stack(self.eeg_buffer)  # (n_timepoints, n_channels)
             buf_2d = bandpass_filter(buf_2d_raw, srate)
+            if self.chk_car.isChecked():
+                buf_2d = common_average_reference(buf_2d)
             _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
             _valid = [c for c in _roi if 0 <= c < buf_2d.shape[1]] if buf_2d.ndim == 2 else []
             new_pending: List[Tuple[float, str]] = []
@@ -3180,6 +3194,8 @@ class P300AnalyzerWindow(QMainWindow):
         # Build 2D signal array (T, n_ch) and apply bandpass
         sig_raw_2d = np.stack(signal_rows)  # (T, n_ch)
         sig_2d = bandpass_filter(sig_raw_2d, fs_csv)
+        if self.chk_car.isChecked():
+            sig_2d = common_average_reference(sig_2d)
 
         onsets = 0
         prev = 0
