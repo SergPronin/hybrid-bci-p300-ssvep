@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -128,6 +129,11 @@ class P300AnalyzerWindow(QMainWindow):
         self._monitor_markers_win: Optional[QWidget] = None
         self._monitor_selected_win: Optional[QWidget] = None
         self._epoch_summary_win: Optional[QWidget] = None
+        self._ch_health_win: Optional[QWidget] = None
+        self._ch_health_rows: List[dict] = []
+        self._ch_health_grid: Optional[Any] = None
+        self._ch_health_container: Optional[QWidget] = None
+        self._ch_health_scroll: Optional[QScrollArea] = None
         self._epoch_summary_text: Optional[QTextEdit] = None
         # Метки времени последних принятых маркеров вспышек (для оценки ISI). Ось произвольная.
         self._stimulus_marker_ts_history: Deque[float] = deque(maxlen=256)
@@ -299,7 +305,7 @@ class P300AnalyzerWindow(QMainWindow):
             w.setWindowTitle(title)
             w.setFixedSize(440, 220)
             w.setAttribute(Qt.WA_QuitOnClose, False)
-            w.setStyleSheet("background-color: #121212; color: #e0e0e0;")
+            w.setStyleSheet("background-color: #0a0a0a; color: #e8e8e8;")
             lay = QVBoxLayout(w)
             lay.setContentsMargins(8, 8, 8, 8)
             st = QLabel("Нет подключения к LSL.")
@@ -332,7 +338,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._monitor_selected_win.setWindowTitle("Монитор: выбранные каналы ROI")
         self._monitor_selected_win.setFixedSize(520, 520)
         self._monitor_selected_win.setAttribute(Qt.WA_QuitOnClose, False)
-        self._monitor_selected_win.setStyleSheet("background-color: #121212; color: #e0e0e0;")
+        self._monitor_selected_win.setStyleSheet("background-color: #0a0a0a; color: #e8e8e8;")
         selected_lay = QVBoxLayout(self._monitor_selected_win)
         selected_lay.setContentsMargins(8, 8, 8, 8)
         self._monitor_selected_status = QLabel("ROI: каналы не выбраны.")
@@ -363,7 +369,7 @@ class P300AnalyzerWindow(QMainWindow):
         self._epoch_summary_win.setModal(False)
         self._epoch_summary_win.setFixedSize(420, 320)
         self._epoch_summary_win.setAttribute(Qt.WA_QuitOnClose, False)
-        self._epoch_summary_win.setStyleSheet("background-color: #121212; color: #e0e0e0;")
+        self._epoch_summary_win.setStyleSheet("background-color: #0a0a0a; color: #e8e8e8;")
         es_lay = QVBoxLayout(self._epoch_summary_win)
         es_lay.setContentsMargins(8, 8, 8, 8)
         es_hint = QLabel(
@@ -381,6 +387,51 @@ class P300AnalyzerWindow(QMainWindow):
         es_lay.addWidget(es_hint)
         es_lay.addWidget(self._epoch_summary_text, stretch=1)
         self._epoch_summary_win.hide()
+
+        # --- Channel Health Window ---
+        self._ch_health_win = QDialog(self)
+        self._ch_health_win.setWindowTitle("Состояние каналов ЭЭГ")
+        self._ch_health_win.setModal(False)
+        self._ch_health_win.setAttribute(Qt.WA_QuitOnClose, False)
+        self._ch_health_win.resize(520, 400)
+        ch_main_lay = QVBoxLayout(self._ch_health_win)
+        ch_main_lay.setContentsMargins(10, 10, 10, 10)
+
+        hint = QLabel(
+            "Оценка шума по последним ~4 с данных буфера. "
+            "⚠ — высокий шум (std или abs_mean >> медиана). "
+            "Рекомендуется снять галочку у плохих каналов в ROI."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #aaa; font-size: 11px; padding-bottom: 4px;")
+        ch_main_lay.addWidget(hint)
+
+        self._ch_health_scroll = QScrollArea()
+        self._ch_health_scroll.setWidgetResizable(True)
+        self._ch_health_scroll.setFrameShape(QFrame.NoFrame)
+        self._ch_health_container = QWidget()
+        self._ch_health_grid = QGridLayout(self._ch_health_container)
+        self._ch_health_grid.setContentsMargins(4, 4, 4, 4)
+        self._ch_health_grid.setSpacing(4)
+        self._ch_health_grid.setColumnStretch(1, 1)
+        self._ch_health_scroll.setWidget(self._ch_health_container)
+        ch_main_lay.addWidget(self._ch_health_scroll, stretch=1)
+
+        ch_btn_row = QHBoxLayout()
+        btn_disable_bad = QPushButton("Отключить плохие")
+        btn_disable_bad.setStyleSheet(
+            "QPushButton { background-color: #5a1a1a; color: #ff8c8c; "
+            "border: 1px solid #8a2a2a; border-radius: 4px; padding: 6px 12px; } "
+            "QPushButton:hover { background-color: #701e1e; }"
+        )
+        btn_disable_bad.clicked.connect(self._on_disable_bad_channels)
+        btn_refresh_health = QPushButton("Обновить")
+        btn_refresh_health.clicked.connect(self._refresh_ch_health)
+        ch_btn_row.addWidget(btn_disable_bad)
+        ch_btn_row.addWidget(btn_refresh_health)
+        ch_btn_row.addStretch()
+        ch_main_lay.addLayout(ch_btn_row)
+        self._ch_health_win.hide()
 
     def _position_epoch_summary_win(self) -> None:
         """Ставит окно сводки рядом с главным, но целиком в пределах availableGeometry()."""
@@ -431,26 +482,114 @@ class P300AnalyzerWindow(QMainWindow):
     def _setup_ui(self) -> None:
         self.setStyleSheet(
             """
-            QMainWindow { background-color: #0a0a0a; color: white; }
-            QLabel { color: white; }
-            QPushButton {
-                background-color: #333;
-                color: white;
+            QMainWindow, QWidget {
+                background-color: #0a0a0a;
+                color: #e8e8e8;
+            }
+            QLabel {
+                color: #e8e8e8;
+                background-color: transparent;
+            }
+            QCheckBox {
+                color: #e8e8e8;
+                background-color: transparent;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px; height: 14px;
+                border: 1px solid #666;
                 border-radius: 3px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #007bff;
+                border-color: #007bff;
+            }
+            QPushButton {
+                background-color: #2d2d2d;
+                color: #e8e8e8;
+                border: 1px solid #555;
+                border-radius: 4px;
                 padding: 8px 10px;
             }
-            QPushButton:hover { background-color: #444; }
-            QSpinBox {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
+            QPushButton:hover { background-color: #3a3a3a; }
+            QPushButton:disabled { background-color: #1e1e1e; color: #555; border-color: #333; }
+            QSpinBox, QDoubleSpinBox {
+                background-color: #1e1e1e;
+                color: #e8e8e8;
                 border: 1px solid #555;
                 border-radius: 3px;
                 padding: 4px;
                 min-width: 72px;
             }
-            QSpinBox::up-button, QSpinBox::down-button {
-                background-color: #3d3d3d;
+            QSpinBox::up-button, QSpinBox::down-button,
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+                background-color: #2d2d2d;
                 border: none;
+                width: 16px;
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                image: none; border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 6px solid #aaa; width: 0; height: 0;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                image: none; border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 6px solid #aaa; width: 0; height: 0;
+            }
+            QComboBox {
+                background-color: #1e1e1e;
+                color: #e8e8e8;
+                border: 1px solid #555;
+                border-radius: 3px;
+                padding: 5px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #e8e8e8;
+                selection-background-color: #007bff;
+                border: 1px solid #555;
+            }
+            QScrollArea { background-color: #0a0a0a; border: none; }
+            QScrollBar:vertical {
+                background: #1a1a1a; width: 8px; border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #444; border-radius: 4px; min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover { background: #666; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal {
+                background: #1a1a1a; height: 8px; border-radius: 4px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #444; border-radius: 4px; min-width: 20px;
+            }
+            QScrollBar::handle:horizontal:hover { background: #666; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+            QTextEdit, QPlainTextEdit {
+                background-color: #111;
+                color: #e8e8e8;
+                border: 1px solid #333;
+            }
+            QGroupBox {
+                color: #aaa;
+                border: 1px solid #333;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 6px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                color: #888;
+            }
+            QToolTip {
+                background-color: #2d2d2d;
+                color: #e8e8e8;
+                border: 1px solid #555;
+                padding: 4px;
             }
             """
         )
@@ -470,9 +609,7 @@ class P300AnalyzerWindow(QMainWindow):
         # Выбор потока
         stream_layout = QHBoxLayout()
         self.combo_streams = QComboBox()
-        self.combo_streams.setStyleSheet(
-            "background-color: #2d2d2d; color: white; padding: 5px; border: 1px solid #555; border-radius: 3px;"
-        )
+        self.combo_streams.setStyleSheet("")
         self.btn_refresh_streams = QPushButton("🔄")
         self.btn_refresh_streams.setFixedWidth(40)
         self.btn_refresh_streams.clicked.connect(self._on_refresh_streams_clicked)
@@ -560,6 +697,15 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_selected_channels_window.clicked.connect(self._on_selected_channels_window_clicked)
         sidebar_layout.addWidget(self.btn_selected_channels_window)
 
+        self.btn_ch_health = QPushButton("📊 Состояние каналов")
+        self.btn_ch_health.setStyleSheet(
+            "QPushButton { background-color: #1a3a4a; color: #7ecfed; font-weight: bold; "
+            "padding: 8px 12px; border-radius: 6px; border: 1px solid #2a6a8a; } "
+            "QPushButton:hover { background-color: #1e4a60; }"
+        )
+        self.btn_ch_health.clicked.connect(self._on_ch_health_clicked)
+        sidebar_layout.addWidget(self.btn_ch_health)
+
         sidebar_layout.addSpacing(10)
         sidebar_layout.addWidget(QLabel("Параметры анализа:"))
 
@@ -582,11 +728,11 @@ class P300AnalyzerWindow(QMainWindow):
         self.scroll_channels.setWidgetResizable(True)
         self.scroll_channels.setMaximumHeight(180)
         self.scroll_channels.setStyleSheet(
-            "QScrollArea { border: 1px solid #333; background-color: #1a1a1a; }"
+            "QScrollArea { border: 1px solid #2a2a2a; background-color: #111; }"
         )
 
         self.channels_container = QWidget()
-        self.channels_container.setStyleSheet("background-color: transparent;")
+        self.channels_container.setStyleSheet("background-color: #111;")
         self.channels_cb_layout = QVBoxLayout(self.channels_container)
         self.channels_cb_layout.setSpacing(2)
         self.scroll_channels.setWidget(self.channels_container)
@@ -625,9 +771,7 @@ class P300AnalyzerWindow(QMainWindow):
         sidebar_layout.addSpacing(8)
         sidebar_layout.addWidget(QLabel("Как выбрать победителя:"))
         self.combo_winner_mode = QComboBox()
-        self.combo_winner_mode.setStyleSheet(
-            "background-color: #2d2d2d; color: white; padding: 5px; border: 1px solid #555; border-radius: 3px;"
-        )
+        self.combo_winner_mode.setStyleSheet("")
         self.combo_winner_mode.addItem(
             "Интегрирование по модулю |corrected| в окне [X–Y]", WINNER_MODE_AUC
         )
@@ -994,6 +1138,84 @@ class P300AnalyzerWindow(QMainWindow):
         self._monitor_selected_win.show()
         self._monitor_selected_win.raise_()
         self._monitor_selected_win.activateWindow()
+
+    # ------------------------------------------------------------------
+    # Channel Health Panel
+    # ------------------------------------------------------------------
+    def _on_ch_health_clicked(self) -> None:
+        if self._ch_health_win is None:
+            return
+        self._refresh_ch_health()
+        self._ch_health_win.show()
+        self._ch_health_win.raise_()
+        self._ch_health_win.activateWindow()
+
+    def _refresh_ch_health(self) -> None:
+        """Rebuild the channel-health grid from the last ~4 s of raw EEG buffer."""
+        if self._ch_health_win is None or self._ch_health_grid is None:
+            return
+
+        buf = list(self.eeg_buffer)
+        if len(buf) < 50:
+            return
+
+        data = np.stack(buf[-min(len(buf), 2000):])  # (T, C)
+        bad_indices, abs_means, stds = detect_bad_channels(data)
+
+        labels = getattr(self, "_channel_labels", None) or [
+            f"Канал {i + 1}" for i in range(data.shape[1])
+        ]
+
+        # Clear old grid
+        while self._ch_health_grid.count():
+            item = self._ch_health_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        HDR_STYLE = "color: #888; font-size: 11px; font-weight: bold; padding: 2px 6px;"
+        for col, hdr in enumerate(["Канал", "Abs Mean (мкВ)", "STD (мкВ)", "Статус"]):
+            lbl = QLabel(hdr)
+            lbl.setStyleSheet(HDR_STYLE)
+            self._ch_health_grid.addWidget(lbl, 0, col)
+
+        self._ch_health_rows = []
+        for i in range(data.shape[1]):
+            row = i + 1
+            is_bad = i in bad_indices
+
+            ch_lbl = QLabel(labels[i] if i < len(labels) else f"Канал {i + 1}")
+            ch_lbl.setStyleSheet("padding: 2px 6px;")
+
+            mean_lbl = QLabel(f"{abs_means[i]:.1f}")
+            mean_lbl.setStyleSheet("padding: 2px 6px; font-family: monospace;")
+
+            std_lbl = QLabel(f"{stds[i]:.1f}")
+            std_lbl.setStyleSheet("padding: 2px 6px; font-family: monospace;")
+
+            if is_bad:
+                status_lbl = QLabel("⚠ ШУМ")
+                status_lbl.setStyleSheet(
+                    "color: #ff6b6b; font-weight: bold; padding: 2px 6px;"
+                )
+                for w in (ch_lbl, mean_lbl, std_lbl):
+                    w.setStyleSheet(w.styleSheet() + " color: #ff9999;")
+            else:
+                status_lbl = QLabel("✓ OK")
+                status_lbl.setStyleSheet("color: #4caf82; padding: 2px 6px;")
+
+            self._ch_health_grid.addWidget(ch_lbl, row, 0)
+            self._ch_health_grid.addWidget(mean_lbl, row, 1)
+            self._ch_health_grid.addWidget(std_lbl, row, 2)
+            self._ch_health_grid.addWidget(status_lbl, row, 3)
+            self._ch_health_rows.append({"ch_idx": i, "is_bad": is_bad})
+
+    def _on_disable_bad_channels(self) -> None:
+        """Uncheck all bad channels in the ROI checkbox list."""
+        for row in self._ch_health_rows:
+            if row["is_bad"]:
+                idx = row["ch_idx"]
+                if idx < len(self.channel_checkboxes):
+                    self.channel_checkboxes[idx].setChecked(False)
 
     def _refresh_selected_channels_plots(self, selected: List[int]) -> None:
         if self._selected_channels_scroll_layout is None:
@@ -1694,6 +1916,9 @@ class P300AnalyzerWindow(QMainWindow):
                 pass
         if hasattr(self, "_bad_ch_label"):
             self._bad_ch_label.setText(bad_ch_text)
+        # Live-update health panel if it's open
+        if self._ch_health_win is not None and self._ch_health_win.isVisible():
+            self._refresh_ch_health()
 
         if not stim_keys:
             self._clear_plots()
