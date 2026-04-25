@@ -1,0 +1,13 @@
+#!/bin/bash
+# Pre-commit: update both graphs so detect_changes() reflects current files.
+
+echo "🔍 Syncing graphs before commit..."
+
+# GitNexus incremental reindex
+npx gitnexus analyze --skip-git > /dev/null 2>&1
+
+# CodeGraph incremental sync
+codegraph sync > /dev/null 2>&1
+
+echo "✅ Graphs ready"
+exit 0

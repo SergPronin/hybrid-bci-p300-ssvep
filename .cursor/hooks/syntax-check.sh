@@ -1,34 +1,25 @@
 #!/bin/bash
-# Syntax-check any edited Python file in p300_analysis/
-# Receives hook JSON on stdin; returns allow with optional context.
+# afterFileEdit hook:
+#   1. Syntax-check edited Python files in p300_analysis/
+#   2. Trigger incremental graph update in background (CodeGraph mark-dirty + GitNexus)
 
 input=$(cat)
 
-# Extract the file path from the hook input
 file_path=$(echo "$input" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
-    # postToolUse / afterFileEdit provides tool_input
     path = (d.get('tool_input') or {}).get('path', '')
     print(path)
 except Exception:
     print('')
 " 2>/dev/null)
 
-if [[ -z "$file_path" ]]; then
-    echo '{"additional_context": ""}'
-    exit 0
-fi
+context_parts=()
 
-# Only check .py files
-if [[ "$file_path" != *.py ]]; then
-    echo '{"additional_context": ""}'
-    exit 0
-fi
-
-# Run syntax check
-result=$(python3 -c "
+# --- Syntax check (only .py files) ---
+if [[ "$file_path" == *.py ]]; then
+    result=$(python3 -c "
 import ast, sys
 try:
     with open('$file_path', 'r') as f:
@@ -41,10 +32,26 @@ except FileNotFoundError:
     print('FILE NOT FOUND')
 " 2>&1)
 
-if [[ "$result" == "OK" ]]; then
-    echo '{"additional_context": ""}'
+    if [[ "$result" != "OK" ]]; then
+        context_parts+=("⚠ Syntax: $file_path — $result")
+    fi
+fi
+
+# --- Graph update in background (non-blocking) ---
+if [[ "$file_path" == *.py ]]; then
+    # CodeGraph: mark dirty immediately (< 1ms), sync will happen lazily
+    codegraph mark-dirty . > /dev/null 2>&1 &
+
+    # GitNexus: incremental analyze in background (~0.8s, non-blocking for Cursor)
+    npx gitnexus analyze --skip-git > /dev/null 2>&1 &
+fi
+
+# --- Output ---
+if [[ ${#context_parts[@]} -gt 0 ]]; then
+    msg=$(printf '%s\n' "${context_parts[@]}")
+    echo "{\"additional_context\": \"$msg\"}"
 else
-    echo "{\"additional_context\": \"Syntax check failed for $file_path: $result — fix before running the app.\"}"
+    echo '{"additional_context": ""}'
 fi
 
 exit 0
