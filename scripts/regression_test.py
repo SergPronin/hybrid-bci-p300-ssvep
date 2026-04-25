@@ -16,11 +16,11 @@ the ``marker`` column value if the column is absent/all-negative.
 
 Parameters (can be tweaked via CLI flags):
     --baseline-ms   Pre-stimulus baseline window (default 100 ms)
-    --x-ms          AUC window start after stimulus (default 625 ms)
-    --y-ms          AUC window end after stimulus   (default 800 ms)
-    --artifact-uv   Epoch artifact rejection threshold µV (default 150, 0=off)
+    --x-ms          AUC window start after stimulus (default 550 ms)
+    --y-ms          AUC window end after stimulus   (default 725 ms)
+    --artifact-uv   Epoch artifact rejection threshold µV (default 60, 0=off)
     --channels      Comma-separated 1-based channel indices to use, e.g. 1,2,4
-                    Default: all channels in the file.
+                    Default: channel 4 from the recommended global profile.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from p300_analysis.marker_parsing import decode_stim_tile_id
+from p300_analysis.analysis_profiles import ANALYSIS_PROFILE_GENERAL, format_channels_1idx, get_analysis_profile
 from p300_analysis.constants import EPOCH_DURATION_MS
 from p300_analysis.signal_processing import bandpass_filter, common_average_reference, detect_bad_channels
 from p300_analysis.erp_compute import (
@@ -49,6 +50,11 @@ from p300_analysis.erp_compute import (
     compute_winner_metrics,
 )
 from p300_analysis.winner_selection import WINNER_MODE_AUC
+
+
+DEFAULT_PROFILE = get_analysis_profile(ANALYSIS_PROFILE_GENERAL)
+DEFAULT_CHANNELS_1BASED = [int(ch) + 1 for ch in DEFAULT_PROFILE.roi_channels_0idx]
+DEFAULT_CHANNELS_TEXT = format_channels_1idx(DEFAULT_PROFILE.roi_channels_0idx)
 
 
 # ---------------------------------------------------------------------------
@@ -86,9 +92,9 @@ def _parse_num(s: str) -> Optional[float]:
 def analyse_file(
     path: Path,
     *,
-    baseline_ms: int = 100,
-    x_ms: int = 625,
-    y_ms: int = 800,
+    baseline_ms: int = DEFAULT_PROFILE.baseline_ms,
+    x_ms: int = DEFAULT_PROFILE.window_x_ms,
+    y_ms: int = DEFAULT_PROFILE.window_y_ms,
     artifact_uv: float = 60.0,
     channel_indices: Optional[List[int]] = None,
     use_car: bool = False,
@@ -273,13 +279,15 @@ def _collect_files(paths: List[str]) -> List[Path]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="+", help="CSV files or directories")
-    parser.add_argument("--baseline-ms", type=int, default=100, metavar="MS")
-    parser.add_argument("--x-ms", type=int, default=625, metavar="MS")
-    parser.add_argument("--y-ms", type=int, default=800, metavar="MS")
+    parser.add_argument("--baseline-ms", type=int, default=DEFAULT_PROFILE.baseline_ms, metavar="MS")
+    parser.add_argument("--x-ms", type=int, default=DEFAULT_PROFILE.window_x_ms, metavar="MS")
+    parser.add_argument("--y-ms", type=int, default=DEFAULT_PROFILE.window_y_ms, metavar="MS")
     parser.add_argument("--artifact-uv", type=float, default=60.0, metavar="UV",
                         help="Epoch rejection threshold µV (0 = off). Default 60 µV for hardware-filtered (LPF 35 Hz) data")
     parser.add_argument("--channels", type=str, default="",
-                        help="Comma-separated 1-based channel indices, e.g. 1,2,4")
+                        help=f"Comma-separated 1-based channel indices, e.g. 1,2,4. Default: {DEFAULT_CHANNELS_TEXT}")
+    parser.add_argument("--all-channels", action="store_true",
+                        help="Use all channels instead of the recommended default ROI.")
     parser.add_argument("--car", action="store_true",
                         help="Enable Common Average Reference (CAR). Default is OFF.")
     parser.add_argument("--no-car", action="store_true",
@@ -287,8 +295,10 @@ def main() -> None:
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
-    channel_indices: Optional[List[int]] = None
-    if args.channels:
+    channel_indices: Optional[List[int]] = list(DEFAULT_CHANNELS_1BASED)
+    if args.all_channels:
+        channel_indices = None
+    elif args.channels:
         try:
             channel_indices = [int(c.strip()) for c in args.channels.split(",") if c.strip()]
         except ValueError:
@@ -357,9 +367,10 @@ def main() -> None:
         print("Нет файлов с известной целевой плиткой (target_tile_id). "
               "Для автоматической проверки нужна колонка target_tile_id >= 0.")
     print()
+    channels_info = "all" if channel_indices is None else ",".join(str(ch) for ch in channel_indices)
     print("Параметры анализа: "
           f"baseline={args.baseline_ms} мс, AUC=[{args.x_ms}–{args.y_ms}] мс, "
-          f"artifact={args.artifact_uv} мкВ")
+          f"artifact={args.artifact_uv} мкВ, channels={channels_info}")
 
 
 if __name__ == "__main__":

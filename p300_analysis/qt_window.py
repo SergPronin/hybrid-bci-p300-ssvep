@@ -10,7 +10,7 @@ import csv
 import json
 from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PyQt5.QtCore import QPoint, QTimer, Qt
@@ -53,6 +53,13 @@ from p300_analysis.constants import (
     WINNER_LABEL_STYLE_IDLE,
     WINNER_LABEL_STYLE_MATCH,
     WINNER_LABEL_STYLE_MISMATCH,
+)
+from p300_analysis.analysis_profiles import (
+    ANALYSIS_PROFILE_GENERAL,
+    ANALYSIS_PROFILE_RECENT,
+    default_roi_channels_0idx,
+    format_channels_1idx,
+    get_analysis_profile,
 )
 from p300_analysis.debug_ndjson import debug_ndjson
 from p300_analysis.epoch_geometry import EpochGeometry
@@ -152,6 +159,9 @@ class P300AnalyzerWindow(QMainWindow):
         self._selected_channel_curves: Dict[int, Any] = {}
         self._eeg_channel_monitor_bufs: List[Deque[float]] = []
         self._channel_labels: List[str] = []
+        self._analysis_profile_key: str = ANALYSIS_PROFILE_GENERAL
+        self._analysis_profile_hint_label: Optional[QLabel] = None
+        self._analysis_profile_buttons: Dict[str, QPushButton] = {}
 
         self._recording_epochs: bool = False
         self._dbg_epoch_lag_n: int = 0
@@ -237,6 +247,78 @@ class P300AnalyzerWindow(QMainWindow):
         return float(
             diffs[mid] if len(diffs) % 2 == 1 else (diffs[mid - 1] + diffs[mid]) / 2.0
         )
+
+    @staticmethod
+    def _analysis_profile_button_style(active: bool) -> str:
+        if active:
+            return (
+                "QPushButton { background-color: #1f6f43; color: white; font-weight: bold; "
+                "padding: 6px 8px; border-radius: 6px; border: 1px solid #30a46c; } "
+                "QPushButton:hover { background-color: #268a53; }"
+            )
+        return (
+            "QPushButton { background-color: #24313d; color: #cde7ff; font-weight: bold; "
+            "padding: 6px 8px; border-radius: 6px; border: 1px solid #3d5b73; } "
+            "QPushButton:hover { background-color: #2d4050; }"
+        )
+
+    def _set_channel_selection(self, selected_0idx: Sequence[int]) -> None:
+        if not self.channel_checkboxes:
+            return
+        selected = {
+            int(ch)
+            for ch in selected_0idx
+            if 0 <= int(ch) < len(self.channel_checkboxes)
+        }
+        if not selected:
+            selected = set(range(len(self.channel_checkboxes)))
+        for idx, cb in enumerate(self.channel_checkboxes):
+            cb.blockSignals(True)
+            cb.setChecked(idx in selected)
+            cb.blockSignals(False)
+        self._refresh_selected_channels_plots(sorted(selected))
+
+    def _update_analysis_profile_ui(self) -> None:
+        profile = get_analysis_profile(self._analysis_profile_key)
+        if self._analysis_profile_hint_label is not None:
+            channels = format_channels_1idx(profile.roi_channels_0idx)
+            self._analysis_profile_hint_label.setText(
+                f"Активный пресет: {profile.title}. {profile.description} "
+                f"Baseline {profile.baseline_ms} мс."
+            )
+            self._analysis_profile_hint_label.setToolTip(
+                f"Окно [{profile.window_x_ms}-{profile.window_y_ms}] мс, ROI каналы {channels}."
+            )
+        for key, btn in self._analysis_profile_buttons.items():
+            btn.setStyleSheet(self._analysis_profile_button_style(key == self._analysis_profile_key))
+
+    def _apply_analysis_profile(self, profile_key: str, *, announce: bool = True) -> None:
+        profile = get_analysis_profile(profile_key)
+        self._analysis_profile_key = profile.key
+
+        for spin, value in (
+            (self.spin_baseline, profile.baseline_ms),
+            (self.spin_x, profile.window_x_ms),
+            (self.spin_y, profile.window_y_ms),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(int(value))
+            spin.blockSignals(False)
+
+        if self.channel_checkboxes:
+            self._set_channel_selection(
+                default_roi_channels_0idx(len(self.channel_checkboxes), profile.key)
+            )
+
+        self._update_analysis_profile_ui()
+        self._on_params_changed()
+
+        if announce:
+            channels = format_channels_1idx(profile.roi_channels_0idx)
+            self._set_status(
+                f"Применён пресет: {profile.title}. "
+                f"Окно [{profile.window_x_ms}-{profile.window_y_ms}] мс, ROI {channels}."
+            )
 
     def _format_epoch_summary_text(self) -> str:
         lines = [
@@ -489,6 +571,7 @@ class P300AnalyzerWindow(QMainWindow):
             self._position_epoch_summary_win()
 
     def _setup_ui(self) -> None:
+        default_profile = get_analysis_profile(self._analysis_profile_key)
         self.setStyleSheet(
             """
             QMainWindow, QWidget {
@@ -720,10 +803,20 @@ class P300AnalyzerWindow(QMainWindow):
 
         self.spin_baseline = QSpinBox()
         self.spin_baseline.setRange(1, 800)
-        self.spin_baseline.setValue(100)
+        self.spin_baseline.setValue(default_profile.baseline_ms)
         self.spin_baseline.setSuffix(" мс")
         self.spin_baseline.setKeyboardTracking(False)
         self.spin_baseline.valueChanged.connect(self._on_params_changed)
+
+        profile_btn_layout = QHBoxLayout()
+        for key in (ANALYSIS_PROFILE_GENERAL, ANALYSIS_PROFILE_RECENT):
+            profile = get_analysis_profile(key)
+            btn = QPushButton(profile.button_label)
+            btn.clicked.connect(
+                lambda _checked=False, profile_key=key: self._apply_analysis_profile(profile_key)
+            )
+            self._analysis_profile_buttons[key] = btn
+            profile_btn_layout.addWidget(btn)
 
         # Блок выбора каналов (ROI)
         btn_ch_layout = QHBoxLayout()
@@ -750,14 +843,14 @@ class P300AnalyzerWindow(QMainWindow):
 
         self.spin_x = QSpinBox()
         self.spin_x.setRange(0, 799)
-        self.spin_x.setValue(625)
+        self.spin_x.setValue(default_profile.window_x_ms)
         self.spin_x.setSuffix(" мс")
         self.spin_x.setKeyboardTracking(False)
         self.spin_x.valueChanged.connect(self._on_params_changed)
 
         self.spin_y = QSpinBox()
         self.spin_y.setRange(1, 800)
-        self.spin_y.setValue(800)
+        self.spin_y.setValue(default_profile.window_y_ms)
         self.spin_y.setKeyboardTracking(False)
         self.spin_y.valueChanged.connect(self._on_params_changed)
 
@@ -765,8 +858,14 @@ class P300AnalyzerWindow(QMainWindow):
             "Отключено. Запустите ЭЭГ, нажмите 🔄, выберите поток, «Подключиться к LSL», затем «Начать анализ»."
         )
         self._status_label.setWordWrap(True)
+        self._analysis_profile_hint_label = QLabel("")
+        self._analysis_profile_hint_label.setWordWrap(True)
+        self._analysis_profile_hint_label.setStyleSheet("color: #9fd3ff; font-size: 11px;")
 
         sidebar_layout.addSpacing(10)
+        sidebar_layout.addWidget(QLabel("Быстрый пресет:"))
+        sidebar_layout.addLayout(profile_btn_layout)
+        sidebar_layout.addWidget(self._analysis_profile_hint_label)
         sidebar_layout.addWidget(QLabel("Baseline (мс):"))
         sidebar_layout.addWidget(self.spin_baseline)
         sidebar_layout.addWidget(QLabel("Каналы ROI:"))
@@ -832,6 +931,7 @@ class P300AnalyzerWindow(QMainWindow):
 
         sidebar_layout.addSpacing(10)
         sidebar_layout.addWidget(self._status_label)
+        self._update_analysis_profile_ui()
 
         self.winner_label = QLabel("РЕЗУЛЬТАТ: ?")
         self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_IDLE)
@@ -1089,11 +1189,12 @@ class P300AnalyzerWindow(QMainWindow):
 
         for i in range(count):
             cb = QCheckBox(self._channel_labels[i])
-            cb.setChecked(True)
+            cb.setChecked(False)
             cb.setStyleSheet("color: white;")
             cb.stateChanged.connect(self._on_params_changed)
             self.channel_checkboxes.append(cb)
             self.channels_cb_layout.addWidget(cb)
+        self._set_channel_selection(default_roi_channels_0idx(count, self._analysis_profile_key))
         self.channels_cb_layout.addStretch()
         self._eeg_channel_monitor_bufs = [deque(maxlen=MONITOR_EEG_PLOT_MAX) for _ in range(count)]
         self._selected_channel_curves.clear()
@@ -1317,6 +1418,12 @@ class P300AnalyzerWindow(QMainWindow):
             cb.blockSignals(True)
             cb.setChecked(state)
             cb.blockSignals(False)
+        selected = (
+            list(range(len(self.channel_checkboxes)))
+            if state
+            else [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
+        )
+        self._refresh_selected_channels_plots(selected)
         self._on_params_changed()
 
     def _begin_connection_session(self) -> None:
