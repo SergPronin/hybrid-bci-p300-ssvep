@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Главное окно Qt онлайн P300-анализатора."""
 
+import datetime
 import logging
 import time
 import xml.etree.ElementTree as ET
@@ -2912,24 +2913,24 @@ class P300AnalyzerWindow(QMainWindow):
         opts = self._show_export_options_dialog()
         if opts is None:
             return
+
+        # Auto-generate path: <project_root>/saved_data/YYYYMMDD/HHMMSS_run{N}_{mode}.ext
         run_seq = self._last_run_export_data.get("run_seq") or 0
         mode = str(opts.get("mode") or "one_stim")
-        if mode == "all_stims":
-            default_name = f"exam_run_{run_seq}_all_stims"
-        elif mode == "continuous":
-            default_name = f"exam_run_{run_seq}_continuous"
-        else:
-            default_name = f"exam_run_{run_seq}_stim_{opts['stim_index']}"
         suffix_hint = {"csv": ".csv", "txt": ".txt", "xlsx": ".xlsx"}.get(opts["format"], ".csv")
-        default_dir = str((Path(__file__).resolve().parent.parent / "data" / "exports"))
-        selected_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Куда сохранить обследование",
-            str(Path(default_dir) / f"{default_name}{suffix_hint}"),
-            "CSV (*.csv);;TXT (*.txt);;Excel (*.xlsx);;All files (*.*)",
-        )
-        if not selected_path:
-            return
+        now = datetime.datetime.now()
+        date_str = now.strftime("%Y%m%d")
+        time_str = now.strftime("%H%M%S")
+        if mode == "all_stims":
+            stem = f"{time_str}_run{run_seq}_all_stims"
+        elif mode == "continuous":
+            stem = f"{time_str}_run{run_seq}_continuous"
+        else:
+            stem = f"{time_str}_run{run_seq}_stim{opts['stim_index']}"
+
+        save_dir = Path(__file__).resolve().parent.parent / "saved_data" / date_str
+        save_dir.mkdir(parents=True, exist_ok=True)
+        auto_path = save_dir / f"{stem}{suffix_hint}"
 
         try:
             if mode == "all_stims":
@@ -2942,7 +2943,7 @@ class P300AnalyzerWindow(QMainWindow):
                     return
                 created_files = export_run_data_all_stims(
                     run_data=self._last_run_export_data,
-                    output_path=Path(selected_path),
+                    output_path=auto_path,
                     file_format=str(opts["format"]),
                     selected_channels=opts["selected_channels"],
                 )
@@ -2950,7 +2951,7 @@ class P300AnalyzerWindow(QMainWindow):
                 cont_format = str(opts["format"]) if str(opts["format"]) in {"csv", "xlsx"} else "csv"
                 cpath = export_run_continuous_csv(
                     run_data=self._last_run_export_data,
-                    output_path=Path(selected_path),
+                    output_path=auto_path,
                     selected_channels=opts["selected_channels"],
                     file_format=cont_format,
                 )
@@ -2960,7 +2961,7 @@ class P300AnalyzerWindow(QMainWindow):
             else:
                 created_files = export_run_data(
                     run_data=self._last_run_export_data,
-                    output_path=Path(selected_path),
+                    output_path=auto_path,
                     file_format=str(opts["format"]),
                     stim_index=int(opts["stim_index"]),
                     selected_channels=opts["selected_channels"],
@@ -2974,7 +2975,7 @@ class P300AnalyzerWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Сохранено",
-            f"Обследование сохранено.\n\nФайлы:\n{files_txt}",
+            f"Обследование сохранено.\n\n{files_txt}",
         )
 
     def _show_continuous_diagnostics(self, saved_path: Path) -> None:
