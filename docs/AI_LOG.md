@@ -303,3 +303,26 @@ python scripts/regression_test.py *.csv [--baseline-ms 100] [--x-ms 200] [--y-ms
 - Сбор новых сессий с `target_tile_id` → прогон `regression_test.py` для оценки точности после Sprint 1
 
 *Лог обновлён: 2026-04-25.*
+
+---
+
+## 2026-04-25 — Sprint 3: Per-channel ERP + нормализация каналов
+
+### Проблема (критическая)
+До этого коммита каналы усреднялись в 1D-сигнал **до** нарезки эпох. Шумный канал (`ch_3`, амплитуда в 3–5× больше) доминировал и маскировал P300 на тихих каналах.
+
+### Что сделано (коммит `dae28a5`)
+
+**`signal_processing.py`** — NEW `normalize_channels(X)`: делит каждый канал на его std.
+
+**`erp_compute.py`**
+- `artifact_reject_epochs` — работает с 2D `(epoch_len, n_ch)`.
+- `build_averaged_erp` — 2D path: normalize → stack → mean по эпохам → mean по каналам → `(n_stim, epoch_len)`. 1D path: прежнее поведение.
+
+**`qt_window.py`** — три места извлечения эпох: убрано `buf_arr = np.mean(channels)`, добавлено `buf_2d[start:end, valid_ch]` → `(epoch_len, n_ch)`.
+
+**`tests/test_winner_metrics.py`** — 3 новых теста: per-channel нормализация, noisy-channel dominance, artifact_reject 2D.
+
+### Результат: 27 passed, 6 skipped. GitNexus risk LOW.
+
+*Лог обновлён: 2026-04-25.*
