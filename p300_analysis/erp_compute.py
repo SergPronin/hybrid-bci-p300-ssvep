@@ -8,7 +8,7 @@ import numpy as np
 
 from p300_analysis.constants import MIN_EPOCHS_TO_DECIDE
 from p300_analysis.marker_parsing import stim_key_sort_key, stim_key_to_tile_digit
-from p300_analysis.signal_processing import baseline_correction, integrated_cumsum
+from p300_analysis.signal_processing import baseline_correction, integrated_cumsum, normalize_channels
 from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_SIGNED_MEAN
 
 
@@ -18,9 +18,8 @@ def artifact_reject_epochs(
 ) -> Tuple[List[np.ndarray], int]:
     """Отбрасывает эпохи, в которых амплитуда превышает порог.
 
-    epochs: список 1D массивов (epoch_len,)
-    threshold_uv: порог в мкВ (например 150.0)
-    Возвращает (clean_epochs, n_rejected).
+    epochs: список массивов (epoch_len,) или (epoch_len, n_ch).
+    np.max(np.abs) работает для обоих вариантов.
     """
     if threshold_uv <= 0:
         return epochs, 0
@@ -39,10 +38,17 @@ def build_averaged_erp(
     epoch_len: int,
     artifact_threshold_uv: Optional[float] = None,
 ) -> Tuple[List[str], np.ndarray, Dict[str, int]]:
-    """Усредняет эпохи по каждому стимулу после опциональной отбраковки артефактов.
+    """Усредняет эпохи по каждому стимулу.
 
-    Возвращает (stim_keys, raw_averaged, rejected_counts).
-    rejected_counts — dict stim_key → количество отброшенных эпох.
+    Поддерживает два формата эпох:
+    - 1D (epoch_len,)           — legacy / single-channel
+    - 2D (epoch_len, n_ch)      — per-channel (новый формат)
+
+    Для 2D каждая эпоха нормализуется по каналу (÷ std), затем каналы
+    усредняются → выравнивает влияние шумных каналов.
+
+    Возвращает (stim_keys, raw_averaged, rejected_counts),
+    где raw_averaged.shape = (n_stim, epoch_len) — совместимо с downstream.
     """
     stim_keys = [k for k, v in epochs_data.items() if v]
     stim_keys.sort(key=stim_key_sort_key)
@@ -60,8 +66,16 @@ def build_averaged_erp(
         if not epochs:
             rejected_counts[key] = rejected_counts.get(key, 0)
             continue
-        stack = np.stack([e[:epoch_len] for e in epochs], axis=0)
-        raw_averaged[i, :] = np.mean(stack, axis=0)
+
+        if epochs[0].ndim == 2:
+            # Per-channel path: normalize each epoch by channel std, then average
+            normed = [normalize_channels(ep[:epoch_len]) for ep in epochs]
+            stack = np.stack(normed, axis=0)          # (n_ep, epoch_len, n_ch)
+            mean_ch_erp = np.mean(stack, axis=0)      # (epoch_len, n_ch)
+            raw_averaged[i, :] = np.mean(mean_ch_erp, axis=-1)  # (epoch_len,)
+        else:
+            stack = np.stack([e[:epoch_len] for e in epochs], axis=0)
+            raw_averaged[i, :] = np.mean(stack, axis=0)
 
     return stim_keys, raw_averaged, rejected_counts
 

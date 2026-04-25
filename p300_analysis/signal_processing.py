@@ -43,6 +43,21 @@ def bandpass_filter(
     return filtfilt(b, a, X, axis=0).astype(X.dtype)
 
 
+def normalize_channels(X: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Нормализация по каналу: делит каждый канал на его std.
+
+    X: (n_samples, n_channels)  — нормализует по каждому столбцу.
+        (n_channels,)           — нормализует скаляром.
+    Каналы с std < eps не изменяются (защита от плоской линии).
+    """
+    if X.ndim == 1:
+        s = float(np.std(X))
+        return X / s if s > eps else X.copy()
+    stds = np.std(X, axis=0, keepdims=True)  # (1, n_ch)
+    stds = np.where(stds < eps, 1.0, stds)
+    return X / stds
+
+
 def detect_bad_channels(
     X: np.ndarray,
     std_thresh: float = 4.0,

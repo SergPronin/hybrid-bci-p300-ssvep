@@ -1506,12 +1506,6 @@ class P300AnalyzerWindow(QMainWindow):
         buf_2d = bandpass_filter(buf_2d_raw, srate)
         _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
         _valid = [c for c in _roi if 0 <= c < buf_2d.shape[1]] if buf_2d.ndim == 2 else []
-        if buf_2d.ndim == 2 and _valid:
-            buf_arr = np.mean(buf_2d[:, _valid], axis=1)
-        elif buf_2d.ndim == 2:
-            buf_arr = np.mean(buf_2d, axis=1)
-        else:
-            buf_arr = buf_2d.ravel()
 
         extracted_now = 0
         for marker_ts, stim_key in list(self.pending_markers):
@@ -1527,7 +1521,13 @@ class P300AnalyzerWindow(QMainWindow):
                 continue
             if start_idx is None or end_idx is None:
                 continue
-            epoch = buf_arr[start_idx:end_idx]
+            # Store per-channel epoch (epoch_len, n_ch) — channels normalized in build_averaged_erp
+            if buf_2d.ndim == 2 and _valid:
+                epoch = buf_2d[start_idx:end_idx, :][:, _valid]
+            elif buf_2d.ndim == 2:
+                epoch = buf_2d[start_idx:end_idx, :]
+            else:
+                epoch = buf_2d[start_idx:end_idx].reshape(-1, 1)
             if epoch.shape[0] != el:
                 continue
             self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
@@ -2487,17 +2487,11 @@ class P300AnalyzerWindow(QMainWindow):
             reserve_samples = max(1, int(EPOCH_RESERVE_MS / 1000.0 / dt_s))
 
             time_arr = np.asarray(self.eeg_times, dtype=np.float64) if self.eeg_times else np.empty(0)
-            # eeg_buffer stores (n_channels,) per timepoint; average ROI channels here
+            # eeg_buffer stores (n_channels,) per timepoint; keep per-channel for epoch storage
             buf_2d_raw = np.stack(self.eeg_buffer)  # (n_timepoints, n_channels)
             buf_2d = bandpass_filter(buf_2d_raw, srate)
             _roi = [i for i, cb in enumerate(self.channel_checkboxes) if cb.isChecked()]
             _valid = [c for c in _roi if 0 <= c < buf_2d.shape[1]] if buf_2d.ndim == 2 else []
-            if buf_2d.ndim == 2 and _valid:
-                buf_arr = np.mean(buf_2d[:, _valid], axis=1)
-            elif buf_2d.ndim == 2:
-                buf_arr = np.mean(buf_2d, axis=1)
-            else:
-                buf_arr = buf_2d.ravel()
             new_pending: List[Tuple[float, str]] = []
 
             for marker_ts, stim_key in self.pending_markers:
@@ -2557,7 +2551,13 @@ class P300AnalyzerWindow(QMainWindow):
                         )
                     continue
 
-                epoch = buf_arr[start_idx:end_idx]
+                # Per-channel epoch: (epoch_len, n_ch)
+                if buf_2d.ndim == 2 and _valid:
+                    epoch = buf_2d[start_idx:end_idx, :][:, _valid]
+                elif buf_2d.ndim == 2:
+                    epoch = buf_2d[start_idx:end_idx, :]
+                else:
+                    epoch = buf_2d[start_idx:end_idx].reshape(-1, 1)
                 if epoch.shape[0] == el:
                     n_epochs_before = sum(len(v) for v in self.epochs_data.values())
                     self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
@@ -3123,7 +3123,7 @@ class P300AnalyzerWindow(QMainWindow):
 
         t_rel: List[float] = []
         marker_vals: List[int] = []
-        signal_avg: List[float] = []
+        signal_rows: List[np.ndarray] = []  # per-sample (n_ch,) arrays
 
         for row in data_rows:
             if len(row) < len(header):
@@ -3144,7 +3144,7 @@ class P300AnalyzerWindow(QMainWindow):
                 continue
             t_rel.append(float(tr))
             marker_vals.append(int(round(float(mv))))
-            signal_avg.append(float(np.mean(vals)))
+            signal_rows.append(np.array(vals, dtype=np.float64))
 
         if len(t_rel) < 200:
             raise RuntimeError("Слишком мало валидных данных в CSV.")
@@ -3164,8 +3164,9 @@ class P300AnalyzerWindow(QMainWindow):
         epoch_len = int(self._epoch_geom.epoch_len)
         dt = float(np.median(np.diff(t_rel))) if len(t_rel) > 1 else 0.002
         fs_csv = 1.0 / dt if dt > 0 else 500.0
-        sig_raw = np.asarray(signal_avg, dtype=np.float64)
-        sig = bandpass_filter(sig_raw, fs_csv)
+        # Build 2D signal array (T, n_ch) and apply bandpass
+        sig_raw_2d = np.stack(signal_rows)  # (T, n_ch)
+        sig_2d = bandpass_filter(sig_raw_2d, fs_csv)
 
         onsets = 0
         prev = 0
@@ -3173,9 +3174,10 @@ class P300AnalyzerWindow(QMainWindow):
             # Начало пачки marker>0 считаем началом вспышки плитки m.
             if m > 0 and (prev == 0 or prev != m):
                 end = i + epoch_len
-                if end <= sig.size:
+                if end <= sig_2d.shape[0]:
                     stim_key = f"стимул_{m}"
-                    self.epochs_data.setdefault(stim_key, []).append(sig[i:end].copy())
+                    epoch = sig_2d[i:end, :]  # (epoch_len, n_ch)
+                    self.epochs_data.setdefault(stim_key, []).append(epoch.copy())
                     onsets += 1
             prev = m
 
