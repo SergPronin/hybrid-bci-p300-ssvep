@@ -1610,6 +1610,8 @@ class P300AnalyzerWindow(QMainWindow):
 
         Useful for very short runs (e.g. one flash per tile), where the user
         clicks Stop immediately and epochs may still be queued in pending_markers.
+        Even if no new epochs are extracted here, we still do one final redraw:
+        the winner may legitimately change on the last few already-buffered epochs.
         """
         if (
             not self._recording_epochs
@@ -1618,8 +1620,14 @@ class P300AnalyzerWindow(QMainWindow):
             or self._epoch_geom.time_ms_template is None
             or not self.eeg_buffer
             or self._lsl_clock_at_buffer_end is None
-            or not self.pending_markers
         ):
+            return
+
+        if not self.pending_markers:
+            if self.epochs_data:
+                # Stop can happen after the last live redraw, so recompute the
+                # final winner once more even if no markers remain pending.
+                self._redraw_from_epochs()
             return
 
         dt_s = float(self._epoch_geom.dt_ms) / 1000.0
@@ -1692,6 +1700,9 @@ class P300AnalyzerWindow(QMainWindow):
                     "stop_finalize_epochs",
                     {"extracted_epochs": int(extracted_now)},
                 )
+        if self.epochs_data:
+            # Final winner must be recomputed at Stop even when pending_markers
+            # are already empty, otherwise summary can keep a stale live value.
             self._redraw_from_epochs()
 
     def _log_experiment_run_end(self, reason: str) -> None:
