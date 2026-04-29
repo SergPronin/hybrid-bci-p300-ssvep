@@ -6,3 +6,4 @@ numpy
 # Анализатор P300 (Qt + графики)
 pyqtgraph
 PyQt5
+openpyxl

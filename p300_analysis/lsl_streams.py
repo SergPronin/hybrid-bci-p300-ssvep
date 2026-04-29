@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any, List, Set, Tuple
 
-from pylsl import StreamInfo, StreamInlet, resolve_byprop
+from pylsl import StreamInfo, StreamInlet, resolve_byprop, resolve_streams
 
 from p300_analysis.constants import EEG_STREAM_TYPES, NEUROSPECTR_MARKER, SIMULATOR_NAME, SIMULATOR_SOURCE_ID
 
@@ -33,11 +33,64 @@ def find_allowed_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
     return [s for s in all_streams if _is_allowed_stream(s)]
 
 
-def resolve_marker_streams(timeout: float = 0.5) -> List[StreamInfo]:
+def _marker_like_stream(info: StreamInfo) -> bool:
+    """Эвристика: поток похож на маркеры стимуляции (не только type=Markers)."""
     try:
-        return list(resolve_byprop("type", "Markers", timeout=timeout))
+        stype = (info.type() or "").strip().lower()
+        name = (info.name() or "").strip().lower()
     except Exception:
-        return []
+        return False
+    if stype == "markers":
+        return True
+    if "marker" in stype or "stim" in name or "bci" in name:
+        return True
+    return False
+
+
+def _append_unique_streams(
+    target: List[StreamInfo],
+    batch: List[StreamInfo],
+    seen: Set[Tuple[str, str]],
+) -> None:
+    for s in batch:
+        try:
+            key = (s.name() or "", s.session_id() or "")
+        except Exception:
+            key = (str(s), "")
+        if key not in seen:
+            seen.add(key)
+            target.append(s)
+
+
+def resolve_marker_streams(
+    timeout: float = 5.0,
+    *,
+    attempts: int = 2,
+) -> List[StreamInfo]:
+    """Поиск потоков маркеров (LSL discovery).
+
+    Сначала несколько попыток resolve_byprop(type=Markers). Если пусто —
+    resolve_streams (все потоки) и фильтр по типу/имени: на части LAN второй
+    путь иногда находит поток, который не отвечает на узкий resolve.
+    """
+    merged: List[StreamInfo] = []
+    seen: Set[Tuple[str, str]] = set()
+    for _ in range(max(1, int(attempts))):
+        try:
+            batch = list(resolve_byprop("type", "Markers", timeout=float(timeout)))
+        except Exception:
+            batch = []
+        _append_unique_streams(merged, batch, seen)
+        if merged:
+            return merged
+
+    try:
+        broad = list(resolve_streams(wait_time=float(timeout)))
+    except Exception:
+        broad = []
+    markerish = [s for s in broad if _marker_like_stream(s)]
+    _append_unique_streams(merged, markerish, seen)
+    return merged
 
 
 def unwrap_combo_userdata(data: Any) -> Any:

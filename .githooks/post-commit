@@ -1,0 +1,9 @@
+#!/bin/bash
+# Post-commit: keep both graphs in sync with HEAD.
+
+echo "🔄 Updating graphs after commit..."
+
+npx gitnexus analyze --skip-git > /dev/null 2>&1
+codegraph sync > /dev/null 2>&1
+
+echo "✅ Graphs updated"

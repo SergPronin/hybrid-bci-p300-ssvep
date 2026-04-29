@@ -48,6 +48,36 @@ lsl_report_*.txt
 .DS_Store
 Thumbs.db
 
-# Локальные данные / логи
-results/*.pkl
+# Локальные данные / логи сессий
+results/
 saved_data/
+data/
+examination_logs/
+*.pkl
+*.ndjson
+*_continuous.csv
+*_recording_*.csv
+
+# Docs: ignore generated/temp files but keep the project log
+docs/*
+!docs/AI_LOG.md
+
+# EEG data files
+*.edf
+*.bdf
+*.xlsx
+
+# AI / Cursor IDE (local only — not for collaborators)
+.cursor/
+.codegraph/
+.gitnexus
+.claude/
+.claude.json
+claude.json
+AGENTS.md
+CLAUDE.md
+repomix-output.xml
+
+# Duplicates cleanup
+__pycache__/
+*.pyc

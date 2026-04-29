@@ -36,11 +36,11 @@ def main() -> None:
 
     from app.main import main as app_main
 
-    try:
-        app_main()
-    finally:
-        if analyzer_proc is not None and analyzer_proc.poll() is None:
-            analyzer_proc.terminate()
+    app_main()
+    if analyzer_proc is not None and analyzer_proc.poll() is None:
+        print(
+            "[run_app] Stimulator closed. P300 analyzer keeps running in a separate window/process."
+        )
 
 
 if __name__ == "__main__":
