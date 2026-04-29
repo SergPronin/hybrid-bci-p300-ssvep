@@ -4,10 +4,12 @@ from __future__ import annotations
 
 WINNER_MODE_AUC = "auc"
 WINNER_MODE_SIGNED_MEAN = "signed_mean"
+WINNER_MODE_MSI = "msi"
 
 MODE_SHORT_LABELS = {
     WINNER_MODE_AUC: "auc",
     WINNER_MODE_SIGNED_MEAN: "signed_mean",
+    WINNER_MODE_MSI: "msi",
 }
 
 

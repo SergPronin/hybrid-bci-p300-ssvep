@@ -234,6 +234,79 @@
 
 ---
 
+## 2026-04-29 — Старт интеграции MSI-режима выбора победителя
+
+### Задача
+Добавить в проект новый вариант алгоритма выбора победителя как отдельный `winner_mode`, не меняя поведение существующих режимов `auc` и `signed_mean`.
+
+### Что изменено
+- `p300_analysis/winner_selection.py`
+  - Добавлен новый режим: `WINNER_MODE_MSI = "msi"`.
+  - Обновлены short labels: добавлен `msi`.
+- `p300_analysis/qt_window.py`
+  - В выпадающий список выбора победителя добавлен режим:
+    - `MSI-like (энергия окна + согласование с P300-шаблоном)`.
+- `p300_analysis/erp_compute.py`
+  - Добавлена ветка `winner_mode == WINNER_MODE_MSI` в `compute_winner_metrics`.
+  - Добавлена функция `compute_msi_like_scores(...)`:
+    - расчет MSI-like score как смесь нормированной энергии окна (`abs_auc`) и положительного сходства с P300-подобным шаблоном.
+  - Поведение веток `auc` и `signed_mean` не менялось.
+- `tests/test_winner_metrics.py`
+  - Добавлен тест `test_msi_mode_is_available_and_prefers_p300_like_shape`.
+
+### Проверки
+- `py_compile`: ok
+- `PYTHONPATH=. pytest -q tests/test_winner_metrics.py`: `11 passed`
+- `ReadLints`: новых ошибок нет (показаны только внешние/средовые unresolved imports в `qt_window.py`)
+
+### GitNexus impact / detect_changes
+- `impact(compute_winner_metrics, upstream)`: **LOW** (затронуты calibration/scripts цепочки как ожидаемо)
+- `impact(P300AnalyzerWindow._setup_ui, upstream)`: **LOW**
+- `detect_changes(scope=all)`: **MEDIUM** (изменения затрагивают `compute_winner_metrics` в 2 процессах)
+
+### Примечание
+`MEDIUM` от `detect_changes` ожидаем, т.к. расширена центральная функция выбора победителя. Изменение добавляет только новый режим и не меняет результат существующих режимов.
+
+### Обновление (вынос коннектора)
+- Добавлен модуль `p300_analysis/msi_algorithm.py` с функцией `compute_msi_like_scores(...)`.
+- В `p300_analysis/erp_compute.py` удалена локальная реализация MSI-like и добавлен импорт из нового модуля.
+- Поведение и формула MSI-like сохранены без изменений; изменение только структурное для удобства дальнейших правок в одном файле.
+
+### Повторные проверки
+- `py_compile`: ok
+- `PYTHONPATH=. pytest -q tests/test_winner_metrics.py`: `11 passed`
+- `ReadLints` по затронутым файлам: ok
+- GitNexus `detect_changes(scope=all)`: `risk=medium` (ожидаемо из-за изменения `compute_winner_metrics`)
+
+### UI-улучшение (видимость переключения режимов)
+- В `p300_analysis/qt_window.py` добавлен 5-й график:
+  - `⑤ Score по классам (текущий режим)`.
+- При каждом пересчёте в `_redraw_from_epochs` график заполняется `winner_debug.final_metric_values` из текущего `winner_mode`.
+- Для `auc` и `msi` теперь визуально видно, как различаются score по классам при переключении режима.
+- В состоянии `collecting` график очищается.
+
+### Проверки UI-изменений
+- `python -m py_compile p300_analysis/qt_window.py ...`: ok
+- `PYTHONPATH=. pytest -q tests/test_winner_metrics.py`: `11 passed`
+- `ReadLints` (`qt_window.py`): только средовые unresolved-import warnings (без новых кодовых ошибок)
+- GitNexus `impact(_redraw_from_epochs, upstream)`: `risk=low`
+- GitNexus `detect_changes(scope=all)`: `risk=medium` (ожидаемо, изменён UI + центральный выбор winner)
+
+### Фикс оффлайн-переключения режимов
+- Причина: при загрузке `continuous CSV` без live LSL-подключения метод `_update_loop()` выходит раньше и не обрабатывает `_need_redraw_params`.
+- Исправление в `p300_analysis/qt_window.py`:
+  - в `_on_params_changed()` добавлен immediate redraw для offline-кейса:
+    - если `self._inlet_eeg is None`, `self._inlet_markers is None` и `self.epochs_data` не пустой -> вызвать `self._redraw_from_epochs()`.
+- Эффект: при переключении `auc/msi` на загруженном обследовании графики/label теперь обновляются сразу.
+
+### Проверки фикса
+- `python -m py_compile p300_analysis/qt_window.py`: ok
+- `PYTHONPATH=. pytest -q tests/test_winner_metrics.py`: `11 passed`
+- `ReadLints`: только средовые unresolved-import warnings
+- GitNexus `impact(_on_params_changed, upstream)`: `risk=low`
+
+---
+
 ## 2026-04-25 — Sprint 2: UI-цвета, панель каналов, target_tile_id, регресс-тест
 
 ### Что сделано

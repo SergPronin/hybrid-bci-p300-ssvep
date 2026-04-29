@@ -100,6 +100,7 @@ from p300_analysis.run_export import (
 from p300_analysis.session_recorder import SessionRecorder
 from p300_analysis.winner_selection import (
     WINNER_MODE_AUC,
+    WINNER_MODE_MSI,
     mode_to_short_label,
 )
 
@@ -883,6 +884,9 @@ class P300AnalyzerWindow(QMainWindow):
         self.combo_winner_mode.addItem(
             "Интегрирование по модулю |corrected| в окне [X–Y]", WINNER_MODE_AUC
         )
+        self.combo_winner_mode.addItem(
+            "MSI-like (энергия окна + согласование с P300-шаблоном)", WINNER_MODE_MSI
+        )
         self.combo_winner_mode.setCurrentIndex(0)
         self.combo_winner_mode.currentIndexChanged.connect(self._on_params_changed)
         sidebar_layout.addWidget(self.combo_winner_mode)
@@ -985,6 +989,8 @@ class P300AnalyzerWindow(QMainWindow):
         self.plot_corrected.setBackground("#0a0a0a")
         self.plot_integrated = pg.PlotWidget()
         self.plot_integrated.setBackground("#0a0a0a")
+        self.plot_scores = pg.PlotWidget()
+        self.plot_scores.setBackground("#0a0a0a")
         self.plot_raw_last = pg.PlotWidget()
         self.plot_raw_last.setBackground("#0a0a0a")
 
@@ -994,6 +1000,7 @@ class P300AnalyzerWindow(QMainWindow):
             self.plot_raw_last,
             self.plot_corrected,
             self.plot_integrated,
+            self.plot_scores,
         ):
             _pw.setMinimumHeight(_ph)
 
@@ -1001,11 +1008,13 @@ class P300AnalyzerWindow(QMainWindow):
         self._setup_plot(self.plot_raw_last, title="② Последняя эпоха (без mean)")
         self._setup_plot(self.plot_corrected, title="③ Baseline correction")
         self._setup_plot(self.plot_integrated, title="④ ∫|corr| (AUC)")
+        self._setup_plot(self.plot_scores, title="⑤ Score по классам (текущий режим)")
 
         plots_layout.addWidget(self.plot_raw)
         plots_layout.addWidget(self.plot_raw_last)
         plots_layout.addWidget(self.plot_corrected)
         plots_layout.addWidget(self.plot_integrated)
+        plots_layout.addWidget(self.plot_scores)
 
         plots_scroll.setWidget(plots_inner)
 
@@ -1155,6 +1164,11 @@ class P300AnalyzerWindow(QMainWindow):
 
     def _on_params_changed(self) -> None:
         self._need_redraw_params = True
+        # Offline mode: when CSV data is loaded and no live LSL inlets exist,
+        # _update_loop() returns early and won't consume _need_redraw_params.
+        # Trigger redraw immediately so winner mode changes are visible.
+        if self._inlet_eeg is None and self._inlet_markers is None and self.epochs_data:
+            self._redraw_from_epochs()
 
     def _on_refresh_streams_clicked(self) -> None:
         self.combo_streams.clear()
@@ -2033,11 +2047,13 @@ class P300AnalyzerWindow(QMainWindow):
         self.plot_raw_last.clear()
         self.plot_corrected.clear()
         self.plot_integrated.clear()
+        self.plot_scores.clear()
 
         self._setup_plot(self.plot_raw, title="① Mean ERP (среднее по эпохам)")
         self._setup_plot(self.plot_raw_last, title="② Последняя эпоха (без mean)")
         self._setup_plot(self.plot_corrected, title="③ Baseline correction")
         self._setup_plot(self.plot_integrated, title="④ ∫|corr| (AUC)")
+        self._setup_plot(self.plot_scores, title="⑤ Score по классам (текущий режим)")
 
     def _ensure_epoch_template(self) -> None:
         baseline_ms = int(self.spin_baseline.value()) if hasattr(self, "spin_baseline") else 0
@@ -2127,6 +2143,7 @@ class P300AnalyzerWindow(QMainWindow):
                 f"Сбор данных...\n(мин. по классам: {min_n}/{MIN_EPOCHS_TO_DECIDE})"
             )
             self.winner_label.setStyleSheet(WINNER_LABEL_STYLE_COLLECTING)
+            self._plot_scores([], [], "collecting")
         else:
             winner_idx, mode_used, dbg = compute_winner_metrics(
                 stim_keys,
@@ -2215,6 +2232,11 @@ class P300AnalyzerWindow(QMainWindow):
             self.winner_label.setText("\n".join(lines))
             self.winner_label.setStyleSheet(
                 WINNER_LABEL_STYLE_MATCH if match_lsl else WINNER_LABEL_STYLE_MISMATCH
+            )
+            self._plot_scores(
+                stim_keys=stim_keys,
+                score_values=list(dbg.get("final_metric_values") or []),
+                mode_used=mode_used,
             )
 
         self._plot_all(
@@ -2336,6 +2358,28 @@ class P300AnalyzerWindow(QMainWindow):
             )
         if x_auc.size >= 2:
             self.plot_integrated.setXRange(float(x_auc[0]), float(x_auc[-1]))
+
+    def _plot_scores(self, stim_keys: List[str], score_values: List[float], mode_used: str) -> None:
+        self.plot_scores.clear()
+        self._setup_plot(self.plot_scores, title=f"⑤ Score по классам ({mode_to_short_label(mode_used)})")
+        self.plot_scores.setLabel("bottom", "Класс (индекс)")
+        self.plot_scores.setLabel("left", "Score")
+        if not stim_keys or not score_values or len(stim_keys) != len(score_values):
+            return
+        x = np.arange(len(stim_keys), dtype=np.float64)
+        y = np.asarray(score_values, dtype=np.float64)
+        bar = pg.BarGraphItem(
+            x=x,
+            height=y,
+            width=0.75,
+            brushes=[pg.intColor(i, hues=max(1, len(stim_keys)), values=1) for i in range(len(stim_keys))],
+        )
+        self.plot_scores.addItem(bar)
+        for i, (name, val) in enumerate(zip(stim_keys, y)):
+            txt = pg.TextItem(f"{name}\n{val:.3f}", anchor=(0.5, 1.0), color="#cfd8dc")
+            txt.setPos(float(i), float(val))
+            self.plot_scores.addItem(txt)
+        self.plot_scores.setXRange(-0.8, float(len(stim_keys) - 1) + 0.8)
 
     def _update_loop(self) -> None:
         need_redraw = False

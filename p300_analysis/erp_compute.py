@@ -8,13 +8,14 @@ import numpy as np
 
 from p300_analysis.constants import MIN_EPOCHS_TO_DECIDE
 from p300_analysis.marker_parsing import stim_key_sort_key, stim_key_to_tile_digit
+from p300_analysis.msi_algorithm import compute_msi_like_scores
 from p300_analysis.signal_processing import (
     baseline_correction,
     integrated_cumsum,
     normalize_channels,
     time_window_to_indices,
 )
-from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_SIGNED_MEAN
+from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_MSI, WINNER_MODE_SIGNED_MEAN
 
 
 def artifact_reject_epochs(
@@ -135,6 +136,12 @@ def compute_winner_metrics(
     if winner_mode == WINNER_MODE_SIGNED_MEAN:
         final_metric_values = signed_mean_values
         mode_used = WINNER_MODE_SIGNED_MEAN
+    elif winner_mode == WINNER_MODE_MSI:
+        final_metric_values = compute_msi_like_scores(
+            corr_win=corr_win,
+            abs_auc_values=abs_auc_values,
+        )
+        mode_used = WINNER_MODE_MSI
     else:
         final_metric_values = abs_auc_values
         mode_used = WINNER_MODE_AUC
