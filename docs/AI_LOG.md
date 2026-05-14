@@ -340,6 +340,6 @@ python scripts/regression_test.py *.csv [--baseline-ms 100] [--x-ms 200] [--y-ms
 краша pythonnet на старом runtime). GitNexus `detect_changes` (unstaged): risk **low**; upstream impact
 на `requirements.txt`: **LOW** (0 callers).
 
-Дополнение: reflection членов `MSI` — через `msi.GetType().GetMembers` (экземпляр), не через pythonnet-обёртку класса; эвристика TFM по DLL — `max` по всем вхождениям `Version=vN`; выбор ALGLIB из nupkg учитывает `max(msi_major, max(установленные Microsoft.NETCore.App))`. Пакет **alglib.net 3.19.0** в `msi-res` не содержит `lib/net8.0/alglib.net.dll`, поэтому фактически берётся **net7.0** — ожидаемо, пока не обновлён nupkg или не положен свой `alglib.net.dll`. В `.gitignore` добавлены `msi-res/*.dll`, `msi-res/*.nupkg`, `msi-res/deps/` — бинарники только локально.
+Дополнение: reflection членов `MSI` — через `msi.GetType().GetMembers` (экземпляр), не через pythonnet-обёртку класса; эвристика TFM по DLL — `max` по всем вхождениям `Version=vN`; выбор ALGLIB из nupkg учитывает `max(msi_major, max(установленные Microsoft.NETCore.App))`. Пакет **alglib.net 3.19.0** в `msi-res` не содержит `lib/net8.0/alglib.net.dll`, поэтому фактически берётся **net7.0** — ожидаемо, пока не обновлён nupkg или не положен свой `alglib.net.dll`. Добавлен standalone `scripts/test_msi_exec.py`: синтетический sin (10 Hz), шаблоны 10/12/15/20 Hz (sin+cos в `double[,]`), `ModelSignal` как `List<>` из generic свойства, вызов `MSIExec(double[,])`, проверка winner=1 (1-based для первой частоты).
 
 *Лог обновлён: 2026-05-14.*
