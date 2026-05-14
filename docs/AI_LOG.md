@@ -397,3 +397,25 @@ pyqtgraph). Лончер и `Popen(..., executable=...)` используют т
 `run_demo.py`. P300/Qt pipeline не затронуты. В `requirements.txt` добавлен **PyQt6** для демо.
 
 *Лог обновлён: 2026-05-14.*
+
+---
+
+## 2026-05-14 — Standalone `ssvep_analyzer.py` (LSL → MSI, PyQt6)
+
+### Контекст
+
+Добавлен корневой **`ssvep_analyzer.py`**: только LSL EEG → MSI (`test_msi_exec`: `load_msi_runtime`,
+`generate_model_signals`, `build_model_signal_list`, `numpy_to_double_matrix2d`) → pyqtgraph + большой
+QLabel победителя; rolling buffer 2 s, классификация ~200 ms; частоты — до **6 ламп** через кнопку «+»
+и **`QComboBox`** на строку: ровно **500** значений **1000/i Гц**, i = 1 … 500 (как в WinForms `DataGridViewComboBoxColumn`).
+По умолчанию список ламп пустой.
+UI каналов: чекбоксы по всем каналам потока (подписи из LSL desc/XML), отмеченные каналы — на графике
+(стек с шагом `CHANNEL_PLOT_SEP`) и в матрицу **MSIExec**; кнопки **«Снять все»** / **«Выбрать все»** для массового выбора
+(если ни один не отмечен — MSI не вызывается).
+Переиспользован **`p300_analysis.lsl_streams.stream_inlet_with_buffer`** для inlet. Без `ssvep_demo`,
+fake EEG, UDP, stimulus window. P300 / `test_msi_import` / `test_msi_exec` не менялись.
+
+Smoke: `QT_QPA_PLATFORM=offscreen` — Apply frequencies + MSIExec на синтетическом буфере; `python3 scripts/test_msi_exec.py` — ok.
+GitNexus `detect_changes` (unstaged) для неотслеживаемого файла мог не увидеть diff — риск по затронутым символам **LOW**.
+
+*Лог обновлён: 2026-05-14.*
