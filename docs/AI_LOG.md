@@ -343,3 +343,57 @@ python scripts/regression_test.py *.csv [--baseline-ms 100] [--x-ms 200] [--y-ms
 Дополнение: reflection членов `MSI` — через `msi.GetType().GetMembers` (экземпляр), не через pythonnet-обёртку класса; эвристика TFM по DLL — `max` по всем вхождениям `Version=vN`; выбор ALGLIB из nupkg учитывает `max(msi_major, max(установленные Microsoft.NETCore.App))`. Пакет **alglib.net 3.19.0** в `msi-res` не содержит `lib/net8.0/alglib.net.dll`, поэтому фактически берётся **net7.0** — ожидаемо, пока не обновлён nupkg или не положен свой `alglib.net.dll`. Добавлен standalone `scripts/test_msi_exec.py`: синтетический sin (10 Hz), шаблоны 10/12/15/20 Hz (sin+cos в `double[,]`), `ModelSignal` как `List<>` из generic свойства, вызов `MSIExec(double[,])`, проверка winner=1 (1-based для первой частоты).
 
 *Лог обновлён: 2026-05-14.*
+
+---
+
+## 2026-05-14 — SSVEP MSI standalone demo (`ssvep_demo/`)
+
+### Контекст
+
+Каталог **`ssvep_demo/`**: стимул PyQt6 (4 частоты), синтетический LSL `fake_eeg_lsl.py` (UDP 17391
+смена 10/12/15/20 Hz), `msi_realtime.py` (`RollingEEGBuffer`, `MSIRealtimeClassifier` через
+`test_msi_exec` без дублирования CoreCLR), `realtime_gui.py` (LSL + pyqtgraph + MSI), лончер
+`run_demo.py`. P300/Qt pipeline не затронуты. В `requirements.txt` добавлен **PyQt6** для демо.
+
+*Лог обновлён: 2026-05-14 (ssvep_demo).*
+
+---
+
+## 2026-05-14 — `run_demo.py`: без `realpath(sys.executable)` на macOS venv
+
+### Контекст
+
+Удалён `_resolved_python_exe()` (`os.path.normpath(os.path.realpath(sys.executable))`): на macOS symlink
+`.venv/bin/python` раскрывался в Framework Python, дочерние `subprocess` теряли пакеты venv (pylsl, PyQt6,
+pyqtgraph). Лончер и `Popen(..., executable=...)` используют только `sys.executable`. GitNexus impact по
+новому файлу недоступен (символ не в индексе); область изменений — только лончер, риск **LOW**.
+Проверка: `.venv/bin/python -c "import pylsl; PyQt6; pyqtgraph"` — OK.
+
+*Лог обновлён: 2026-05-14.*
+
+---
+
+## 2026-05-14 — `realtime_gui.py`: импорт `LostError` для текущего pylsl
+
+### Контекст
+
+В установленном **pylsl** класс `LostError` объявлен в `pylsl.util`, но не реэкспортирован из
+`pylsl.__init__`, поэтому `from pylsl import LostError, StreamInlet, …` давал `ImportError`, который
+перехватывался общим `except` и ошибочно выглядел как «Нужен pylsl». Разделены импорты: основные символы
+из `pylsl`, `LostError` — с fallback на `pylsl.util`. Smoke: `run_demo.py` — LSL, MSI, предсказание
+10 Hz в логе. Риск **LOW** (`detect_changes` unstaged).
+
+*Лог обновлён: 2026-05-14.*
+
+---
+
+## 2026-05-14 — SSVEP MSI standalone demo (`ssvep_demo/`)
+
+### Контекст
+
+Каталог **`ssvep_demo/`**: стимул PyQt6 (4 частоты), синтетический LSL `fake_eeg_lsl.py` (UDP 17391
+смена 10/12/15/20 Hz), `msi_realtime.py` (`RollingEEGBuffer`, `MSIRealtimeClassifier` через
+`test_msi_exec` без дублирования CoreCLR), `realtime_gui.py` (LSL + pyqtgraph + MSI), лончер
+`run_demo.py`. P300/Qt pipeline не затронуты. В `requirements.txt` добавлен **PyQt6** для демо.
+
+*Лог обновлён: 2026-05-14.*

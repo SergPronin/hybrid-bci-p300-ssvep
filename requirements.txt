@@ -6,5 +6,7 @@ numpy
 # Анализатор P300 (Qt + графики)
 pyqtgraph
 PyQt5
+# SSVEP MSI standalone demo (ssvep_demo/, отдельно от P300 PyQt5)
+PyQt6>=6.5.0
 openpyxl
 pythonnet

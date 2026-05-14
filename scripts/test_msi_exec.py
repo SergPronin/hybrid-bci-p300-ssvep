@@ -84,7 +84,7 @@ def generate_model_signals(
     return mats
 
 
-def numpy_to_double_matrix2d(arr: np.ndarray):
+def numpy_to_double_matrix2d(arr: np.ndarray, *, verbose: bool = True):
     """
     Конвертация numpy.ndarray (2D) -> managed System.Double[,] для pythonnet / CoreCLR.
 
@@ -117,11 +117,12 @@ def numpy_to_double_matrix2d(arr: np.ndarray):
     for i in range(rows):
         for j in range(cols):
             managed[i, j] = Double(float(arr[i, j]))
-    _debug(f"numpy_to_double_matrix2d: numpy shape={arr.shape} dtype={arr.dtype} -> Double[{rows},{cols}]")
+    if verbose:
+        _debug(f"numpy_to_double_matrix2d: numpy shape={arr.shape} dtype={arr.dtype} -> Double[{rows},{cols}]")
     return managed
 
 
-def build_model_signal_list(msi, numpy_templates: Sequence[np.ndarray]):
+def build_model_signal_list(msi, numpy_templates: Sequence[np.ndarray], *, verbose: bool = True):
     """
     Собирает `System.Collections.Generic.IList<double[,]>` для присвоения `msi.ModelSignal`.
 
@@ -139,7 +140,8 @@ def build_model_signal_list(msi, numpy_templates: Sequence[np.ndarray]):
     if args.Length != 1:
         raise RuntimeError(f"ModelSignal: ожидался IList<T> с одним T, получили {args.Length} generic args")
     elem_type = args[0]
-    _debug(f"ModelSignal element CLR type: {elem_type.FullName}")
+    if verbose:
+        _debug(f"ModelSignal element CLR type: {elem_type.FullName}")
 
     list_type = List[elem_type]
     lst = list_type()
@@ -148,9 +150,12 @@ def build_model_signal_list(msi, numpy_templates: Sequence[np.ndarray]):
             raise ValueError(
                 f"шаблон #{idx + 1}: ожидалась форма (2, n) sin/cos, получили {tmpl.shape}"
             )
-        managed = numpy_to_double_matrix2d(np.ascontiguousarray(tmpl, dtype=np.float64))
+        managed = numpy_to_double_matrix2d(
+            np.ascontiguousarray(tmpl, dtype=np.float64), verbose=verbose
+        )
         lst.Add(managed)
-    _debug(f"ModelSignal List built: Count={lst.Count}")
+    if verbose:
+        _debug(f"ModelSignal List built: Count={lst.Count}")
     return lst
 
 
@@ -230,7 +235,9 @@ def main() -> int:
         _debug(f"generating synthetic EEG: {stim_freq_hz} Hz, channels={channels}")
         sig_np = generate_sine_signal(stim_freq_hz, srate, duration, channels)
         _debug(f"synthetic numpy signal shape={sig_np.shape} dtype={sig_np.dtype}")
-        sig_managed = numpy_to_double_matrix2d(np.ascontiguousarray(sig_np, dtype=np.float64))
+        sig_managed = numpy_to_double_matrix2d(
+            np.ascontiguousarray(sig_np, dtype=np.float64), verbose=True
+        )
 
         _debug("calling MSIExec(double[,] Signal) -> int")
         winner = msi.MSIExec(sig_managed)
