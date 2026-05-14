@@ -326,3 +326,20 @@ python scripts/regression_test.py *.csv [--baseline-ms 100] [--x-ms 200] [--y-ms
 ### Результат: 27 passed, 6 skipped. GitNexus risk LOW.
 
 *Лог обновлён: 2026-04-25.*
+
+---
+
+## 2026-05-14 — MSIController: smoke-скрипт pythonnet + требование .NET 8
+
+### Контекст
+
+Добавлен standalone `scripts/test_msi_import.py`: CoreCLR через pythonnet, `clr.AddReference` для ALGLIB
+(из `msi-res/` или извлечение из `alglib.net.3.19.0.nupkg`), опционально `msi-res/deps/*.dll`
+(например `CommunityToolkit.Mvvm.dll`). Preflight: если в `MSIController.dll` виден target `.NETCoreApp` v8,
+а в `DOTNET_ROOT` нет `Microsoft.NETCore.App 8.x`, скрипт завершается с понятным сообщением (избегает
+краша pythonnet на старом runtime). GitNexus `detect_changes` (unstaged): risk **low**; upstream impact
+на `requirements.txt`: **LOW** (0 callers).
+
+Дополнение: reflection членов `MSI` — через `msi.GetType().GetMembers` (экземпляр), не через pythonnet-обёртку класса; эвристика TFM по DLL — `max` по всем вхождениям `Version=vN`; выбор ALGLIB из nupkg учитывает `max(msi_major, max(установленные Microsoft.NETCore.App))`. Пакет **alglib.net 3.19.0** в `msi-res` не содержит `lib/net8.0/alglib.net.dll`, поэтому фактически берётся **net7.0** — ожидаемо, пока не обновлён nupkg или не положен свой `alglib.net.dll`. В `.gitignore` добавлены `msi-res/*.dll`, `msi-res/*.nupkg`, `msi-res/deps/` — бинарники только локально.
+
+*Лог обновлён: 2026-05-14.*

@@ -7,3 +7,4 @@ numpy
 pyqtgraph
 PyQt5
 openpyxl
+pythonnet
