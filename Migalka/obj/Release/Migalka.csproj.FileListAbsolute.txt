@@ -1,0 +1,10 @@
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\bin\Release\Migalka.exe.config
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\bin\Release\Migalka.exe
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\bin\Release\Migalka.pdb
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Release\Migalka.csproj.AssemblyReference.cache
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Release\Migalka.MyForm.resources
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Release\Migalka.Properties.Resources.resources
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Release\Migalka.csproj.GenerateResource.cache
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Release\Migalka.csproj.CoreCompileInputs.cache
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Release\Migalka.exe
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Release\Migalka.pdb

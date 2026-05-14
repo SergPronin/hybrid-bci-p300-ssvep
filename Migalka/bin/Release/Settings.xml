@@ -1,0 +1,10 @@
+<Settings>
+  <Blink>
+    <Blink0 Frequency="9.345795" />
+    <Blink1 Frequency="10.20408" />
+    <Blink2 Frequency="12.5" />
+    <Blink3 Frequency="14.08451" />
+    <Blink4 Frequency="0" />
+    <Blink5 Frequency="0" />
+  </Blink>
+</Settings>

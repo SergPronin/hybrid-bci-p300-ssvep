@@ -1,0 +1,50 @@
+c:\users\ya\documents\visual studio 2015\Projects\Migalka\Migalka\bin\Debug\Migalka.exe.config
+c:\users\ya\documents\visual studio 2015\Projects\Migalka\Migalka\bin\Debug\Migalka.exe
+c:\users\ya\documents\visual studio 2015\Projects\Migalka\Migalka\bin\Debug\Migalka.pdb
+c:\users\ya\documents\visual studio 2015\Projects\Migalka\Migalka\obj\Debug\Migalka.csprojResolveAssemblyReference.cache
+c:\users\ya\documents\visual studio 2015\Projects\Migalka\Migalka\obj\Debug\Migalka.Form1.resources
+c:\users\ya\documents\visual studio 2015\Projects\Migalka\Migalka\obj\Debug\Migalka.Properties.Resources.resources
+c:\users\ya\documents\visual studio 2015\Projects\Migalka\Migalka\obj\Debug\Migalka.csproj.GenerateResource.Cache
+c:\users\ya\documents\visual studio 2015\Projects\Migalka\Migalka\obj\Debug\Migalka.exe
+c:\users\ya\documents\visual studio 2015\Projects\Migalka\Migalka\obj\Debug\Migalka.pdb
+D:\programs\Migalka\Migalka\bin\Debug\Migalka.exe.config
+D:\programs\Migalka\Migalka\obj\Debug\Migalka.exe
+D:\programs\Migalka\Migalka\obj\Debug\Migalka.pdb
+D:\programs\Migalka\Migalka\bin\Debug\Migalka.exe
+D:\programs\Migalka\Migalka\bin\Debug\Migalka.pdb
+D:\programs\Migalka\Migalka\obj\Debug\Migalka.csprojResolveAssemblyReference.cache
+D:\programs\Migalka\Migalka\obj\Debug\Migalka.Form1.resources
+D:\programs\Migalka\Migalka\obj\Debug\Migalka.Properties.Resources.resources
+D:\programs\Migalka\Migalka\obj\Debug\Migalka.csproj.GenerateResource.Cache
+C:\Users\alvah\Downloads\Migalka\Migalka\bin\Debug\Migalka.exe.config
+C:\Users\alvah\Downloads\Migalka\Migalka\obj\Debug\Migalka.exe
+C:\Users\alvah\Downloads\Migalka\Migalka\obj\Debug\Migalka.pdb
+C:\Users\alvah\Downloads\Migalka\Migalka\bin\Debug\Migalka.exe
+C:\Users\alvah\Downloads\Migalka\Migalka\bin\Debug\Migalka.pdb
+C:\Users\alvah\Downloads\Migalka\Migalka\obj\Debug\Migalka.csprojResolveAssemblyReference.cache
+C:\Users\alvah\Downloads\Migalka\Migalka\obj\Debug\Migalka.MyForm.resources
+C:\Users\alvah\Downloads\Migalka\Migalka\obj\Debug\Migalka.Properties.Resources.resources
+C:\Users\alvah\Downloads\Migalka\Migalka\obj\Debug\Migalka.csproj.GenerateResource.Cache
+C:\Repos\LaboratoryOfMedicalCybernetics\Migalka\Migalka\Migalka\bin\Debug\Migalka.exe.config
+C:\Repos\LaboratoryOfMedicalCybernetics\Migalka\Migalka\Migalka\obj\Debug\Migalka.exe
+C:\Repos\LaboratoryOfMedicalCybernetics\Migalka\Migalka\Migalka\obj\Debug\Migalka.pdb
+C:\Users\Али\OneDrive\Desktop\запись чми\Migalka\Migalka\Migalka\Migalka\bin\Debug\Migalka.exe.config
+C:\Users\Али\OneDrive\Desktop\запись чми\Migalka\Migalka\Migalka\Migalka\bin\Debug\Migalka.exe
+C:\Users\Али\OneDrive\Desktop\запись чми\Migalka\Migalka\Migalka\Migalka\bin\Debug\Migalka.pdb
+C:\Users\Али\OneDrive\Desktop\запись чми\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.csproj.AssemblyReference.cache
+C:\Users\Али\OneDrive\Desktop\запись чми\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.MyForm.resources
+C:\Users\Али\OneDrive\Desktop\запись чми\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.Properties.Resources.resources
+C:\Users\Али\OneDrive\Desktop\запись чми\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.csproj.GenerateResource.cache
+C:\Users\Али\OneDrive\Desktop\запись чми\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.csproj.CoreCompileInputs.cache
+C:\Users\Али\OneDrive\Desktop\запись чми\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.exe
+C:\Users\Али\OneDrive\Desktop\запись чми\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.pdb
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\bin\Debug\Migalka.exe.config
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\bin\Debug\Migalka.exe
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\bin\Debug\Migalka.pdb
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.csproj.AssemblyReference.cache
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.MyForm.resources
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.Properties.Resources.resources
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.csproj.GenerateResource.cache
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.csproj.CoreCompileInputs.cache
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.exe
+C:\Users\pocht\OneDrive\Рабочий стол\Migalka\Migalka\Migalka\Migalka\obj\Debug\Migalka.pdb
