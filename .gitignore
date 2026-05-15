@@ -67,11 +67,6 @@ docs/*
 *.bdf
 *.xlsx
 
-# MSI / .NET: локальные бинарники и NuGet (не коммитим; см. scripts/test_msi_import.py)
-msi-res/*.dll
-msi-res/*.nupkg
-msi-res/deps/
-
 # AI / Cursor IDE (local only — not for collaborators)
 .cursor/
 .codegraph/
