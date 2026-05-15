@@ -115,3 +115,13 @@ class TestBurstGate:
         ok, reason = gate.classify_allowed(t, now=2.0)
         assert not ok
         assert "ламп" in reason
+
+    def test_intervals_in_range(self) -> None:
+        gate = BurstGate()
+        gate.set_active_lamps(2)
+        gate.ingest_marker(5.0, "100|on")
+        gate.ingest_marker(8.0, "100|off")
+        gate.ingest_marker(6.0, "101|on")
+        ivs = gate.intervals_in_range(0.0, 10.0)
+        assert (0, 5.0, 8.0) in ivs
+        assert any(x[0] == 1 and x[1] == 6.0 for x in ivs)

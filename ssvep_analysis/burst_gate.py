@@ -164,6 +164,25 @@ class BurstGate:
             return False, f"ON {on_sec:.2f} с (нужно ≥{self.config.min_on_sec:.1f} с)"
         return True, f"стимул {frac:.0%} окна, ON≈{on_sec:.2f} с"
 
+    def intervals_in_range(
+        self,
+        t_min: float,
+        t_max: float,
+    ) -> List[Tuple[int, float, float]]:
+        """Интервалы ON для диаграммы Ганта: (lamp_index, t_start, t_end)."""
+        if t_max <= t_min:
+            return []
+        out: List[Tuple[int, float, float]] = []
+        for iv in self._intervals:
+            if iv.lamp not in self.active_lamps:
+                continue
+            t_end = iv.t_off if iv.t_off is not None else t_max
+            t_start = max(float(iv.t_on), t_min)
+            t_end_clip = min(float(t_end), t_max)
+            if t_start < t_end_clip:
+                out.append((iv.lamp, t_start, t_end_clip))
+        return out
+
 
 def append_chunk_timestamps(
     prev_t: np.ndarray,

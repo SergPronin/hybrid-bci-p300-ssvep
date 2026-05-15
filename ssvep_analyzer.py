@@ -12,8 +12,10 @@ from __future__ import annotations
 import sys
 import traceback
 import xml.etree.ElementTree as ET
+from collections import deque
+from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Deque, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -22,6 +24,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -31,6 +34,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
+    QSplitter,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -53,6 +58,7 @@ from ssvep_analysis.burst_gate import (  # noqa: E402
     BurstGateConfig,
     append_chunk_timestamps,
 )
+from ssvep_analysis.gantt_timeline import GanttExtraRow, StimGanttChart  # noqa: E402
 from ssvep_analysis.migalka_lsl import STREAM_NAME as MIGALKA_MARKER_STREAM  # noqa: E402
 
 # Как в WinForms: for (int i = 1; i <= 500; i++) Items.Add((1000.0f / i).ToString().Replace(',', '.'))
@@ -187,6 +193,15 @@ class SSVEPAnalyzerWindow(QMainWindow):
     CHANNEL_PLOT_SEP = 100.0
     CHANNEL_CB_COLUMNS = 4
     MAX_LAMPS = 6
+    GANTT_SPAN_SEC = 30.0
+    GANTT_MSI_HISTORY = 200
+    # Частоты по умолчанию для первых 4 ламп (как в Migalka / 1000/i)
+    DEFAULT_LAMP_FREQS: Tuple[float, ...] = (
+        10.0,
+        1000.0 / 99.0,
+        1000.0 / 87.0,
+        1000.0 / 76.0,
+    )
 
     def __init__(self) -> None:
         super().__init__()
@@ -223,6 +238,18 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._ch_grid_layout: Optional[QGridLayout] = None
 
         self._last_winner: Optional[int] = None
+        self._last_gate_allowed: bool = True
+        self._msi_events: Deque[Tuple[float, int]] = deque(maxlen=self.GANTT_MSI_HISTORY)
+        self._gate_open_t: Optional[float] = None
+        self._gate_intervals: List[Tuple[float, float]] = []
+        self._gantt_chart: Optional[StimGanttChart] = None
+        self._plot_gantt: Optional[pg.PlotWidget] = None
+        self._plot_session: Optional[pg.PlotWidget] = None
+        self._curve_session: Optional[Any] = None
+
+        self._session_active = False
+        self._session_t0: Optional[float] = None
+        self._session_points: List[Tuple[float, int, float, bool]] = []
 
         self._timer_pull = QTimer(self)
         self._timer_pull.setInterval(self.PULL_MS)
@@ -237,26 +264,19 @@ class SSVEPAnalyzerWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        outer = QHBoxLayout(central)
+        outer.setContentsMargins(4, 4, 4, 4)
 
-        # --- LSL ---
-        lsl_box = QWidget()
-        lsl_l = QHBoxLayout(lsl_box)
-        self._btn_refresh = QPushButton("Refresh streams")
-        self._btn_refresh.clicked.connect(self._on_refresh_streams)
-        self._list_streams = QListWidget()
-        self._list_streams.setMinimumHeight(100)
-        self._btn_connect = QPushButton("Connect")
-        self._btn_connect.clicked.connect(self._on_connect)
-        lsl_l.addWidget(self._btn_refresh)
-        lsl_v = QVBoxLayout()
-        lsl_v.addWidget(QLabel("LSL EEG streams:"))
-        lsl_v.addWidget(self._list_streams)
-        lsl_l.addLayout(lsl_v, stretch=1)
-        lsl_l.addWidget(self._btn_connect)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        self._lbl_stream_meta = QLabel("Not connected")
-        self._lbl_stream_meta.setWordWrap(True)
+        # --- Левая колонка: настройки (прокрутка) ---
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setMinimumWidth(300)
+        left_panel = QWidget()
+        left = QVBoxLayout(left_panel)
+        left.setContentsMargins(2, 2, 8, 2)
 
         stim_row = QHBoxLayout()
         stim_row.addWidget(QLabel("Режим стимула:"))
@@ -269,19 +289,37 @@ class SSVEPAnalyzerWindow(QMainWindow):
         )
         self._cb_stim_mode.currentIndexChanged.connect(self._on_stim_mode_changed)
         stim_row.addWidget(self._cb_stim_mode, stretch=1)
-        root.addLayout(stim_row)
+        left.addLayout(stim_row)
 
         self._lbl_burst_status = QLabel("Пакетный гейт: —")
         self._lbl_burst_status.setWordWrap(True)
         self._lbl_burst_status.setStyleSheet("color: #aaa; font-size: 12px;")
-        root.addWidget(self._lbl_burst_status)
+        left.addWidget(self._lbl_burst_status)
 
-        root.addWidget(QLabel("LSL stream"))
-        root.addWidget(lsl_box)
-        root.addWidget(self._lbl_stream_meta)
+        left.addWidget(QLabel("LSL stream"))
+        lsl_box = QWidget()
+        lsl_l = QVBoxLayout(lsl_box)
+        lsl_l.setContentsMargins(0, 0, 0, 0)
+        lsl_btn_row = QHBoxLayout()
+        self._btn_refresh = QPushButton("Refresh streams")
+        self._btn_refresh.clicked.connect(self._on_refresh_streams)
+        self._btn_connect = QPushButton("Connect")
+        self._btn_connect.clicked.connect(self._on_connect)
+        lsl_btn_row.addWidget(self._btn_refresh)
+        lsl_btn_row.addWidget(self._btn_connect)
+        lsl_l.addLayout(lsl_btn_row)
+        lsl_l.addWidget(QLabel("LSL EEG streams:"))
+        self._list_streams = QListWidget()
+        self._list_streams.setMinimumHeight(72)
+        self._list_streams.setMaximumHeight(120)
+        lsl_l.addWidget(self._list_streams)
+        left.addWidget(lsl_box)
 
-        # --- Frequencies (лампы SSVEP, по умолчанию пусто; «+» до 6 шт.) ---
-        root.addWidget(QLabel("Частоты SSVEP (лампы), MSI templates"))
+        self._lbl_stream_meta = QLabel("Not connected")
+        self._lbl_stream_meta.setWordWrap(True)
+        left.addWidget(self._lbl_stream_meta)
+
+        left.addWidget(QLabel("Частоты SSVEP (лампы), MSI templates"))
         freq_top = QHBoxLayout()
         self._lbl_freq_slots = QLabel(f"Ламп: 0/{self.MAX_LAMPS}")
         freq_top.addWidget(self._lbl_freq_slots)
@@ -290,66 +328,145 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._btn_freq_add.setToolTip(f"Добавить частоту (ещё одна лампа), не более {self.MAX_LAMPS}.")
         self._btn_freq_add.clicked.connect(self._on_freq_add_row)
         freq_top.addWidget(self._btn_freq_add)
-        self._btn_apply_freq = QPushButton("Apply frequencies")
+        self._btn_apply_freq = QPushButton("Apply")
+        self._btn_apply_freq.setToolTip("Применить частоты к MSI templates")
         self._btn_apply_freq.clicked.connect(self._on_apply_frequencies)
         freq_top.addWidget(self._btn_apply_freq)
-        root.addLayout(freq_top)
+        left.addLayout(freq_top)
         self._freq_rows_host = QWidget()
         self._freq_rows_layout = QVBoxLayout(self._freq_rows_host)
         self._freq_rows_layout.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(self._freq_rows_host)
+        left.addWidget(self._freq_rows_host)
 
-        # --- Channels (after Connect) ---
         ch_head = QHBoxLayout()
         ch_head.addWidget(QLabel("Channels (plot + MSI)"))
         ch_head.addStretch(1)
-        self._btn_ch_all_off = QPushButton("Снять все")
-        self._btn_ch_all_off.setToolTip("Снять выбор со всех каналов одним нажатием (график пустой, MSI ждёт выбора).")
+        self._btn_ch_all_off = QPushButton("Снять")
+        self._btn_ch_all_off.setToolTip(
+            "Снять выбор со всех каналов (график пустой, MSI ждёт выбора)."
+        )
         self._btn_ch_all_off.clicked.connect(self._on_channels_all_off)
-        self._btn_ch_all_on = QPushButton("Выбрать все")
+        self._btn_ch_all_on = QPushButton("Все")
         self._btn_ch_all_on.setToolTip("Включить все каналы на графике и в MSI.")
         self._btn_ch_all_on.clicked.connect(self._on_channels_all_on)
         ch_head.addWidget(self._btn_ch_all_off)
         ch_head.addWidget(self._btn_ch_all_on)
-        root.addLayout(ch_head)
+        left.addLayout(ch_head)
         ch_scroll = QScrollArea()
         ch_scroll.setWidgetResizable(True)
-        ch_scroll.setMaximumHeight(140)
+        ch_scroll.setMaximumHeight(160)
         ch_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._ch_grid_host = QWidget()
         self._ch_grid_layout = QGridLayout(self._ch_grid_host)
         ch_scroll.setWidget(self._ch_grid_host)
-        root.addWidget(ch_scroll)
+        left.addWidget(ch_scroll)
 
-        # --- Plot ---
-        self._plot = pg.PlotWidget(title="EEG (rolling), all channels stacked")
-        self._plot.showGrid(x=True, y=True, alpha=0.3)
-        root.addWidget(QLabel("Realtime EEG"))
-        root.addWidget(self._plot, stretch=1)
+        sess_row = QHBoxLayout()
+        self._btn_session_start = QPushButton("Старт")
+        self._btn_session_start.setToolTip("Начать запись графика сессии (решения MSI по времени).")
+        self._btn_session_start.clicked.connect(self._on_session_start)
+        self._btn_session_stop = QPushButton("Стоп")
+        self._btn_session_stop.setToolTip("Остановить запись и сохранить скриншот.")
+        self._btn_session_stop.clicked.connect(self._on_session_stop)
+        self._btn_session_reset = QPushButton("Сброс")
+        self._btn_session_reset.setToolTip("Очистить график сессии, Gantt и текущий результат.")
+        self._btn_session_reset.clicked.connect(self._on_session_reset)
+        self._btn_session_save = QPushButton("PNG")
+        self._btn_session_save.setToolTip("Сохранить график сессии и Gantt в PNG.")
+        self._btn_session_save.clicked.connect(self._on_session_save_png)
+        for w in (
+            self._btn_session_start,
+            self._btn_session_stop,
+            self._btn_session_reset,
+            self._btn_session_save,
+        ):
+            sess_row.addWidget(w)
+        left.addLayout(sess_row)
+        self._lbl_session = QLabel("Сессия: не записывается")
+        self._lbl_session.setWordWrap(True)
+        self._lbl_session.setStyleSheet("color: #888; font-size: 11px;")
+        left.addWidget(self._lbl_session)
 
-        # --- Winner ---
+        left.addWidget(QLabel("Status / log"))
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMinimumHeight(100)
+        self._log.setMaximumHeight(200)
+        left.addWidget(self._log)
+        left.addStretch(1)
+
+        left_scroll.setWidget(left_panel)
+        splitter.addWidget(left_scroll)
+
+        # --- Правая колонка: графики + плитка победителя ---
+        right_panel = QWidget()
+        right = QVBoxLayout(right_panel)
+        right.setContentsMargins(0, 0, 0, 0)
+
         self._lbl_winner = QLabel("CURRENT TARGET:\n—")
         self._lbl_winner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_winner.setStyleSheet(
-            "font-size: 28px; font-weight: bold; padding: 20px; "
-            "background-color: #1a1a1a; border: 1px solid #444;"
+        self._lbl_winner.setWordWrap(True)
+        self._lbl_winner.setMinimumHeight(96)
+        self._lbl_winner.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
         )
-        root.addWidget(self._lbl_winner)
+        self._lbl_winner.setStyleSheet(
+            "font-size: 24px; font-weight: bold; padding: 12px 16px; "
+            "background-color: #1a1a1a; border: 2px solid #555; border-radius: 6px;"
+        )
+        right.addWidget(self._lbl_winner)
 
         self._lbl_scores = QLabel("Scores / Coef:\n—")
         self._lbl_scores.setWordWrap(True)
-        self._lbl_scores.setStyleSheet("font-family: monospace; font-size: 12px;")
-        root.addWidget(self._lbl_scores)
+        self._lbl_scores.setMaximumHeight(72)
+        self._lbl_scores.setStyleSheet("font-family: monospace; font-size: 11px; color: #bbb;")
+        right.addWidget(self._lbl_scores)
 
-        # --- Log ---
-        root.addWidget(QLabel("Status / log"))
-        self._log = QTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setMaximumHeight(160)
-        root.addWidget(self._log)
+        right.addWidget(QLabel("Realtime EEG"))
+        self._plot = pg.PlotWidget(title="EEG (rolling), all channels stacked")
+        self._plot.showGrid(x=True, y=True, alpha=0.3)
+        self._plot.setMinimumHeight(140)
+        right.addWidget(self._plot, stretch=2)
 
+        right.addWidget(QLabel("График сессии (MSI)"))
+        self._plot_session = pg.PlotWidget(title="Сессия: лампа по времени")
+        self._plot_session.showGrid(x=True, y=True, alpha=0.3)
+        self._plot_session.setMinimumHeight(120)
+        self._plot_session.setMaximumHeight(200)
+        self._plot_session.setLabel("bottom", "Время сессии", units="s")
+        self._plot_session.setLabel("left", "Лампа №")
+        self._curve_session = self._plot_session.plot(
+            pen=pg.mkPen("#7fd97f", width=2),
+            symbol="o",
+            symbolSize=7,
+            symbolBrush=pg.mkBrush("#7fd97f"),
+        )
+        right.addWidget(self._plot_session, stretch=0)
+
+        self._gantt_chart, self._plot_gantt = StimGanttChart.create_plot(
+            span_sec=self.GANTT_SPAN_SEC
+        )
+        self._plot_gantt.setMinimumHeight(140)
+        self._plot_gantt.setMaximumHeight(280)
+        gantt_hint = QLabel(
+            "Время → | События ↓ | серая дорожка = нет; цветной ■ = лампа ON; "
+            "зелёный ■ = MSI разрешён; голубая зона = окно MSI; ◆ = решение"
+        )
+        gantt_hint.setWordWrap(True)
+        gantt_hint.setStyleSheet("color: #999; font-size: 11px;")
+        right.addWidget(gantt_hint)
+        right.addWidget(self._plot_gantt, stretch=0)
+
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([340, 860])
+        outer.addWidget(splitter)
+
+        self._seed_default_lamps()
         self._log_line(
-            "Старт: по умолчанию частот нет — нажмите «+», чтобы добавить до 6 ламп, затем Apply frequencies."
+            "Заданы 4 лампы по умолчанию — Apply, Connect EEG, Старт для записи графика."
         )
         self._update_freq_slot_label()
 
@@ -419,6 +536,81 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
     def _selected_channel_indices(self) -> List[int]:
         return [i for i, cb in enumerate(self._ch_checkboxes) if cb.isChecked()]
+
+    def _gantt_lamp_labels(self) -> List[str]:
+        labels: List[str] = []
+        for i, hz in enumerate(self._freqs_hz):
+            labels.append(f"L{i + 1} {hz:g} Hz")
+        return labels
+
+    def _clear_gate_history(self) -> None:
+        self._gate_open_t = None
+        self._gate_intervals.clear()
+
+    def _record_gate_state(self, t_now: float, allowed: bool) -> None:
+        """Накопить интервалы «MSI разрешён» для строки Gantt."""
+        if allowed:
+            if self._gate_open_t is None:
+                self._gate_open_t = float(t_now)
+        elif self._gate_open_t is not None:
+            self._gate_intervals.append((self._gate_open_t, float(t_now)))
+            self._gate_open_t = None
+        span = self.GANTT_SPAN_SEC + 5.0
+        cutoff = float(t_now) - span
+        self._gate_intervals = [
+            (a, b) for a, b in self._gate_intervals if b >= cutoff
+        ]
+
+    def _gate_intervals_for_gantt(self, t_now: float) -> List[Tuple[float, float]]:
+        out = list(self._gate_intervals)
+        if self._gate_open_t is not None:
+            out.append((self._gate_open_t, float(t_now)))
+        return out
+
+    def _update_gantt(
+        self,
+        *,
+        gate_allowed: Optional[bool] = None,
+        record_msi: Optional[Tuple[int, bool]] = None,
+    ) -> None:
+        if self._gantt_chart is None or self._buf_t.size == 0:
+            return
+        t_now = float(self._buf_t[-1])
+        n_lamps = len(self._freqs_hz)
+        if n_lamps < 1:
+            self._gantt_chart.clear()
+            return
+
+        if gate_allowed is not None:
+            self._last_gate_allowed = bool(gate_allowed)
+            if self._is_burst_mode():
+                self._record_gate_state(t_now, self._last_gate_allowed)
+        if record_msi is not None:
+            winner, ok = record_msi
+            if ok:
+                self._msi_events.append((t_now, int(winner)))
+
+        t_min = t_now - self.GANTT_SPAN_SEC
+        intervals = self._burst_gate.intervals_in_range(t_min, t_now)
+        extra: List[GanttExtraRow] = []
+        if self._is_burst_mode():
+            extra.append(
+                GanttExtraRow(
+                    label="MSI разрешён",
+                    intervals=self._gate_intervals_for_gantt(t_now),
+                    color="#43a047",
+                )
+            )
+        self._gantt_chart.update(
+            t_now=t_now,
+            n_lamps=n_lamps,
+            lamp_labels=self._gantt_lamp_labels(),
+            intervals=intervals,
+            extra_rows=extra,
+            msi_window_sec=self.WINDOW_SEC,
+            gate_allowed=self._last_gate_allowed,
+            msi_events=list(self._msi_events),
+        )
 
     def _log_line(self, msg: str) -> None:
         self._log.append(msg)
@@ -561,6 +753,10 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._buf = np.zeros((0, self._n_channels), dtype=np.float64)
         self._buf_t = np.zeros(0, dtype=np.float64)
         self._burst_gate = BurstGate(BurstGateConfig(window_sec=self.WINDOW_SEC))
+        self._msi_events.clear()
+        self._clear_gate_history()
+        if self._gantt_chart is not None:
+            self._gantt_chart.clear()
 
         meta = (
             f"Connected: {info.name()!r}\n"
@@ -612,12 +808,19 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._update_freq_slot_label()
         self._log_line(f"Лампа удалена. Осталось частот: {len(self._freq_combos)}.")
 
-    def _on_freq_add_row(self) -> None:
+    def _seed_default_lamps(self) -> None:
+        for hz in self.DEFAULT_LAMP_FREQS:
+            self._add_freq_row(initial_hz=float(hz), log=False)
+        if self._freq_combos:
+            self._log_line(
+                "Лампы 1–4: "
+                + ", ".join(f"{float(self.DEFAULT_LAMP_FREQS[i]):g} Hz" for i in range(len(self.DEFAULT_LAMP_FREQS)))
+            )
+
+    def _add_freq_row(self, *, initial_hz: float, log: bool = True) -> None:
         if len(self._freq_combos) >= self.MAX_LAMPS:
             return
-        defaults = (10.0, 12.0, 15.0, 20.0, 8.0, 18.0)
         k = len(self._freq_combos)
-        initial = float(defaults[k % len(defaults)])
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
@@ -626,8 +829,8 @@ class SSVEPAnalyzerWindow(QMainWindow):
         combo.setMinimumWidth(160)
         for text, val in lamp_frequency_choices():
             combo.addItem(text, val)
-        combo.setCurrentIndex(lamp_frequency_closest_index(initial))
-        combo.setToolTip("Список частот: 1000/i Гц для i = 1 … 500 (как DataGridViewComboBoxColumn в исходном коде).")
+        combo.setCurrentIndex(lamp_frequency_closest_index(initial_hz))
+        combo.setToolTip("Список частот: 1000/i Гц для i = 1 … 500.")
         h.addWidget(combo, stretch=1)
         rm = QPushButton("−")
         rm.setFixedWidth(40)
@@ -638,8 +841,139 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._freq_row_widgets.append(row)
         self._freq_combos.append(combo)
         self._update_freq_slot_label()
-        sel = float(combo.currentData())
-        self._log_line(f"Добавлена лампа {len(self._freq_combos)}: {sel:g} Hz (выберите значение из списка и Apply).")
+        if log:
+            sel = float(combo.currentData())
+            self._log_line(f"Добавлена лампа {len(self._freq_combos)}: {sel:g} Hz → Apply frequencies.")
+
+    def _on_freq_add_row(self) -> None:
+        if len(self._freq_combos) >= self.MAX_LAMPS:
+            return
+        extras = (12.0, 15.0, 20.0, 8.0, 18.0)
+        k = len(self._freq_combos)
+        initial = float(extras[(k - len(self.DEFAULT_LAMP_FREQS)) % len(extras)]) if k >= len(
+            self.DEFAULT_LAMP_FREQS
+        ) else float(self.DEFAULT_LAMP_FREQS[k])
+        self._add_freq_row(initial_hz=initial)
+
+    def _session_time_base(self) -> Optional[float]:
+        if self._buf_t.size > 0:
+            return float(self._buf_t[-1])
+        return None
+
+    def _on_session_start(self) -> None:
+        if self._inlet is None:
+            QMessageBox.warning(self, "Сессия", "Сначала подключите LSL EEG (Connect).")
+            return
+        if not self._freqs_hz:
+            QMessageBox.warning(self, "Сессия", "Сначала нажмите Apply frequencies.")
+            return
+        t0 = self._session_time_base()
+        if t0 is None:
+            QMessageBox.warning(self, "Сессия", "Нет данных EEG — дождитесь потока.")
+            return
+        self._session_active = True
+        self._session_t0 = t0
+        self._session_points.clear()
+        self._refresh_session_plot()
+        self._lbl_session.setText("Сессия: запись…")
+        self._lbl_session.setStyleSheet("color: #5cb85c;")
+        self._log_line(f"Сессия: старт (t0 LSL = {t0:.3f})")
+
+    def _on_session_stop(self) -> None:
+        if not self._session_active:
+            self._log_line("Сессия: не была запущена.")
+            return
+        self._session_active = False
+        self._lbl_session.setText(f"Сессия: стоп, точек {len(self._session_points)}")
+        self._lbl_session.setStyleSheet("color: #f0ad4e;")
+        self._refresh_session_plot()
+        self._log_line("Сессия: стоп — можно сохранить PNG.")
+        self._on_session_save_png(auto_path=True)
+
+    def _on_session_reset(self) -> None:
+        self._session_active = False
+        self._session_t0 = None
+        self._session_points.clear()
+        self._msi_events.clear()
+        self._clear_gate_history()
+        self._last_winner = None
+        self._burst_gate = BurstGate(BurstGateConfig(window_sec=self.WINDOW_SEC))
+        if self._freqs_hz:
+            self._burst_gate.set_active_lamps(len(self._freqs_hz))
+        if self._curve_session is not None:
+            self._curve_session.setData([], [])
+        if self._gantt_chart is not None:
+            self._gantt_chart.clear()
+        self._lbl_winner.setText("CURRENT TARGET:\n—")
+        self._lbl_scores.setText("Scores / Coef:\n—")
+        self._lbl_session.setText("Сессия: сброшена")
+        self._lbl_session.setStyleSheet("color: #888;")
+        self._log_line("Сессия: сброс (график, Gantt, winner).")
+
+    def _on_session_save_png(self, *, auto_path: bool = False) -> None:
+        out_dir = _REPO / "screenshots"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default = out_dir / f"ssvep_session_{stamp}.png"
+        path: Optional[Path]
+        if auto_path:
+            path = default
+        else:
+            chosen, _ = QFileDialog.getSaveFileName(
+                self,
+                "Сохранить график сессии",
+                str(default),
+                "PNG (*.png)",
+            )
+            path = Path(chosen) if chosen else None
+        if path is None:
+            return
+        try:
+            from pyqtgraph.exporters import ImageExporter
+
+            if self._plot_session is not None:
+                exporter = ImageExporter(self._plot_session.plotItem)
+                exporter.parameters()["width"] = 1200
+                exporter.export(str(path))
+            if self._plot_gantt is not None:
+                gpath = path.with_name(path.stem + "_gantt" + path.suffix)
+                exporter_g = ImageExporter(self._plot_gantt.plotItem)
+                exporter_g.parameters()["width"] = 1200
+                exporter_g.export(str(gpath))
+            self._log_line(f"Сохранено: {path}")
+            if auto_path:
+                QMessageBox.information(self, "Сохранено", f"График:\n{path}\n\nGantt:\n{path.with_name(path.stem + '_gantt' + path.suffix)}")
+        except Exception as e:
+            QMessageBox.critical(self, "PNG", str(e))
+
+    def _append_session_point(self, winner: int, hz: float, gate_ok: bool) -> None:
+        if not self._session_active or self._session_t0 is None:
+            return
+        t_base = self._session_time_base()
+        if t_base is None:
+            return
+        t_rel = float(t_base) - float(self._session_t0)
+        self._session_points.append((t_rel, int(winner), float(hz), bool(gate_ok)))
+        self._refresh_session_plot()
+
+    def _refresh_session_plot(self) -> None:
+        if self._curve_session is None:
+            return
+        if not self._session_points:
+            self._curve_session.setData([], [])
+            return
+        xs: List[float] = []
+        ys: List[float] = []
+        for t_rel, winner, _hz, gate_ok in self._session_points:
+            if not gate_ok or winner < 1:
+                continue
+            xs.append(t_rel)
+            ys.append(float(winner))
+        self._curve_session.setData(xs, ys)
+        if xs:
+            n_lamps = max(len(self._freqs_hz), 1)
+            self._plot_session.setXRange(0, max(xs[-1], 1.0), padding=0.05)
+            self._plot_session.setYRange(0.5, float(n_lamps) + 0.5, padding=0)
 
     def _collect_frequencies_from_ui(self) -> Optional[List[float]]:
         if not self._freq_combos:
@@ -739,6 +1073,8 @@ class SSVEPAnalyzerWindow(QMainWindow):
         if self._is_burst_mode():
             self._pull_markers()
 
+        self._update_gantt()
+
         n_show = min(self._buf.shape[0], int(self._nominal_fs * 3))
         tail = self._buf[-n_show:]
         x = np.arange(tail.shape[0], dtype=np.float64) / max(self._nominal_fs, 1.0)
@@ -761,18 +1097,26 @@ class SSVEPAnalyzerWindow(QMainWindow):
         if not ch_idx:
             return
 
+        gate_ok = True
         if self._is_burst_mode():
             if self._marker_inlet is None and not self._try_connect_markers():
                 self._lbl_winner.setText("CURRENT TARGET:\n—\n\n(нет LSL маркеров)")
                 self._lbl_burst_status.setText("Пауза / нет MigalkaStimMarkers")
+                self._update_gantt(gate_allowed=False)
+                self._append_session_point(0, 0.0, False)
                 return
             allowed, reason = self._burst_gate.classify_allowed(self._buf_t)
+            gate_ok = allowed
             self._lbl_burst_status.setText(f"Пакетный гейт: {reason}")
             if not allowed:
                 self._lbl_burst_status.setStyleSheet("color: #f0ad4e; font-size: 12px;")
                 self._lbl_winner.setText(f"CURRENT TARGET:\n—\n\nПАУЗА\n({reason})")
+                self._update_gantt(gate_allowed=False)
+                self._append_session_point(0, 0.0, False)
                 return
             self._lbl_burst_status.setStyleSheet("color: #5cb85c; font-size: 12px;")
+        else:
+            self._last_gate_allowed = True
 
         win_full = self._buf[-self._n_template :].T.copy()  # (channels, samples)
         win = np.ascontiguousarray(win_full[ch_idx, :], dtype=np.float64)
@@ -800,6 +1144,9 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
         score_lines = _coef_to_strings(self._msi, self._freqs_hz)
         self._lbl_scores.setText("Scores / Coef:\n" + "\n".join(score_lines))
+        self._update_gantt(gate_allowed=gate_ok, record_msi=(winner, gate_ok))
+        hz_out = self._freqs_hz[winner - 1] if 0 <= winner - 1 < len(self._freqs_hz) else 0.0
+        self._append_session_point(winner, hz_out, gate_ok)
 
 
 def main() -> None:

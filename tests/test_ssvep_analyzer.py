@@ -66,6 +66,7 @@ class TestSSVEPAnalyzerWindow:
         w = sa.SSVEPAnalyzerWindow()
         assert w._cb_stim_mode.count() == 2
         assert w._cb_stim_mode.currentData() == "continuous"
+        assert len(w._freq_combos) == len(sa.SSVEPAnalyzerWindow.DEFAULT_LAMP_FREQS)
         w.close()
 
     def test_burst_mode_flag(self, qapp: QApplication) -> None:
