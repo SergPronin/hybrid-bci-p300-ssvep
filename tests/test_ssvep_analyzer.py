@@ -67,6 +67,29 @@ class TestSSVEPAnalyzerWindow:
         assert w._cb_stim_mode.count() == 2
         assert w._cb_stim_mode.currentData() == "continuous"
         assert len(w._freq_combos) == len(sa.SSVEPAnalyzerWindow.DEFAULT_LAMP_FREQS)
+        assert w._spin_msi_fs.value() == 250
+        assert w._spin_msi_samples.value() == 500
+        assert w._lbl_msi_points.text() == "4"
+        w.close()
+
+    def test_target_lamp_match(self, qapp: QApplication) -> None:
+        w = sa.SSVEPAnalyzerWindow()
+        w._freqs_hz = [10.0, 12.0, 15.0, 20.0]
+        w._spin_target_lamp.setValue(2)
+        assert w._target_ground_truth_payload()["target_lamp"] == 2
+        assert w._classification_match(2) is True
+        assert w._classification_match(3) is False
+        assert w._classification_match(0) is False
+        w.close()
+
+    def test_msi_samples_and_window_linked(self, qapp: QApplication) -> None:
+        w = sa.SSVEPAnalyzerWindow()
+        w._spin_msi_fs.setValue(500)
+        w._spin_msi_samples.setValue(1000)
+        assert w._n_template == 1000
+        assert w._msi_window_sec == pytest.approx(2.0)
+        w._spin_msi_window_sec.setValue(3.0)
+        assert w._n_template == 1500
         w.close()
 
     def test_burst_mode_flag(self, qapp: QApplication) -> None:

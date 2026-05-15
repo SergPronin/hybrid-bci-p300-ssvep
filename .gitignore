@@ -53,6 +53,7 @@ results/
 saved_data/
 data/
 examination_logs/
+ssvep_experiment_logs/
 *.pkl
 *.ndjson
 *_continuous.csv

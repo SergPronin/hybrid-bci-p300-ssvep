@@ -10,12 +10,13 @@ Standalone SSVEP realtime analyzer: LSL EEG → MSI (MSIController.dll) → GUI.
 from __future__ import annotations
 
 import sys
+import time
 import traceback
 import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Deque, List, Optional, Sequence, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -36,6 +37,9 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QDoubleSpinBox,
+    QGroupBox,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -57,9 +61,16 @@ from ssvep_analysis.burst_gate import (  # noqa: E402
     BurstGate,
     BurstGateConfig,
     append_chunk_timestamps,
+    parse_lsl_marker,
+)
+from ssvep_analysis.experiment_logger import (  # noqa: E402
+    SSVEPExperimentLogger,
+    coef_values,
 )
 from ssvep_analysis.gantt_timeline import GanttExtraRow, StimGanttChart  # noqa: E402
 from ssvep_analysis.migalka_lsl import STREAM_NAME as MIGALKA_MARKER_STREAM  # noqa: E402
+
+EXPERIMENT_LOG_DIR = _REPO / "ssvep_experiment_logs"
 
 # Как в WinForms: for (int i = 1; i <= 500; i++) Items.Add((1000.0f / i).ToString().Replace(',', '.'))
 _LAMP_FREQ_CHOICES: List[Tuple[str, float]] = []
@@ -216,19 +227,23 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._marker_inlet: Optional[StreamInlet] = None
         self._stream_info: Optional[StreamInfo] = None
         self._stim_mode: str = "continuous"  # continuous | burst
-        self._burst_gate = BurstGate(BurstGateConfig(window_sec=self.WINDOW_SEC))
+        self._msi_window_sec: float = self.WINDOW_SEC
+        self._burst_gate = BurstGate(BurstGateConfig(window_sec=self._msi_window_sec))
         self._buf_t: np.ndarray = np.zeros(0, dtype=np.float64)
         self._nominal_fs: float = self.DEFAULT_FS
         self._n_channels: int = 1
+        self._last_msi_exec_ms: Optional[float] = None
 
         self._msi = None
         self._freqs_hz: List[float] = []
-        self._n_template: int = int(round(self.DEFAULT_FS * self.WINDOW_SEC))
+        self._n_template: int = int(round(self.DEFAULT_FS * self._msi_window_sec))
         self._freq_row_widgets: List[QWidget] = []
         self._freq_combos: List[QComboBox] = []
 
         # rolling EEG (samples, channels)
-        self._max_buf: int = int(self.DEFAULT_FS * self.WINDOW_SEC * self.BUFFER_MARGIN) + 64
+        self._max_buf: int = int(
+            self.DEFAULT_FS * self._msi_window_sec * self.BUFFER_MARGIN
+        ) + 64
         self._buf: np.ndarray = np.zeros((0, 1), dtype=np.float64)
 
         self._ch_labels: List[str] = []
@@ -247,9 +262,11 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._plot_session: Optional[pg.PlotWidget] = None
         self._curve_session: Optional[Any] = None
 
-        self._session_active = False
+        self._analysis_active = False
         self._session_t0: Optional[float] = None
         self._session_points: List[Tuple[float, int, float, bool]] = []
+        self._exp_logger: Optional[SSVEPExperimentLogger] = None
+        self._last_log_dir: Optional[Path] = None
 
         self._timer_pull = QTimer(self)
         self._timer_pull.setInterval(self.PULL_MS)
@@ -319,6 +336,72 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._lbl_stream_meta.setWordWrap(True)
         left.addWidget(self._lbl_stream_meta)
 
+        msi_box = QGroupBox("Параметры MSI")
+        msi_grid = QGridLayout(msi_box)
+        msi_grid.addWidget(QLabel("Дискретизация, Гц:"), 0, 0)
+        self._spin_msi_fs = QSpinBox()
+        self._spin_msi_fs.setRange(1, 20000)
+        self._spin_msi_fs.setValue(int(round(self.DEFAULT_FS)))
+        self._spin_msi_fs.setToolTip(
+            "Частота дискретизации для шаблонов sin/cos и длины окна MSIExec.\n"
+            "После Connect подставляется из LSL (можно изменить вручную)."
+        )
+        self._spin_msi_fs.valueChanged.connect(self._on_msi_fs_changed)
+        msi_grid.addWidget(self._spin_msi_fs, 0, 1)
+
+        msi_grid.addWidget(QLabel("Число отсчётов:"), 1, 0)
+        self._spin_msi_samples = QSpinBox()
+        self._spin_msi_samples.setRange(8, 200000)
+        self._spin_msi_samples.setValue(self._n_template)
+        self._spin_msi_samples.setToolTip("Длина окна ЭЭГ и каждого шаблона ModelSignal (сэмплы).")
+        self._spin_msi_samples.valueChanged.connect(self._on_msi_samples_changed)
+        msi_grid.addWidget(self._spin_msi_samples, 1, 1)
+
+        msi_grid.addWidget(QLabel("Окно, с:"), 2, 0)
+        self._spin_msi_window_sec = QDoubleSpinBox()
+        self._spin_msi_window_sec.setRange(0.1, 120.0)
+        self._spin_msi_window_sec.setDecimals(2)
+        self._spin_msi_window_sec.setSingleStep(0.1)
+        self._spin_msi_window_sec.setValue(self._msi_window_sec)
+        self._spin_msi_window_sec.setToolTip(
+            "Длительность окна = число отсчётов / дискретизация. Меняет оба поля согласованно."
+        )
+        self._spin_msi_window_sec.valueChanged.connect(self._on_msi_window_sec_changed)
+        msi_grid.addWidget(self._spin_msi_window_sec, 2, 1)
+
+        msi_grid.addWidget(QLabel("Точек:"), 3, 0)
+        self._lbl_msi_points = QLabel("0")
+        self._lbl_msi_points.setToolTip("Число частот / шаблонов ModelSignal (лампы).")
+        msi_grid.addWidget(self._lbl_msi_points, 3, 1)
+
+        msi_grid.addWidget(QLabel("В буфере:"), 4, 0)
+        self._lbl_msi_buffer = QLabel("0")
+        msi_grid.addWidget(self._lbl_msi_buffer, 4, 1)
+
+        msi_grid.addWidget(QLabel("Время MSI:"), 5, 0)
+        self._lbl_msi_exec = QLabel("—")
+        self._lbl_msi_exec.setToolTip("Длительность последнего вызова MSIExec.")
+        msi_grid.addWidget(self._lbl_msi_exec, 5, 1)
+
+        msi_grid.addWidget(QLabel("Целевая лампа №:"), 6, 0)
+        self._spin_target_lamp = QSpinBox()
+        self._spin_target_lamp.setRange(0, self.MAX_LAMPS)
+        self._spin_target_lamp.setValue(0)
+        self._spin_target_lamp.setSpecialValueText("—")
+        self._spin_target_lamp.setToolTip(
+            "Номер лампы (1…N), на которую смотрит человек (эталон для лога).\n"
+            "Обязательно перед «Начать анализ»."
+        )
+        self._spin_target_lamp.valueChanged.connect(self._on_target_lamp_changed)
+        msi_grid.addWidget(self._spin_target_lamp, 6, 1)
+
+        msi_grid.addWidget(QLabel("Цель vs MSI:"), 7, 0)
+        self._lbl_target_match = QLabel("—")
+        self._lbl_target_match.setWordWrap(True)
+        self._lbl_target_match.setToolTip("Совпадение последнего решения MSI с целевой лампой.")
+        msi_grid.addWidget(self._lbl_target_match, 7, 1)
+        left.addWidget(msi_box)
+
         left.addWidget(QLabel("Частоты SSVEP (лампы), MSI templates"))
         freq_top = QHBoxLayout()
         self._lbl_freq_slots = QLabel(f"Ламп: 0/{self.MAX_LAMPS}")
@@ -361,31 +444,35 @@ class SSVEPAnalyzerWindow(QMainWindow):
         ch_scroll.setWidget(self._ch_grid_host)
         left.addWidget(ch_scroll)
 
-        sess_row = QHBoxLayout()
-        self._btn_session_start = QPushButton("Старт")
-        self._btn_session_start.setToolTip("Начать запись графика сессии (решения MSI по времени).")
-        self._btn_session_start.clicked.connect(self._on_session_start)
-        self._btn_session_stop = QPushButton("Стоп")
-        self._btn_session_stop.setToolTip("Остановить запись и сохранить скриншот.")
-        self._btn_session_stop.clicked.connect(self._on_session_stop)
-        self._btn_session_reset = QPushButton("Сброс")
-        self._btn_session_reset.setToolTip("Очистить график сессии, Gantt и текущий результат.")
-        self._btn_session_reset.clicked.connect(self._on_session_reset)
-        self._btn_session_save = QPushButton("PNG")
-        self._btn_session_save.setToolTip("Сохранить график сессии и Gantt в PNG.")
-        self._btn_session_save.clicked.connect(self._on_session_save_png)
+        anal_row = QHBoxLayout()
+        self._btn_analysis_start = QPushButton("Начать анализ")
+        self._btn_analysis_start.setToolTip(
+            "Запись полного лога (EEG, маркеры, MSI, параметры) + график сессии."
+        )
+        self._btn_analysis_start.clicked.connect(self._on_analysis_start)
+        self._btn_analysis_stop = QPushButton("Остановить")
+        self._btn_analysis_stop.setToolTip("Остановить анализ, сохранить лог и PNG в ssvep_experiment_logs/.")
+        self._btn_analysis_stop.clicked.connect(self._on_analysis_stop)
+        self._btn_analysis_reset = QPushButton("Сбросить")
+        self._btn_analysis_reset.setToolTip("Сброс графиков, Gantt, winner; при записи — сохранить лог и остановить.")
+        self._btn_analysis_reset.clicked.connect(self._on_analysis_reset)
+        self._btn_save_log = QPushButton("Сохранить лог")
+        self._btn_save_log.setToolTip(
+            f"Принудительно завершить запись в {EXPERIMENT_LOG_DIR.name}/ (если идёт анализ)."
+        )
+        self._btn_save_log.clicked.connect(self._on_save_experiment_log)
         for w in (
-            self._btn_session_start,
-            self._btn_session_stop,
-            self._btn_session_reset,
-            self._btn_session_save,
+            self._btn_analysis_start,
+            self._btn_analysis_stop,
+            self._btn_analysis_reset,
+            self._btn_save_log,
         ):
-            sess_row.addWidget(w)
-        left.addLayout(sess_row)
-        self._lbl_session = QLabel("Сессия: не записывается")
-        self._lbl_session.setWordWrap(True)
-        self._lbl_session.setStyleSheet("color: #888; font-size: 11px;")
-        left.addWidget(self._lbl_session)
+            anal_row.addWidget(w)
+        left.addLayout(anal_row)
+        self._lbl_analysis = QLabel("Анализ: не запущен")
+        self._lbl_analysis.setWordWrap(True)
+        self._lbl_analysis.setStyleSheet("color: #888; font-size: 11px;")
+        left.addWidget(self._lbl_analysis)
 
         left.addWidget(QLabel("Status / log"))
         self._log = QTextEdit()
@@ -466,9 +553,75 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
         self._seed_default_lamps()
         self._log_line(
-            "Заданы 4 лампы по умолчанию — Apply, Connect EEG, Старт для записи графика."
+            "Заданы 4 лампы — Apply, Connect EEG, «Начать анализ» для полного лога."
         )
         self._update_freq_slot_label()
+        self._refresh_msi_status_labels()
+
+    def _sync_msi_spins_from_state(self) -> None:
+        widgets = (self._spin_msi_fs, self._spin_msi_samples, self._spin_msi_window_sec)
+        blocked = [w.blockSignals(True) for w in widgets]
+        try:
+            self._spin_msi_fs.setValue(max(1, int(round(self._nominal_fs))))
+            self._spin_msi_samples.setValue(max(8, int(self._n_template)))
+            if self._nominal_fs > 0:
+                self._spin_msi_window_sec.setValue(self._n_template / self._nominal_fs)
+            else:
+                self._spin_msi_window_sec.setValue(self._msi_window_sec)
+        finally:
+            for w, was in zip(widgets, blocked):
+                w.blockSignals(was)
+
+    def _recompute_msi_buffer(self) -> None:
+        self._max_buf = (
+            int(self._nominal_fs * self._msi_window_sec * self.BUFFER_MARGIN) + 64
+        )
+        if self._buf.shape[0] > self._max_buf:
+            self._buf = self._buf[-self._max_buf :]
+            self._buf_t = self._buf_t[-self._max_buf :]
+        cfg = self._burst_gate.config
+        self._burst_gate = BurstGate(
+            BurstGateConfig(
+                window_sec=self._msi_window_sec,
+                min_on_fraction=cfg.min_on_fraction,
+                min_on_sec=cfg.min_on_sec,
+            )
+        )
+        if self._freqs_hz:
+            self._burst_gate.set_active_lamps(len(self._freqs_hz))
+
+    def _on_msi_fs_changed(self, hz: int) -> None:
+        self._nominal_fs = float(max(1, hz))
+        self._n_template = max(8, int(round(self._nominal_fs * self._msi_window_sec)))
+        self._sync_msi_spins_from_state()
+        self._recompute_msi_buffer()
+        self._refresh_msi_status_labels()
+
+    def _on_msi_samples_changed(self, n: int) -> None:
+        self._n_template = max(8, int(n))
+        if self._nominal_fs > 0:
+            self._msi_window_sec = self._n_template / self._nominal_fs
+        self._sync_msi_spins_from_state()
+        self._recompute_msi_buffer()
+        self._refresh_msi_status_labels()
+
+    def _on_msi_window_sec_changed(self, sec: float) -> None:
+        self._msi_window_sec = max(0.1, float(sec))
+        self._n_template = max(8, int(round(self._nominal_fs * self._msi_window_sec)))
+        self._sync_msi_spins_from_state()
+        self._recompute_msi_buffer()
+        self._refresh_msi_status_labels()
+
+    def _refresh_msi_status_labels(self) -> None:
+        n_lamps = len(self._freq_combos) if self._freq_combos else len(self._freqs_hz)
+        self._lbl_msi_points.setText(str(n_lamps))
+        buf_n = int(self._buf.shape[0]) if self._buf is not None else 0
+        need = int(self._n_template)
+        self._lbl_msi_buffer.setText(f"{buf_n} / {need}")
+        if self._last_msi_exec_ms is not None:
+            self._lbl_msi_exec.setText(f"{self._last_msi_exec_ms:.1f} мс")
+        else:
+            self._lbl_msi_exec.setText("—")
 
     def _clear_channel_widgets(self) -> None:
         if self._ch_grid_layout is None:
@@ -607,7 +760,7 @@ class SSVEPAnalyzerWindow(QMainWindow):
             lamp_labels=self._gantt_lamp_labels(),
             intervals=intervals,
             extra_rows=extra,
-            msi_window_sec=self.WINDOW_SEC,
+            msi_window_sec=self._msi_window_sec,
             gate_allowed=self._last_gate_allowed,
             msi_events=list(self._msi_events),
         )
@@ -703,6 +856,16 @@ class SSVEPAnalyzerWindow(QMainWindow):
             except (TypeError, IndexError):
                 val = sample
             self._burst_gate.ingest_marker(float(ts), val)
+            parsed = parse_lsl_marker(val)
+            self._exp_write(
+                "lsl_marker",
+                {
+                    "lsl_time": float(ts),
+                    "raw": str(val),
+                    "lamp_index": parsed[0] if parsed else None,
+                    "is_on": parsed[1] if parsed else None,
+                },
+            )
 
     def _on_refresh_streams(self) -> None:
         self._list_streams.clear()
@@ -745,14 +908,15 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._stream_info = info
         fs = float(info.nominal_srate() or 0.0)
         self._nominal_fs = fs if fs > 1.0 else self.DEFAULT_FS
+        self._n_template = max(8, int(round(self._nominal_fs * self._msi_window_sec)))
         self._n_channels = int(info.channel_count())
         if self._n_channels < 1:
             self._n_channels = 1
 
-        self._max_buf = int(self._nominal_fs * self.WINDOW_SEC * self.BUFFER_MARGIN) + 64
+        self._sync_msi_spins_from_state()
+        self._recompute_msi_buffer()
         self._buf = np.zeros((0, self._n_channels), dtype=np.float64)
         self._buf_t = np.zeros(0, dtype=np.float64)
-        self._burst_gate = BurstGate(BurstGateConfig(window_sec=self.WINDOW_SEC))
         self._msi_events.clear()
         self._clear_gate_history()
         if self._gantt_chart is not None:
@@ -769,6 +933,7 @@ class SSVEPAnalyzerWindow(QMainWindow):
             self._log_line("Warning: nominal_srate missing/low — using default 250 Hz for MSI window length.")
 
         self._rebuild_channel_controls()
+        self._refresh_msi_status_labels()
 
         self._timer_pull.start()
         self._timer_class.start()
@@ -784,6 +949,8 @@ class SSVEPAnalyzerWindow(QMainWindow):
         n = len(self._freq_combos)
         self._lbl_freq_slots.setText(f"Ламп: {n}/{self.MAX_LAMPS}")
         self._btn_freq_add.setEnabled(n < self.MAX_LAMPS)
+        self._spin_target_lamp.setMaximum(max(1, n) if n else self.MAX_LAMPS)
+        self._refresh_msi_status_labels()
 
     def _renumber_freq_rows(self) -> None:
         for idx, row in enumerate(self._freq_row_widgets):
@@ -860,94 +1027,284 @@ class SSVEPAnalyzerWindow(QMainWindow):
             return float(self._buf_t[-1])
         return None
 
-    def _on_session_start(self) -> None:
+    def _stream_info_dict(self) -> Dict[str, Any]:
+        info = self._stream_info
+        if info is None:
+            return {}
+        try:
+            return {
+                "name": info.name(),
+                "type": info.type(),
+                "channel_count": int(info.channel_count()),
+                "nominal_srate": float(info.nominal_srate() or 0.0),
+                "session_id": info.session_id(),
+                "source_id": info.source_id(),
+                "channel_labels": list(self._ch_labels),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _get_target_lamp(self) -> int:
+        return int(self._spin_target_lamp.value())
+
+    def _target_ground_truth_payload(self) -> Dict[str, Any]:
+        lamp = self._get_target_lamp()
+        if lamp < 1:
+            return {"target_lamp": None, "target_hz": None}
+        hz: Optional[float] = None
+        if lamp <= len(self._freqs_hz):
+            hz = float(self._freqs_hz[lamp - 1])
+        return {"target_lamp": lamp, "target_hz": hz}
+
+    def _classification_match(self, predicted_lamp: int) -> Optional[bool]:
+        target = self._get_target_lamp()
+        if target < 1:
+            return None
+        if predicted_lamp < 1:
+            return False
+        return int(predicted_lamp) == target
+
+    def _refresh_target_match_label(self, predicted_lamp: Optional[int]) -> None:
+        target = self._get_target_lamp()
+        if target < 1:
+            self._lbl_target_match.setText("—")
+            self._lbl_target_match.setStyleSheet("color: #888;")
+            return
+        if predicted_lamp is None or predicted_lamp < 1:
+            self._lbl_target_match.setText(f"цель L{target}")
+            self._lbl_target_match.setStyleSheet("color: #aaa;")
+            return
+        if predicted_lamp == target:
+            self._lbl_target_match.setText(f"✓ L{target}")
+            self._lbl_target_match.setStyleSheet("color: #5cb85c; font-weight: bold;")
+        else:
+            self._lbl_target_match.setText(f"✗ цель L{target}, MSI L{predicted_lamp}")
+            self._lbl_target_match.setStyleSheet("color: #f0ad4e; font-weight: bold;")
+
+    def _on_target_lamp_changed(self, _value: int) -> None:
+        n = len(self._freq_combos) or len(self._freqs_hz) or self.MAX_LAMPS
+        self._spin_target_lamp.setMaximum(max(1, n))
+        self._refresh_target_match_label(self._last_winner)
+        payload = self._target_ground_truth_payload()
+        if self._analysis_active:
+            self._exp_write("target_lamp_changed", payload)
+        if payload["target_lamp"]:
+            hz = payload.get("target_hz")
+            extra = f" ({hz:g} Hz)" if hz else ""
+            self._log_line(f"Целевая лампа: L{payload['target_lamp']}{extra}")
+
+    def _snapshot_experiment_params(self) -> Dict[str, Any]:
+        cfg = self._burst_gate.config
+        return {
+            **self._target_ground_truth_payload(),
+            "stim_mode": str(self._cb_stim_mode.currentData()),
+            "nominal_fs_hz": float(self._nominal_fs),
+            "n_template_samples": int(self._n_template),
+            "msi_window_sec": float(self._msi_window_sec),
+            "classify_interval_ms": int(self.CLASSIFY_MS),
+            "pull_interval_ms": int(self.PULL_MS),
+            "gantt_span_sec": float(self.GANTT_SPAN_SEC),
+            "freqs_hz": [float(f) for f in self._freqs_hz],
+            "n_lamps_ui": len(self._freq_combos),
+            "channel_labels": list(self._ch_labels),
+            "selected_channel_indices": self._selected_channel_indices(),
+            "n_channels_stream": int(self._n_channels),
+            "burst_gate": {
+                "window_sec": float(cfg.window_sec),
+                "min_on_fraction": float(cfg.min_on_fraction),
+                "min_on_sec": float(cfg.min_on_sec),
+                "active_lamps": list(self._burst_gate.active_lamps),
+            },
+            "stream": self._stream_info_dict(),
+            "marker_stream": MIGALKA_MARKER_STREAM,
+            "buffer_samples": int(self._buf.shape[0]) if self._buf.size else 0,
+            "max_buf_samples": int(self._max_buf),
+        }
+
+    def _exp_write(self, event: str, data: Optional[Dict[str, Any]] = None) -> None:
+        if self._exp_logger is not None and self._analysis_active:
+            self._exp_logger.write(event, data)
+
+    def _finalize_experiment_log(self, *, reason: str) -> Optional[Path]:
+        if self._exp_logger is None:
+            return self._last_log_dir
+        stop = {
+            "reason": reason,
+            "session_points_count": len(self._session_points),
+            "target_lamp": self._get_target_lamp() or None,
+            "session_points": [
+                {
+                    "t_rel_s": float(t),
+                    "target_lamp": self._get_target_lamp() or None,
+                    "predicted_lamp": int(w),
+                    "hz": float(hz),
+                    "gate_ok": bool(g),
+                    "match": self._classification_match(int(w)) if g and w >= 1 else None,
+                }
+                for t, w, hz, g in self._session_points
+            ],
+            "msi_events_gantt": len(self._msi_events),
+            "last_winner": self._last_winner,
+            "params_end": self._snapshot_experiment_params(),
+        }
+        log_dir = self._exp_logger.finalize(
+            stop_payload=stop,
+            channel_labels=self._ch_labels,
+        )
+        self._last_log_dir = log_dir
+        self._exp_logger = None
+        return log_dir
+
+    def _save_analysis_pngs(self, plots_dir: Path) -> List[Path]:
+        saved: List[Path] = []
+        try:
+            from pyqtgraph.exporters import ImageExporter
+
+            plots_dir.mkdir(parents=True, exist_ok=True)
+            if self._plot_session is not None:
+                p = plots_dir / "session_plot.png"
+                ex = ImageExporter(self._plot_session.plotItem)
+                ex.parameters()["width"] = 1200
+                ex.export(str(p))
+                saved.append(p)
+            if self._plot_gantt is not None:
+                p = plots_dir / "gantt.png"
+                ex = ImageExporter(self._plot_gantt.plotItem)
+                ex.parameters()["width"] = 1200
+                ex.export(str(p))
+                saved.append(p)
+            if self._plot is not None:
+                p = plots_dir / "eeg_rolling.png"
+                ex = ImageExporter(self._plot.plotItem)
+                ex.parameters()["width"] = 1200
+                ex.export(str(p))
+                saved.append(p)
+        except Exception as e:
+            self._log_line(f"PNG export error: {e}")
+        return saved
+
+    def _on_analysis_start(self) -> None:
         if self._inlet is None:
-            QMessageBox.warning(self, "Сессия", "Сначала подключите LSL EEG (Connect).")
+            QMessageBox.warning(self, "Анализ", "Сначала подключите LSL EEG (Connect).")
             return
         if not self._freqs_hz:
-            QMessageBox.warning(self, "Сессия", "Сначала нажмите Apply frequencies.")
+            QMessageBox.warning(self, "Анализ", "Сначала нажмите Apply frequencies.")
+            return
+        if self._msi is None:
+            QMessageBox.warning(self, "Анализ", "MSI не загружен — нажмите Apply frequencies.")
             return
         t0 = self._session_time_base()
         if t0 is None:
-            QMessageBox.warning(self, "Сессия", "Нет данных EEG — дождитесь потока.")
+            QMessageBox.warning(self, "Анализ", "Нет данных EEG — дождитесь потока.")
             return
-        self._session_active = True
+        if self._analysis_active:
+            self._log_line("Анализ уже запущен.")
+            return
+        target = self._get_target_lamp()
+        if target < 1:
+            QMessageBox.warning(
+                self,
+                "Анализ",
+                "Укажите номер целевой лампы (1…N) — на какую лампу смотрит человек.\n"
+                "Поле «Целевая лампа №» в блоке «Параметры MSI».",
+            )
+            return
+        n_lamps = len(self._freqs_hz)
+        if target > n_lamps:
+            QMessageBox.warning(
+                self,
+                "Анализ",
+                f"Целевая лампа L{target}, но задано только {n_lamps} частот(ы).",
+            )
+            return
+        try:
+            self._exp_logger = SSVEPExperimentLogger.open_new(
+                output_root=EXPERIMENT_LOG_DIR,
+                start_payload=self._snapshot_experiment_params(),
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Лог", f"Не удалось создать лог:\n{e}")
+            return
+        self._analysis_active = True
         self._session_t0 = t0
         self._session_points.clear()
+        self._msi_events.clear()
+        self._clear_gate_history()
+        self._last_winner = None
         self._refresh_session_plot()
-        self._lbl_session.setText("Сессия: запись…")
-        self._lbl_session.setStyleSheet("color: #5cb85c;")
-        self._log_line(f"Сессия: старт (t0 LSL = {t0:.3f})")
+        log_dir = self._exp_logger.session_dir
+        self._lbl_analysis.setText(f"Анализ: запись →\n{log_dir.name}")
+        self._lbl_analysis.setStyleSheet("color: #5cb85c; font-size: 11px;")
+        self._log_line(f"Анализ: старт, лог {log_dir}")
+        self._exp_write("analysis_ui_start", {"t0_lsl": t0})
 
-    def _on_session_stop(self) -> None:
-        if not self._session_active:
-            self._log_line("Сессия: не была запущена.")
+    def _on_analysis_stop(self) -> None:
+        if not self._analysis_active:
+            self._log_line("Анализ не был запущен.")
             return
-        self._session_active = False
-        self._lbl_session.setText(f"Сессия: стоп, точек {len(self._session_points)}")
-        self._lbl_session.setStyleSheet("color: #f0ad4e;")
+        self._analysis_active = False
+        log_dir = self._finalize_experiment_log(reason="user_stop")
+        pngs: List[Path] = []
+        if log_dir is not None:
+            pngs = self._save_analysis_pngs(log_dir / "plots")
+        self._lbl_analysis.setText(
+            f"Анализ: остановлен, точек {len(self._session_points)}\n{log_dir}"
+            if log_dir
+            else "Анализ: остановлен"
+        )
+        self._lbl_analysis.setStyleSheet("color: #f0ad4e; font-size: 11px;")
         self._refresh_session_plot()
-        self._log_line("Сессия: стоп — можно сохранить PNG.")
-        self._on_session_save_png(auto_path=True)
+        self._log_line(f"Анализ: стоп. Лог: {log_dir}")
+        if log_dir:
+            QMessageBox.information(
+                self,
+                "Лог сохранён",
+                f"Каталог:\n{log_dir}\n\nevents.ndjson, manifest.json, eeg.npz\nPNG: {len(pngs)}",
+            )
 
-    def _on_session_reset(self) -> None:
-        self._session_active = False
+    def _on_analysis_reset(self) -> None:
+        if self._analysis_active:
+            self._analysis_active = False
+            log_dir = self._finalize_experiment_log(reason="user_reset")
+            if log_dir:
+                self._log_line(f"Анализ: лог сохранён при сбросе → {log_dir}")
         self._session_t0 = None
         self._session_points.clear()
         self._msi_events.clear()
         self._clear_gate_history()
         self._last_winner = None
-        self._burst_gate = BurstGate(BurstGateConfig(window_sec=self.WINDOW_SEC))
-        if self._freqs_hz:
-            self._burst_gate.set_active_lamps(len(self._freqs_hz))
+        self._recompute_msi_buffer()
         if self._curve_session is not None:
             self._curve_session.setData([], [])
         if self._gantt_chart is not None:
             self._gantt_chart.clear()
         self._lbl_winner.setText("CURRENT TARGET:\n—")
         self._lbl_scores.setText("Scores / Coef:\n—")
-        self._lbl_session.setText("Сессия: сброшена")
-        self._lbl_session.setStyleSheet("color: #888;")
-        self._log_line("Сессия: сброс (график, Gantt, winner).")
+        self._lbl_analysis.setText("Анализ: сброшен")
+        self._lbl_analysis.setStyleSheet("color: #888; font-size: 11px;")
+        self._log_line("Анализ: сброс (графики, Gantt, winner).")
 
-    def _on_session_save_png(self, *, auto_path: bool = False) -> None:
-        out_dir = _REPO / "screenshots"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default = out_dir / f"ssvep_session_{stamp}.png"
-        path: Optional[Path]
-        if auto_path:
-            path = default
-        else:
-            chosen, _ = QFileDialog.getSaveFileName(
-                self,
-                "Сохранить график сессии",
-                str(default),
-                "PNG (*.png)",
-            )
-            path = Path(chosen) if chosen else None
-        if path is None:
+    def _on_save_experiment_log(self) -> None:
+        if self._analysis_active and self._exp_logger is not None:
+            self._analysis_active = False
+            log_dir = self._finalize_experiment_log(reason="manual_save")
+            if log_dir:
+                self._save_analysis_pngs(log_dir / "plots")
+                self._lbl_analysis.setText(f"Лог сохранён:\n{log_dir.name}")
+                QMessageBox.information(self, "Лог", f"Сохранено:\n{log_dir}")
+                self._log_line(f"Лог сохранён вручную: {log_dir}")
             return
-        try:
-            from pyqtgraph.exporters import ImageExporter
-
-            if self._plot_session is not None:
-                exporter = ImageExporter(self._plot_session.plotItem)
-                exporter.parameters()["width"] = 1200
-                exporter.export(str(path))
-            if self._plot_gantt is not None:
-                gpath = path.with_name(path.stem + "_gantt" + path.suffix)
-                exporter_g = ImageExporter(self._plot_gantt.plotItem)
-                exporter_g.parameters()["width"] = 1200
-                exporter_g.export(str(gpath))
-            self._log_line(f"Сохранено: {path}")
-            if auto_path:
-                QMessageBox.information(self, "Сохранено", f"График:\n{path}\n\nGantt:\n{path.with_name(path.stem + '_gantt' + path.suffix)}")
-        except Exception as e:
-            QMessageBox.critical(self, "PNG", str(e))
+        if self._last_log_dir is not None and self._last_log_dir.is_dir():
+            QMessageBox.information(
+                self,
+                "Лог",
+                f"Последний каталог:\n{self._last_log_dir}",
+            )
+            return
+        QMessageBox.warning(self, "Лог", "Нет активной записи. Сначала «Начать анализ».")
 
     def _append_session_point(self, winner: int, hz: float, gate_ok: bool) -> None:
-        if not self._session_active or self._session_t0 is None:
+        if not self._analysis_active or self._session_t0 is None:
             return
         t_base = self._session_time_base()
         if t_base is None:
@@ -1011,14 +1368,18 @@ class SSVEPAnalyzerWindow(QMainWindow):
     def _apply_model_signals_to_msi(self) -> None:
         assert self._msi is not None
         fs = self._nominal_fs
-        np_models = tme.generate_model_signals(self._freqs_hz, fs, self.WINDOW_SEC)
-        self._n_template = int(np_models[0].shape[1]) if np_models else int(round(fs * self.WINDOW_SEC))
+        np_models = tme.generate_model_signals(self._freqs_hz, fs, self._msi_window_sec)
+        self._n_template = (
+            int(np_models[0].shape[1]) if np_models else int(round(fs * self._msi_window_sec))
+        )
+        self._sync_msi_spins_from_state()
         model_list = tme.build_model_signal_list(self._msi, np_models, verbose=False)
         self._msi.ModelSignal = model_list
         self._log_line(
             f"Frequencies updated: {', '.join(f'{f:g}' for f in self._freqs_hz)} Hz; "
             f"template length = {self._n_template} samples @ {fs:g} Hz."
         )
+        self._refresh_msi_status_labels()
 
     def _on_apply_frequencies(self) -> None:
         freqs = self._collect_frequencies_from_ui()
@@ -1070,10 +1431,17 @@ class SSVEPAnalyzerWindow(QMainWindow):
             self._buf = self._buf[-self._max_buf :]
             self._buf_t = self._buf_t[-self._max_buf :]
 
+        if self._analysis_active and self._exp_logger is not None:
+            self._exp_logger.append_eeg_chunk(
+                self._buf_t[-n_new:],
+                arr,
+            )
+
         if self._is_burst_mode():
             self._pull_markers()
 
         self._update_gantt()
+        self._refresh_msi_status_labels()
 
         n_show = min(self._buf.shape[0], int(self._nominal_fs * 3))
         tail = self._buf[-n_show:]
@@ -1104,6 +1472,7 @@ class SSVEPAnalyzerWindow(QMainWindow):
                 self._lbl_burst_status.setText("Пауза / нет MigalkaStimMarkers")
                 self._update_gantt(gate_allowed=False)
                 self._append_session_point(0, 0.0, False)
+                self._exp_write("burst_gate", {"allowed": False, "reason": "no_marker_stream"})
                 return
             allowed, reason = self._burst_gate.classify_allowed(self._buf_t)
             gate_ok = allowed
@@ -1113,6 +1482,7 @@ class SSVEPAnalyzerWindow(QMainWindow):
                 self._lbl_winner.setText(f"CURRENT TARGET:\n—\n\nПАУЗА\n({reason})")
                 self._update_gantt(gate_allowed=False)
                 self._append_session_point(0, 0.0, False)
+                self._exp_write("burst_gate", {"allowed": False, "reason": reason})
                 return
             self._lbl_burst_status.setStyleSheet("color: #5cb85c; font-size: 12px;")
         else:
@@ -1122,13 +1492,62 @@ class SSVEPAnalyzerWindow(QMainWindow):
         win = np.ascontiguousarray(win_full[ch_idx, :], dtype=np.float64)
         try:
             managed = tme.numpy_to_double_matrix2d(win, verbose=False)
+            t0 = time.perf_counter()
             winner = int(self._msi.MSIExec(managed))
+            self._last_msi_exec_ms = (time.perf_counter() - t0) * 1000.0
+            self._refresh_msi_status_labels()
         except Exception as e:
             self._log_line(f"MSIExec error: {e}")
+            self._exp_write("msi_exec_error", {"error": str(e)})
             return
+
+        t_lsl = self._session_time_base()
+        coefs = coef_values(self._msi, len(self._freqs_hz))
+        prev_winner = self._last_winner
+        tgt = self._target_ground_truth_payload()
+        match = self._classification_match(int(winner))
+        self._refresh_target_match_label(int(winner))
+        self._exp_write(
+            "msi_classify",
+            {
+                "lsl_time": t_lsl,
+                "target_lamp": tgt["target_lamp"],
+                "target_hz": tgt["target_hz"],
+                "predicted_lamp": int(winner),
+                "predicted_hz": (
+                    float(self._freqs_hz[winner - 1])
+                    if 1 <= winner <= len(self._freqs_hz)
+                    else None
+                ),
+                "match": match,
+                "winner": int(winner),
+                "winner_prev": prev_winner,
+                "gate_ok": bool(gate_ok),
+                "coef_by_freq_hz": {
+                    f"{self._freqs_hz[i]:g}": coefs[i]
+                    for i in range(len(self._freqs_hz))
+                },
+                "coefs": coefs,
+                "msi_exec_ms": self._last_msi_exec_ms,
+                "channels_used": ch_idx,
+                "n_template": int(self._n_template),
+                "buf_samples": int(self._buf.shape[0]),
+            },
+        )
 
         if winner != self._last_winner:
             self._log_line(f"Winner changed → {winner}")
+            self._exp_write(
+                "winner_changed",
+                {
+                    "winner": int(winner),
+                    "prev": prev_winner,
+                    "lsl_time": t_lsl,
+                    "target_lamp": tgt["target_lamp"],
+                    "predicted_lamp": int(winner),
+                    "match": match,
+                },
+            )
             self._last_winner = winner
 
         # 1-based индекс шаблона (как в smoke test test_msi_exec)
