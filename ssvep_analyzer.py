@@ -47,7 +47,13 @@ for _p in (str(_SCRIPTS), str(_REPO)):
 
 import test_msi_exec as tme  # noqa: E402
 
-from p300_analysis.lsl_streams import stream_inlet_with_buffer  # noqa: E402
+from p300_analysis.lsl_streams import resolve_marker_streams, stream_inlet_with_buffer  # noqa: E402
+from ssvep_analysis.burst_gate import (  # noqa: E402
+    BurstGate,
+    BurstGateConfig,
+    append_chunk_timestamps,
+)
+from ssvep_analysis.migalka_lsl import STREAM_NAME as MIGALKA_MARKER_STREAM  # noqa: E402
 
 # Как в WinForms: for (int i = 1; i <= 500; i++) Items.Add((1000.0f / i).ToString().Replace(',', '.'))
 _LAMP_FREQ_CHOICES: List[Tuple[str, float]] = []
@@ -192,7 +198,11 @@ class SSVEPAnalyzerWindow(QMainWindow):
         pg.setConfigOption("foreground", "#E0E0E0")
 
         self._inlet: Optional[StreamInlet] = None
+        self._marker_inlet: Optional[StreamInlet] = None
         self._stream_info: Optional[StreamInfo] = None
+        self._stim_mode: str = "continuous"  # continuous | burst
+        self._burst_gate = BurstGate(BurstGateConfig(window_sec=self.WINDOW_SEC))
+        self._buf_t: np.ndarray = np.zeros(0, dtype=np.float64)
         self._nominal_fs: float = self.DEFAULT_FS
         self._n_channels: int = 1
 
@@ -247,6 +257,24 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
         self._lbl_stream_meta = QLabel("Not connected")
         self._lbl_stream_meta.setWordWrap(True)
+
+        stim_row = QHBoxLayout()
+        stim_row.addWidget(QLabel("Режим стимула:"))
+        self._cb_stim_mode = QComboBox()
+        self._cb_stim_mode.addItem("Постоянный", "continuous")
+        self._cb_stim_mode.addItem("Пакетный (Migalka)", "burst")
+        self._cb_stim_mode.setToolTip(
+            "Постоянный: MSI на каждом окне 2 с.\n"
+            "Пакетный: MSI только при достаточной вспышке (LSL MigalkaStimMarkers)."
+        )
+        self._cb_stim_mode.currentIndexChanged.connect(self._on_stim_mode_changed)
+        stim_row.addWidget(self._cb_stim_mode, stretch=1)
+        root.addLayout(stim_row)
+
+        self._lbl_burst_status = QLabel("Пакетный гейт: —")
+        self._lbl_burst_status.setWordWrap(True)
+        self._lbl_burst_status.setStyleSheet("color: #aaa; font-size: 12px;")
+        root.addWidget(self._lbl_burst_status)
 
         root.addWidget(QLabel("LSL stream"))
         root.addWidget(lsl_box)
@@ -406,7 +434,83 @@ class SSVEPAnalyzerWindow(QMainWindow):
             except Exception:
                 pass
             self._inlet = None
+        if self._marker_inlet is not None:
+            try:
+                self._marker_inlet.close_stream()
+            except Exception:
+                pass
+            self._marker_inlet = None
         super().closeEvent(event)
+
+    def _is_burst_mode(self) -> bool:
+        return self._cb_stim_mode.currentData() == "burst"
+
+    def _on_stim_mode_changed(self) -> None:
+        if self._is_burst_mode():
+            self._log_line(
+                "Пакетный режим: запустите migalka.py, затем Connect EEG. "
+                f"Нужен LSL «{MIGALKA_MARKER_STREAM}»."
+            )
+            self._try_connect_markers()
+        else:
+            self._lbl_burst_status.setText("Пакетный гейт: выкл (постоянный режим)")
+            self._lbl_burst_status.setStyleSheet("color: #888; font-size: 12px;")
+
+    def _try_connect_markers(self) -> bool:
+        if self._marker_inlet is not None:
+            return True
+        try:
+            streams = resolve_marker_streams(timeout=1.5, attempts=2)
+        except Exception as e:
+            self._log_line(f"Markers resolve error: {e}")
+            return False
+        pick: Optional[StreamInfo] = None
+        for s in streams:
+            try:
+                if (s.name() or "") == MIGALKA_MARKER_STREAM:
+                    pick = s
+                    break
+            except Exception:
+                continue
+        if pick is None and streams:
+            pick = streams[0]
+        if pick is None:
+            self._lbl_burst_status.setText(
+                f"Маркеры: не найдены (запустите migalka.py → «{MIGALKA_MARKER_STREAM}»)"
+            )
+            self._lbl_burst_status.setStyleSheet("color: #d9534f; font-size: 12px;")
+            return False
+        try:
+            self._marker_inlet = stream_inlet_with_buffer(pick, buffer_seconds=60)
+            self._marker_inlet.open_stream(timeout=2.0)
+            self._lbl_burst_status.setText(f"Маркеры: {pick.name()!r}")
+            self._lbl_burst_status.setStyleSheet("color: #5cb85c; font-size: 12px;")
+            self._log_line(f"Marker stream connected: {pick.name()!r}")
+            return True
+        except Exception as e:
+            self._log_line(f"Marker connect failed: {e}")
+            self._marker_inlet = None
+            return False
+
+    def _pull_markers(self) -> None:
+        if self._marker_inlet is None:
+            return
+        try:
+            try:
+                chunk, stamps = self._marker_inlet.pull_chunk(timeout=0.0, max_samples=256)
+            except TypeError:
+                chunk, stamps = self._marker_inlet.pull_chunk(timeout=0.0)
+        except Exception as e:
+            self._log_line(f"Marker pull error: {e}")
+            return
+        if not chunk:
+            return
+        for sample, ts in zip(chunk, stamps):
+            try:
+                val = sample[0] if sample else ""
+            except (TypeError, IndexError):
+                val = sample
+            self._burst_gate.ingest_marker(float(ts), val)
 
     def _on_refresh_streams(self) -> None:
         self._list_streams.clear()
@@ -455,6 +559,8 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
         self._max_buf = int(self._nominal_fs * self.WINDOW_SEC * self.BUFFER_MARGIN) + 64
         self._buf = np.zeros((0, self._n_channels), dtype=np.float64)
+        self._buf_t = np.zeros(0, dtype=np.float64)
+        self._burst_gate = BurstGate(BurstGateConfig(window_sec=self.WINDOW_SEC))
 
         meta = (
             f"Connected: {info.name()!r}\n"
@@ -470,6 +576,9 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
         self._timer_pull.start()
         self._timer_class.start()
+
+        if self._is_burst_mode():
+            self._try_connect_markers()
 
         # пересобрать шаблоны под фактический fs, если MSI уже инициализирован
         if self._msi is not None and self._freqs_hz:
@@ -582,6 +691,7 @@ class SSVEPAnalyzerWindow(QMainWindow):
         if freqs is None:
             return
         self._freqs_hz = freqs
+        self._burst_gate.set_active_lamps(len(freqs))
         if not self._ensure_msi():
             return
         try:
@@ -604,6 +714,8 @@ class SSVEPAnalyzerWindow(QMainWindow):
             self._log_line(f"LSL pull error: {e}")
             return
         if not chunk:
+            if self._is_burst_mode():
+                self._pull_markers()
             return
         arr = np.asarray(chunk, dtype=np.float64)
         if arr.ndim == 1:
@@ -612,11 +724,20 @@ class SSVEPAnalyzerWindow(QMainWindow):
             # динамическое число каналов (редко)
             self._n_channels = int(arr.shape[1])
             self._buf = np.zeros((0, self._n_channels), dtype=np.float64)
+            self._buf_t = np.zeros(0, dtype=np.float64)
             self._rebuild_channel_controls()
 
+        n_new = int(arr.shape[0])
+        self._buf_t = append_chunk_timestamps(
+            self._buf_t, ts if ts is not None else [], n_new, self._nominal_fs
+        )
         self._buf = np.vstack([self._buf, arr])
         if self._buf.shape[0] > self._max_buf:
             self._buf = self._buf[-self._max_buf :]
+            self._buf_t = self._buf_t[-self._max_buf :]
+
+        if self._is_burst_mode():
+            self._pull_markers()
 
         n_show = min(self._buf.shape[0], int(self._nominal_fs * 3))
         tail = self._buf[-n_show:]
@@ -639,6 +760,20 @@ class SSVEPAnalyzerWindow(QMainWindow):
         ch_idx = self._selected_channel_indices()
         if not ch_idx:
             return
+
+        if self._is_burst_mode():
+            if self._marker_inlet is None and not self._try_connect_markers():
+                self._lbl_winner.setText("CURRENT TARGET:\n—\n\n(нет LSL маркеров)")
+                self._lbl_burst_status.setText("Пауза / нет MigalkaStimMarkers")
+                return
+            allowed, reason = self._burst_gate.classify_allowed(self._buf_t)
+            self._lbl_burst_status.setText(f"Пакетный гейт: {reason}")
+            if not allowed:
+                self._lbl_burst_status.setStyleSheet("color: #f0ad4e; font-size: 12px;")
+                self._lbl_winner.setText(f"CURRENT TARGET:\n—\n\nПАУЗА\n({reason})")
+                return
+            self._lbl_burst_status.setStyleSheet("color: #5cb85c; font-size: 12px;")
+
         win_full = self._buf[-self._n_template :].T.copy()  # (channels, samples)
         win = np.ascontiguousarray(win_full[ch_idx, :], dtype=np.float64)
         try:
