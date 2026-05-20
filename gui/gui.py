@@ -36,6 +36,14 @@ def _parse_int(s: str, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
 
+def _clamp_int(v: int, lo: int, hi: int, *, default: int) -> int:
+    try:
+        x = int(v)
+    except (TypeError, ValueError):
+        x = int(default)
+    return max(int(lo), min(int(hi), x))
+
+
 class StimulusApp:
     def __init__(
         self,
