@@ -248,6 +248,7 @@ class ProtocolRunner:
         self._pause_status = None
         self._pause_next_state = None
         self._pause_next_ssvep_mode = None
+        self._set_ssvep_cue_overlay(ssvep_mode=None)
         if next_state:
             self._set_state(next_state, detail="pause finished")
             if next_state in (ProtocolState.SSVEP_CONT, ProtocolState.SSVEP_BURST) and next_mode is not None:
@@ -675,7 +676,6 @@ class ProtocolRunner:
                 f"Повтор через 3 с (закройте migalka.py, если порт занят)."
             )
             self._logger.write("migalka_error", {"port": str(self.cfg.com_port), "error": str(e), "mode": str(mode)})
-            self._set_ssvep_cue_overlay(ssvep_mode=str(mode))
             return
 
         self._ssvep_migalka_fail_streak = 0
