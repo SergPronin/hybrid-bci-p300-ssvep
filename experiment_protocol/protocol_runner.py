@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover
 from experiment_protocol.unified_logger import UnifiedExperimentLogger
 from p300_analysis.constants import EEG_PULL_MAX_SAMPLES, MARKERS_PULL_MAX_SAMPLES
 from p300_analysis.lsl_streams import find_allowed_eeg_streams, resolve_marker_streams, stream_inlet_with_buffer
+from p300_analysis.marker_parsing import parse_trial_target_tile_id
 from p300_analysis.online_engine import P300EngineParams, P300OnlineEngine
 from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_TEMPLATE_CORR
 from ssvep_analysis.migalka_serial_controller import MigalkaConfig, MigalkaSerialController
@@ -80,8 +81,8 @@ class ProtocolRunner:
         self._ssvep_block_count_cont = 0
         self._ssvep_block_count_burst = 0
 
-        self._current_trial_started_at: Optional[float] = None
-        self._last_seen_cue: Optional[int] = None
+        # True после каждого LSL trial_start|target=N; сбрасываем после записи trial (см. _run_p300_trials).
+        self._p300_trial_armed: bool = False
 
         self._ssvep_block_started_at: Optional[float] = None
         self._ssvep_target_lamp: Optional[int] = None
@@ -197,6 +198,11 @@ class ProtocolRunner:
             marker_chunk, marker_ts = self._inlet_markers.pull_chunk(timeout=0.0)
         if marker_ts:
             self._logger.write("markers_chunk", {"n": int(len(marker_ts))})
+            for sample in marker_chunk:
+                tid = parse_trial_target_tile_id(sample)
+                if tid is not None:
+                    self._p300_trial_armed = True
+                    self._logger.write("protocol_trial_start_arm", {"cue_target_tile_id": int(tid)})
             self._p300.ingest_marker_chunk(marker_chunk=marker_chunk, marker_ts=marker_ts, lsl_local_clock_now=now_lc)
 
         # EEG
@@ -225,8 +231,7 @@ class ProtocolRunner:
             roi_channels_0idx=(),
         )
         self._p300.reset(params=prof)
-        self._current_trial_started_at = None
-        self._last_seen_cue = None
+        self._p300_trial_armed = False
 
     def _warmup_template(self) -> None:
         assert self._logger is not None
@@ -243,24 +248,14 @@ class ProtocolRunner:
             self.state = ProtocolState.P300_TEMPLATE
             self.status_text = "P300 template_corr: стартовали основной блок."
 
-    def _trial_boundary_update(self) -> None:
-        """Track cue changes as trial boundaries (requires stimulator to emit trial_start|target=N)."""
-        cue = self._p300.current_cue_target_id
-        if cue is None:
-            return
-        if self._last_seen_cue is None or int(cue) != int(self._last_seen_cue):
-            self._last_seen_cue = int(cue)
-            self._current_trial_started_at = float(time.time())
-            if self._logger is not None:
-                self._logger.write("trial_start", {"cue_target_tile_id": int(cue)})
-
     def _run_p300_trials(self, *, winner_mode: str) -> None:
         assert self._logger is not None
-        self._trial_boundary_update()
-
-        # decision only makes sense after at least one cue
-        if self._last_seen_cue is None:
+        if not self._p300_trial_armed:
             self.status_text = f"P300 {winner_mode}: ждём trial_start|target=…"
+            return
+        cue_tid = self._p300.current_cue_target_id
+        if cue_tid is None:
+            self.status_text = f"P300 {winner_mode}: нет cue target (ожидаем -1|trial_start|…)"
             return
 
         decision = self._p300.compute_decision(winner_mode=winner_mode)
@@ -268,10 +263,10 @@ class ProtocolRunner:
             self.status_text = f"P300 {winner_mode}: сбор… min_epochs={decision.min_epochs_per_class}"
             return
 
-        # Record trial outcome and wait for next cue change to start next trial.
+        # Record trial outcome; ждём следующий trial_start (даже если target тот же).
         rec = {
             "winner_mode": str(winner_mode),
-            "cue_target_tile_id": int(self._last_seen_cue) if self._last_seen_cue is not None else None,
+            "cue_target_tile_id": int(cue_tid),
             "winner_key": decision.winner_key,
             "mode_used": decision.mode_used,
             "debug": decision.debug,
@@ -289,8 +284,7 @@ class ProtocolRunner:
             done = self._p300_trial_count_template >= int(self.cfg.p300_trials_per_mode)
 
         self._p300.reset(params=self._p300.params)  # preserve params but clear buffers
-        self._current_trial_started_at = None
-        self._last_seen_cue = None
+        self._p300_trial_armed = False
 
         if done:
             if winner_mode == WINNER_MODE_AUC:
@@ -303,7 +297,7 @@ class ProtocolRunner:
                 self.state = ProtocolState.SSVEP_CONT
                 self._start_ssvep_block(mode="continuous")
         else:
-            self.status_text = f"P300 {winner_mode}: trial записан ({self._p300_trial_count_auc if winner_mode == WINNER_MODE_AUC else self._p300_trial_count_template}/{self.cfg.p300_trials_per_mode}), ждём следующий cue…"
+            self.status_text = f"P300 {winner_mode}: trial записан ({self._p300_trial_count_auc if winner_mode == WINNER_MODE_AUC else self._p300_trial_count_template}/{self.cfg.p300_trials_per_mode}), ждём следующий trial_start…"
 
     def _on_migalka_event(self, ev: Tuple[int, bool, str]) -> None:
         # Feed burst gate via SSVEP engine

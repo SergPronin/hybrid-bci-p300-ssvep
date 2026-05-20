@@ -26,6 +26,22 @@ pip install -r requirements.txt
 python run_app.py
 ```
 
+**Автоматические trial с случайной целью (без кнопки START, для клинического протокола):**
+
+```bash
+python run_app.py --auto-random-protocol --no-analyzer
+```
+
+После каждого `trial_end` начинается новый trial; цель `0..8` выбирается случайно. Пауза между trial: `--inter-trial-s 1.0` (сек).
+
+**Единый protocol runner (P300×2 + SSVEP×2, лог сессии):**
+
+```bash
+python scripts/protocol_runner_gui.py
+```
+
+При включённом чекбоксе «Запускать экранную стимуляцию…» перед стартом протокола поднимается `run_app.py` с `--auto-random-protocol --no-analyzer`.
+
 **Анализатор P300 (подключение к ЭЭГ и потоку Markers):**
 
 ```bash

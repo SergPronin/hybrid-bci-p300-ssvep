@@ -1,3 +1,4 @@
+import random
 from typing import List, Tuple
 
 from psychopy import core, event, visual
@@ -36,7 +37,14 @@ def _parse_int(s: str, default: int, lo: int, hi: int) -> int:
 
 
 class StimulusApp:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        auto_random_trials: bool = False,
+        inter_trial_s: float = 1.0,
+    ) -> None:
+        self.auto_random_trials = bool(auto_random_trials)
+        self.inter_trial_s = max(0.0, float(inter_trial_s))
         self.win = visual.Window(
             size=config.WINDOW_SIZE,
             color=config.WINDOW_COLOR,
@@ -54,7 +62,9 @@ class StimulusApp:
             cue_color=config.CUE_COLOR,
             stim_color=config.STIM_COLOR,
         )
-        self.show_controls = True
+        # Автопротокол: без клика START сразу идём в полный экран и циклы trial с случайной целью.
+        self.show_controls = not self.auto_random_trials
+        self._auto_pending_first_trial = bool(self.auto_random_trials)
         self._tiles_visual: list = []
         self._tile_texts: list = []
         self._build_visual_grid()
@@ -79,6 +89,8 @@ class StimulusApp:
             self.win, text="STOP", pos=config.STOP_BUTTON_POS, color="black", height=18
         )
         self.mouse = event.Mouse(win=self.win)
+        if self.auto_random_trials:
+            self.win.mouseVisible = False
 
         px = self._right_panel_x()
         y = config.PANEL_FIRST_ROW_Y
@@ -231,6 +243,31 @@ class StimulusApp:
         self.tb_target.text = str(tgt)
         return seq, tgt
 
+    def _start_trial_with_target(self, target_tile_id: int) -> None:
+        """Один trial: trial_config в LSL (для логов) + start_experiment с фиксированной целью."""
+        sequences, _ = self._read_settings()
+        if sequences <= 0:
+            return
+        tgt = int(target_tile_id)
+        tgt = max(0, min(len(self.grid.tiles) - 1, tgt))
+        self.tb_target.text = str(tgt)
+        cfg_payload = (
+            f"trial_config|target={tgt};sequences={sequences};"
+            f"isi_s={self.controller.isi:.3f};flash_s={self.controller.flash_duration:.3f};"
+            f"cue_s={self.controller.cue_duration:.3f};ready_s={self.controller.ready_duration:.3f};"
+            f"inter_block_s={self.controller.inter_block_s:.3f};grid={self.grid.size}x{self.grid.size}"
+        )
+        self.win.callOnFlip(self.controller.lsl.send, -3, cfg_payload)
+        self.show_controls = False
+        self.win.mouseVisible = False
+        self.controller.start_experiment(sequences, target_tile_id=tgt)
+        core.wait(0.2)
+
+    def _start_trial_random_target(self) -> None:
+        """Случайная цель 0..N-1 на каждый trial (для клинического автопротокола)."""
+        tgt = random.randint(0, len(self.grid.tiles) - 1)
+        self._start_trial_with_target(tgt)
+
     def _draw(self) -> None:
         for (tile, rect, tile_text) in zip(
             self.grid.tiles, self._tiles_visual, self._tile_texts
@@ -268,17 +305,7 @@ class StimulusApp:
                 sequences, target_tile_id = self._read_settings()
                 if sequences <= 0:
                     return
-                cfg_payload = (
-                    f"trial_config|target={target_tile_id};sequences={sequences};"
-                    f"isi_s={self.controller.isi:.3f};flash_s={self.controller.flash_duration:.3f};"
-                    f"cue_s={self.controller.cue_duration:.3f};ready_s={self.controller.ready_duration:.3f};"
-                    f"inter_block_s={self.controller.inter_block_s:.3f};grid={self.grid.size}x{self.grid.size}"
-                )
-                self.win.callOnFlip(self.controller.lsl.send, -3, cfg_payload)
-                self.show_controls = False
-                self.win.mouseVisible = False
-                self.controller.start_experiment(sequences, target_tile_id=target_tile_id)
-                core.wait(0.2)
+                self._start_trial_with_target(target_tile_id)
             if self.mouse.isPressedIn(self.stop_button):
                 self.controller.stop()
                 self.show_controls = True
@@ -287,6 +314,9 @@ class StimulusApp:
 
     def run(self) -> None:
         while True:
+            if self._auto_pending_first_trial:
+                self._auto_pending_first_trial = False
+                self._start_trial_random_target()
             self._handle_buttons()
             event_data = self.controller.update()
             if event_data:
@@ -304,9 +334,14 @@ class StimulusApp:
                 elif event_data.get("event") == "trial_end":
                     self.win.callOnFlip(self.controller.lsl.send, -2, "trial_end")
                     print("TRIAL END")
-                    self.controller.stop()
-                    self.show_controls = True
-                    self.win.mouseVisible = True
+                    if self.auto_random_trials:
+                        core.wait(self.inter_trial_s)
+                        self.controller.stop()
+                        self._start_trial_random_target()
+                    else:
+                        self.controller.stop()
+                        self.show_controls = True
+                        self.win.mouseVisible = True
             self._draw()
             self.win.flip()
             keys = event.getKeys()

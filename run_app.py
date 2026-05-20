@@ -1,3 +1,4 @@
+import argparse
 import os
 import subprocess
 import sys
@@ -27,16 +28,38 @@ def main() -> None:
     os.chdir(root)
     sys.path.insert(0, str(root))
 
+    parser = argparse.ArgumentParser(description="Запуск стимулятора плиток (PsychoPy) и опций.")
+    parser.add_argument(
+        "--auto-random-protocol",
+        action="store_true",
+        help="Без экранных кнопок: сразу trial, новая случайная цель после каждого trial_end.",
+    )
+    parser.add_argument(
+        "--no-analyzer",
+        action="store_true",
+        help="Не поднимать отдельно scripts/p300_analyzer.py (для protocol_runner и т.п.).",
+    )
+    parser.add_argument(
+        "--inter-trial-s",
+        type=float,
+        default=1.0,
+        help="Пауза между trial в режиме --auto-random-protocol, сек.",
+    )
+    args = parser.parse_args()
+
     analyzer_proc: subprocess.Popen[str] | None = None
     analyzer_script = root / "scripts" / "p300_analyzer.py"
-    if analyzer_script.exists():
+    if not args.no_analyzer and analyzer_script.exists():
         analyzer_proc = subprocess.Popen([sys.executable, str(analyzer_script)])
-    else:
+    elif not args.no_analyzer:
         print(f"[run_app] Warning: analyzer script not found: {analyzer_script}")
 
     from app.main import main as app_main
 
-    app_main()
+    app_main(
+        auto_random_trials=bool(args.auto_random_protocol),
+        inter_trial_s=float(args.inter_trial_s),
+    )
     if analyzer_proc is not None and analyzer_proc.poll() is None:
         print(
             "[run_app] Stimulator closed. P300 analyzer keeps running in a separate window/process."

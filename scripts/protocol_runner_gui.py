@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import subprocess
 
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -35,6 +37,7 @@ class ProtocolRunnerWidget(QWidget):
         self.setMinimumWidth(640)
 
         self._runner: ProtocolRunner | None = None
+        self._stimulus_proc: subprocess.Popen[str] | None = None
 
         root = QVBoxLayout(self)
         form = QFormLayout()
@@ -51,11 +54,22 @@ class ProtocolRunnerWidget(QWidget):
         self.spin_ssvep.setRange(1, 200)
         self.spin_ssvep.setValue(15)
 
+        self.chk_run_stimulus = QCheckBox(
+            "Запускать экранную стимуляцию (PsychoPy, случайная цель, без клика START)"
+        )
+        self.chk_run_stimulus.setChecked(True)
+        self.chk_run_stimulus.setToolTip(
+            "Поднимает `python run_app.py --auto-random-protocol --no-analyzer`.\n"
+            "Нужен Python с установленным psychopy.\n"
+            "Маркеры trial_start/target идут в LSL как и при ручном START."
+        )
+
         form.addRow("Subject ID:", self.ed_subject)
         form.addRow("Output root:", self.ed_output)
         form.addRow("COM port (Migalka):", self.ed_com)
         form.addRow("P300 trials per mode:", self.spin_p300)
         form.addRow("SSVEP blocks per mode:", self.spin_ssvep)
+        form.addRow("", self.chk_run_stimulus)
 
         root.addLayout(form)
 
@@ -91,6 +105,16 @@ class ProtocolRunnerWidget(QWidget):
         if not com:
             QMessageBox.warning(self, "COM", "Введите COM порт мигалки (например, COM3 или /dev/tty.usbmodem...)")
             return
+
+        if self.chk_run_stimulus.isChecked():
+            run_py = sys.executable
+            run_script = _ROOT / "run_app.py"
+            if run_script.exists():
+                self._stimulus_proc = subprocess.Popen(
+                    [run_py, str(run_script), "--auto-random-protocol", "--no-analyzer"],
+                    cwd=str(_ROOT),
+                )
+
         cfg = ProtocolConfig(
             output_root=Path(out_root),
             subject_id=subject,
@@ -106,6 +130,13 @@ class ProtocolRunnerWidget(QWidget):
         self.lbl_status.setText("Started. Preflight…")
 
     def _on_stop(self) -> None:
+        if self._stimulus_proc is not None:
+            try:
+                if self._stimulus_proc.poll() is None:
+                    self._stimulus_proc.terminate()
+            except Exception:
+                pass
+            self._stimulus_proc = None
         if self._runner is None:
             return
         self._runner.stop(reason="user_stop")
