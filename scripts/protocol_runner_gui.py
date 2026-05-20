@@ -773,16 +773,22 @@ class ProtocolRunnerWidget(QWidget):
         if st != prev:
             plog_info(f"status [{self._runner.state}]: {st}")
             self._last_status_printed = st
-        # После P300 останавливаем PsychoPy — дальше только мигалка (ССВП)
+        # После P300 закрываем PsychoPy до ССВП (иначе fullscreen перекрывает оверлей/мигалку)
         if self._stimulus_proc is not None and self._stimulus_proc.poll() is None:
-            if self._runner.state in ("ssvep_continuous", "ssvep_burst", "finalize", "stopped"):
+            stop_stim = self._runner.state in ("ssvep_continuous", "ssvep_burst", "finalize", "stopped")
+            if bool(getattr(self._runner, "pause_before_ssvep", False)):
+                stop_stim = True
+            if stop_stim:
                 try:
                     self._stimulus_proc.terminate()
                 except Exception:
                     pass
                 self._stimulus_proc = None
-                if prev != st and self._runner.state == "ssvep_continuous":
-                    plog_info("стимулятор плиток остановлен — этап ССВП, запуск мигалки по COM")
+                if prev != st and (
+                    self._runner.state == "ssvep_continuous"
+                    or bool(getattr(self._runner, "pause_before_ssvep", False))
+                ):
+                    plog_info("стимулятор плиток остановлен — этап ССВП (оверлей / мигалка)")
         if self._runner.state in ("stopped",):
             self._timer.stop()
             self.btn_start.setEnabled(True)

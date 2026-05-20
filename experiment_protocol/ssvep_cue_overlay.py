@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 
 class SsvepCueOverlay(QWidget):
     """Серый fullscreen, как оверлей паузы в PsychoPy-стимуляторе."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Window)
         self.setStyleSheet("background-color: #202020;")
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 40, 40, 40)
@@ -58,6 +58,19 @@ class SsvepCueOverlay(QWidget):
             self.lbl_lamp,
             self.lbl_hz,
         )
+        self._shown_fullscreen = False
+
+    def _ensure_fullscreen(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+        if not self._shown_fullscreen:
+            self.showFullScreen()
+            self.raise_()
+            self._shown_fullscreen = True
+        elif not self.isVisible():
+            self.showFullScreen()
+            self.raise_()
 
     def show_blackout(self) -> None:
         """Чёрный экран на ноутбуке, пока испытуемый смотрит на мигалку."""
@@ -65,8 +78,7 @@ class SsvepCueOverlay(QWidget):
         self.setStyleSheet("background-color: #000000;")
         for w in self._cue_widgets:
             w.hide()
-        if not self.isVisible():
-            self.showFullScreen()
+        self._ensure_fullscreen()
 
     def show_cue(
         self,
@@ -97,9 +109,9 @@ class SsvepCueOverlay(QWidget):
             else:
                 self.lbl_hz.hide()
             self._shown_key = key
-        if not self.isVisible():
-            self.showFullScreen()
+        self._ensure_fullscreen()
 
     def hide_overlay(self) -> None:
         self._shown_key = None
+        self._shown_fullscreen = False
         self.hide()
