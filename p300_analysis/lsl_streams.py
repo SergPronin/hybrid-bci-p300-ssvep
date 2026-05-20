@@ -9,6 +9,10 @@ from pylsl import StreamInfo, StreamInlet, resolve_byprop, resolve_streams
 
 from p300_analysis.constants import EEG_STREAM_TYPES, NEUROSPECTR_MARKER, SIMULATOR_NAME, SIMULATOR_SOURCE_ID
 
+# PsychoPy / gui (core.lsl.LslMarkerSender)
+BCI_STIM_MARKER_STREAM_NAME = "BCI_StimMarkers"
+MIGALKA_MARKER_STREAM_NAME = "MigalkaStimMarkers"
+
 
 def _is_allowed_stream(info: StreamInfo) -> bool:
     try:
@@ -122,6 +126,49 @@ def _append_unique_streams(
         if key not in seen:
             seen.add(key)
             target.append(s)
+
+
+def select_stimulus_marker_stream(streams: List[StreamInfo]) -> Optional[StreamInfo]:
+    """Поток маркеров плиток (PsychoPy), не мигалка SSVEP."""
+    if not streams:
+        return None
+    for s in streams:
+        try:
+            if (s.name() or "") == BCI_STIM_MARKER_STREAM_NAME:
+                return s
+        except Exception:
+            continue
+    for s in streams:
+        try:
+            name = (s.name() or "").lower()
+        except Exception:
+            continue
+        if MIGALKA_MARKER_STREAM_NAME.lower() in name or "migalka" in name:
+            continue
+        if "bci" in name and "stim" in name:
+            return s
+        if "stim" in name and "marker" in (s.type() or "").lower():
+            return s
+    return None
+
+
+def wait_for_stimulus_marker_stream(
+    *,
+    max_wait_sec: float = 20.0,
+    poll_interval_sec: float = 0.4,
+) -> Tuple[Optional[StreamInfo], List[StreamInfo]]:
+    """Ждёт появления BCI_StimMarkers (стимулятор PsychoPy), не MigalkaStimMarkers."""
+    import time
+
+    deadline = time.time() + float(max_wait_sec)
+    last: List[StreamInfo] = []
+    while time.time() < deadline:
+        last = resolve_marker_streams(timeout=0.7, attempts=1)
+        picked = select_stimulus_marker_stream(last)
+        if picked is not None:
+            return picked, last
+        time.sleep(float(poll_interval_sec))
+    return select_stimulus_marker_stream(last), last
 
 
 def resolve_marker_streams(

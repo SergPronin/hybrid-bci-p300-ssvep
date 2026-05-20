@@ -20,10 +20,11 @@ from experiment_protocol import protocol_log as plog
 from experiment_protocol.unified_logger import UnifiedExperimentLogger
 from p300_analysis.constants import EEG_PULL_MAX_SAMPLES, MARKERS_PULL_MAX_SAMPLES
 from p300_analysis.lsl_streams import (
+    BCI_STIM_MARKER_STREAM_NAME,
     discover_eeg_streams,
-    resolve_marker_streams,
     select_eeg_stream,
     stream_inlet_with_buffer,
+    wait_for_stimulus_marker_stream,
 )
 from p300_analysis.marker_parsing import parse_trial_end, parse_trial_target_tile_id
 from p300_analysis.online_engine import P300Decision, P300EngineParams, P300OnlineEngine
@@ -280,7 +281,7 @@ class ProtocolRunner:
     def _preflight(self) -> None:
         assert self._logger is not None
         eeg_streams = discover_eeg_streams(timeout=1.5)
-        marker_streams = resolve_marker_streams(timeout=1.0, attempts=1)
+        info_mk, marker_streams = wait_for_stimulus_marker_stream(max_wait_sec=20.0)
         info_eeg = select_eeg_stream(
             eeg_streams,
             name=str(self.cfg.eeg_stream_name),
@@ -295,11 +296,22 @@ class ProtocolRunner:
             plog.error(f"Preflight: выбранный поток ЭЭГ не найден: {want!r}")
             self.status_text = f"Предстарт: поток ЭЭГ «{want}» не найден. Нажмите «Обновить» в GUI и выберите поток."
             return
-        if not marker_streams:
-            plog.error("Preflight: LSL Markers не найден (запущен run_app.py / стимулятор?)")
-            self.status_text = "Предстарт: не найден поток LSL Markers (запустите стимулятор)."
+        if info_mk is None:
+            names = []
+            for s in marker_streams:
+                try:
+                    names.append(str(s.name() or "?"))
+                except Exception:
+                    names.append("?")
+            plog.error(
+                f"Preflight: нет потока {BCI_STIM_MARKER_STREAM_NAME!r} "
+                f"(найдены Markers: {names}; нужен run_app.py / PsychoPy, не только мигалка)"
+            )
+            self.status_text = (
+                f"Предстарт: нет потока маркеров плиток «{BCI_STIM_MARKER_STREAM_NAME}». "
+                "Запустите стимулятор (галочка в GUI или run_app.py) и подождите 5–10 с."
+            )
             return
-        info_mk = marker_streams[0]
         try:
             eeg_name = info_eeg.name()
             mk_name = info_mk.name()

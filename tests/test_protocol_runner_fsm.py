@@ -35,7 +35,7 @@ def _inlet_with_markers(markers: list) -> MagicMock:
 
 
 @patch("experiment_protocol.protocol_runner.stream_inlet_with_buffer")
-@patch("experiment_protocol.protocol_runner.resolve_marker_streams")
+@patch("experiment_protocol.protocol_runner.wait_for_stimulus_marker_stream")
 @patch("experiment_protocol.protocol_runner.discover_eeg_streams")
 @patch("ssvep_analysis.migalka_serial_controller.serial.Serial")
 def test_fsm_reaches_ssvep_and_opens_migalka(
@@ -46,7 +46,8 @@ def test_fsm_reaches_ssvep_and_opens_migalka(
     tmp_path: Path,
 ) -> None:
     mock_eeg.return_value = [_fake_stream("EEG", "EEG")]
-    mock_mk.return_value = [_fake_stream("Markers", "Markers")]
+    bci_mk = _fake_stream("BCI_StimMarkers", "Markers")
+    mock_mk.return_value = (bci_mk, [bci_mk])
 
     ser = MagicMock()
     ser.is_open = True

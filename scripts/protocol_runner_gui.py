@@ -671,11 +671,13 @@ class ProtocolRunnerWidget(QWidget):
                         "--auto-plan-target-epochs",
                         str(int(self.spin_plan_target_epochs.value())),
                 ]
-                plog_info(f"запуск стимулятора: {run_py} {' '.join(stim_args)}")
+                plog_info(f"запуск стимулятора: {' '.join(stim_args)}")
                 self._stimulus_proc = subprocess.Popen(
                     stim_args,
                     cwd=str(_ROOT),
                 )
+                # Дать PsychoPy время поднять LSL BCI_StimMarkers до preflight протокола
+                QApplication.processEvents()
 
         cfg = ProtocolConfig(
             output_root=Path(out_root),
@@ -698,6 +700,7 @@ class ProtocolRunnerWidget(QWidget):
             f"migalka_Hz={list(freqs)} inter_trial={self.spin_inter_trial.value()} "
             f"seq={self.spin_sequences.value()}"
         )
+        # Preflight ждёт BCI_StimMarkers до ~20 с — стимулятор должен успеть стартовать
         self._runner.start()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
