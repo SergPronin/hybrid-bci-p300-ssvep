@@ -99,6 +99,19 @@ def parse_trial_target_tile_id(marker_value: Any) -> Optional[int]:
     return int(m.group(1))
 
 
+def parse_trial_end(marker_value: Any) -> bool:
+    """True если маркер соответствует окончанию trial: ``-2|trial_end``."""
+    mv = marker_value
+    if isinstance(mv, (list, tuple, np.ndarray)) and len(mv) == 1:
+        mv = mv[0]
+    if isinstance(mv, (bytes, bytearray)):
+        mv = mv.decode("utf-8", errors="ignore")
+    if not isinstance(mv, str):
+        return False
+    s = mv.strip()
+    return "trial_end" in s
+
+
 def parse_trial_config_payload(marker_value: Any) -> Optional[Dict[str, str]]:
     """Parse marker ``-3|trial_config|k=v;...`` into a dict.
 

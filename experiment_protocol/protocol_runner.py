@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover
 from experiment_protocol.unified_logger import UnifiedExperimentLogger
 from p300_analysis.constants import EEG_PULL_MAX_SAMPLES, MARKERS_PULL_MAX_SAMPLES
 from p300_analysis.lsl_streams import find_allowed_eeg_streams, resolve_marker_streams, stream_inlet_with_buffer
-from p300_analysis.marker_parsing import parse_trial_target_tile_id
+from p300_analysis.marker_parsing import parse_trial_end, parse_trial_target_tile_id
 from p300_analysis.online_engine import P300EngineParams, P300OnlineEngine
 from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_TEMPLATE_CORR
 from ssvep_analysis.migalka_serial_controller import MigalkaConfig, MigalkaSerialController
@@ -84,6 +84,8 @@ class ProtocolRunner:
 
         # True после каждого LSL trial_start|target=N; сбрасываем после записи trial (см. _run_p300_trials).
         self._p300_trial_armed: bool = False
+        # True после получения LSL -2|trial_end для текущего trial.
+        self._p300_trial_end_seen: bool = False
 
         self._ssvep_block_started_at: Optional[float] = None
         self._ssvep_target_lamp: Optional[int] = None
@@ -254,9 +256,12 @@ class ProtocolRunner:
         if marker_ts:
             self._logger.write("markers_chunk", {"n": int(len(marker_ts))})
             for sample in marker_chunk:
+                if parse_trial_end(sample):
+                    self._p300_trial_end_seen = True
                 tid = parse_trial_target_tile_id(sample)
                 if tid is not None:
                     self._p300_trial_armed = True
+                    self._p300_trial_end_seen = False
                     self._logger.write("protocol_trial_start_arm", {"cue_target_tile_id": int(tid)})
                     # Обновляем статус сразу на старте trial.
                     mode = "P300 AUC" if self.state == ProtocolState.P300_AUC else ("P300 template_corr" if self.state == ProtocolState.P300_TEMPLATE else "P300")
@@ -301,6 +306,7 @@ class ProtocolRunner:
         )
         self._p300.reset(params=prof)
         self._p300_trial_armed = False
+        self._p300_trial_end_seen = False
 
     def _warmup_template(self) -> None:
         assert self._logger is not None
@@ -328,9 +334,21 @@ class ProtocolRunner:
             return
 
         decision = self._p300.compute_decision(winner_mode=winner_mode)
-        if not decision.can_decide:
+        if not decision.can_decide and not self._p300_trial_end_seen:
             self.status_text = f"Эксперимент {self._next_experiment_index_1based()}/{self._total_experiments()}: P300 {winner_mode} — сбор (min_epochs={decision.min_epochs_per_class})"
             return
+
+        if not decision.can_decide and self._p300_trial_end_seen:
+            # trial завершён по времени, но данных/эпох не хватило — фиксируем trial без решения,
+            # иначе протокол может никогда не перейти к SSVEP.
+            decision = P300Decision(
+                can_decide=False,
+                min_epochs_per_class=int(decision.min_epochs_per_class),
+                winner_idx=None,
+                winner_key=None,
+                mode_used="no_decision",
+                debug={**(decision.debug or {}), "note": "trial_end_without_decision"},
+            )
 
         # Record trial outcome; ждём следующий trial_start (даже если target тот же).
         rec = {
@@ -340,6 +358,7 @@ class ProtocolRunner:
             "mode_used": decision.mode_used,
             "debug": decision.debug,
             "epoch_counts_by_stim": {k: len(v) for k, v in self._p300.epochs_data.items()},
+            "trial_end_seen": bool(self._p300_trial_end_seen),
         }
         self._logger.append_p300_trial(rec)
         self._logger.write("trial_decision", rec)
@@ -354,6 +373,7 @@ class ProtocolRunner:
 
         self._p300.reset(params=self._p300.params)  # preserve params but clear buffers
         self._p300_trial_armed = False
+        self._p300_trial_end_seen = False
 
         if done:
             if winner_mode == WINNER_MODE_AUC:
