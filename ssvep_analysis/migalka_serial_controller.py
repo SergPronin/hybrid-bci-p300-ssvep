@@ -35,6 +35,8 @@ class MigalkaConfig:
 
 LampEvent = Tuple[int, bool, str]  # (lamp_index, is_on, raw_line)
 
+_OFF6 = ("0", "0", "0", "0", "0", "0")
+
 
 class MigalkaSerialController:
     """Direct COM control for Arduino Due Migalka + optional LSL marker mirroring."""
@@ -56,16 +58,40 @@ class MigalkaSerialController:
         return self._ser is not None and bool(getattr(self._ser, "is_open", False))
 
     def _apply_config(self, cfg: MigalkaConfig) -> None:
-        """Сначала режим M, потом частоты — иначе Due мигает постоянным до M 1."""
-        off = ("0", "0", "0", "0", "0", "0")
-        self._send_freqs(off)
+        """Режим M до частот — иначе Due мигает постоянным одну «сессию»."""
+        m = 0 if int(cfg.mode) <= 0 else 1
+        self._send_mode(m)
+        time.sleep(0.08 if m == 1 else 0.05)
+        self._send_freqs(_OFF6)
         time.sleep(0.05)
-        self._send_mode(cfg.mode)
-        time.sleep(0.08 if int(cfg.mode) == 1 else 0.05)
-        if int(cfg.mode) == 1:
+        if m == 1:
             self._send_mode(1)
             time.sleep(0.05)
         self._send_freqs(cfg.freqs)
+
+    def prepare_burst_handoff(self) -> None:
+        """После непрерывного ССВП: M1 + выкл, порт не закрываем (без reset Due)."""
+        with self._lock:
+            if not self.is_open():
+                _log_info("prepare_burst_handoff: порт закрыт")
+                return
+            _log_info("prepare_burst_handoff: M 1, лампы 0, COM остаётся открыт")
+            self._send_mode(1)
+            time.sleep(0.08)
+            self._send_mode(1)
+            time.sleep(0.05)
+            self._send_freqs(_OFF6)
+
+    def reconfigure(self, cfg: MigalkaConfig) -> None:
+        with self._lock:
+            if not self.is_open():
+                self.open_and_start(cfg)
+                return
+            _log_info(
+                f"reconfigure: mode={cfg.mode} "
+                f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'}), freqs={cfg.freqs}"
+            )
+            self._apply_config(cfg)
 
     def open_and_start(self, cfg: MigalkaConfig) -> None:
         with self._lock:
@@ -80,9 +106,22 @@ class MigalkaSerialController:
                 f"открываем COM {cfg.port!r} baud={cfg.baudrate}, mode={cfg.mode} "
                 f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'}), freqs={cfg.freqs}"
             )
-            self._ser = serial.Serial(cfg.port, cfg.baudrate, timeout=cfg.timeout_s)
+            self._ser = serial.Serial(
+                cfg.port,
+                cfg.baudrate,
+                timeout=cfg.timeout_s,
+                dsrdtr=False,
+                rtscts=False,
+            )
+            try:
+                self._ser.dtr = False
+                self._ser.rts = False
+            except Exception:
+                pass
             self._running = True
-            time.sleep(0.15)
+            m = 0 if int(cfg.mode) <= 0 else 1
+            self._send_mode(m)
+            time.sleep(0.1)
             self._apply_config(cfg)
             _log_info(f"команды отправлены: M {cfg.mode}, freqs={' '.join(cfg.freqs)}")
             self._thread = threading.Thread(target=self._read_loop, name="MigalkaSerialReader", daemon=True)
@@ -94,10 +133,8 @@ class MigalkaSerialController:
             _log_info("stop_and_close")
             self._running = False
             try:
-                self._send_freqs(("0", "0", "0", "0", "0", "0"))
+                self._send_freqs(_OFF6)
                 time.sleep(0.05)
-                self._send_mode(0)
-                time.sleep(0.1)
             except Exception:
                 pass
             try:
@@ -121,12 +158,12 @@ class MigalkaSerialController:
             return
         assert self._ser is not None
         self._ser.write((line.strip() + "\n").encode("utf-8"))
+        self._ser.flush()
 
     def _send_mode(self, mode: int) -> None:
         if not self.is_open():
             return
-        m = int(mode)
-        m = 0 if m <= 0 else 1
+        m = 0 if int(mode) <= 0 else 1
         self._write_line(f"M {m}")
 
     def _send_freqs(self, freqs: Sequence[str]) -> None:
@@ -140,7 +177,6 @@ class MigalkaSerialController:
     def _emit_event(self, lamp: int, is_on: bool, raw_line: str) -> None:
         ev: LampEvent = (int(lamp), bool(is_on), str(raw_line))
         if self._lsl is not None:
-            # LSL uses 100+lamp|on/off
             self._lsl.send_lamp_event(int(lamp), "on" if is_on else "off")
         if self._on_event is not None:
             try:
@@ -163,6 +199,4 @@ class MigalkaSerialController:
                 lamp, is_on = parsed
                 self._emit_event(lamp, is_on, line)
             except Exception:
-                # Never crash protocol runner due to serial hiccups.
                 time.sleep(0.01)
-

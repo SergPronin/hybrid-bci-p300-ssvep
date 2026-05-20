@@ -155,6 +155,11 @@ class ProtocolRunner:
         if visible:
             self.ssvep_cue_visible = False
 
+    def clear_ssvep_display(self) -> None:
+        """Сброс флагов оверлея (чёрный экран / подсказка ССВП)."""
+        self._set_ssvep_blackout(False)
+        self._set_ssvep_cue_overlay(ssvep_mode=None)
+
     @property
     def pause_active(self) -> bool:
         return self._pause_until_wall is not None
@@ -308,8 +313,7 @@ class ProtocolRunner:
 
     def stop(self, *, reason: str = "user_stop") -> None:
         plog.info(f"=== PROTOCOL STOP reason={reason!r} ===")
-        self._set_ssvep_cue_overlay(ssvep_mode=None)
-        self._set_ssvep_blackout(False)
+        self.clear_ssvep_display()
         try:
             self._migalka.stop_and_close()
         except Exception as e:
@@ -666,11 +670,15 @@ class ProtocolRunner:
             f"migalka_M={mig_mode} ({'постоянный' if mig_mode == 0 else 'пакетный'})"
         )
         try:
-            try:
-                self._migalka.stop_and_close()
-            except Exception:
-                pass
-            self._migalka.open_and_start(mcfg)
+            if str(mode) == "burst" and self._migalka.is_open():
+                plog.info("ССВП пакетный: перенастройка COM без переоткрытия (без reset Due)")
+                self._migalka.reconfigure(mcfg)
+            else:
+                try:
+                    self._migalka.stop_and_close()
+                except Exception:
+                    pass
+                self._migalka.open_and_start(mcfg)
             if not self._migalka.is_open():
                 raise RuntimeError("порт открыт, но is_open() == False")
         except Exception as e:
@@ -745,10 +753,24 @@ class ProtocolRunner:
 
         # End of block: stop migalka and compute MSI decision from last window
         self._set_ssvep_blackout(False)
-        try:
-            self._migalka.stop_and_close()
-        except Exception:
-            pass
+        cont_handoff_burst = (
+            str(mode) == "continuous"
+            and (int(self._ssvep_block_count_cont) + 1) >= int(self.cfg.ssvep_blocks_per_mode)
+        )
+        if cont_handoff_burst:
+            try:
+                self._migalka.prepare_burst_handoff()
+            except Exception as e:
+                plog.exc("prepare_burst_handoff", e)
+                try:
+                    self._migalka.stop_and_close()
+                except Exception:
+                    pass
+        else:
+            try:
+                self._migalka.stop_and_close()
+            except Exception:
+                pass
         dec = self._ssvep.classify()
         rec = {
             "mode": str(mode),
@@ -783,8 +805,7 @@ class ProtocolRunner:
                 )
             else:
                 plog.info("=== SSVEP burst завершён -> Finalize ===")
-                self._set_ssvep_blackout(False)
-                self._set_ssvep_cue_overlay(ssvep_mode=None)
+                self.clear_ssvep_display()
                 self._set_state(ProtocolState.Finalize, detail="ssvep burst done")
         else:
             # Следующий блок стартуем через паузу (см. ветку self._ssvep_block_started_at is None).
@@ -792,8 +813,7 @@ class ProtocolRunner:
 
     def _finalize(self) -> None:
         assert self._logger is not None
-        self._set_ssvep_blackout(False)
-        self._set_ssvep_cue_overlay(ssvep_mode=None)
+        self.clear_ssvep_display()
         self.status_text = "Завершение: сохранение логов…"
         try:
             self._migalka.stop_and_close()

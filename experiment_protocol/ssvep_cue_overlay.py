@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 
 class SsvepCueOverlay(QWidget):
@@ -59,15 +59,21 @@ class SsvepCueOverlay(QWidget):
             self.lbl_hz,
         )
 
+    def _show_on_primary_screen(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+        self.setWindowState(Qt.WindowNoState)
+        self.show()
+        self.raise_()
+
     def show_blackout(self) -> None:
         """Чёрный экран на ноутбуке, пока испытуемый смотрит на мигалку."""
         self._shown_key = None
         self.setStyleSheet("background-color: #000000;")
         for w in self._cue_widgets:
             w.hide()
-        if not self.isVisible():
-            self.showFullScreen()
-        self.raise_()
+        self._show_on_primary_screen()
 
     def show_cue(
         self,
@@ -98,12 +104,9 @@ class SsvepCueOverlay(QWidget):
             else:
                 self.lbl_hz.hide()
             self._shown_key = key
-        if not self.isVisible():
-            self.showFullScreen()
-        self.raise_()
+        self._show_on_primary_screen()
 
     def hide_overlay(self) -> None:
         self._shown_key = None
-        self.setVisible(False)
         self.hide()
-        self.lower()
+        self.close()

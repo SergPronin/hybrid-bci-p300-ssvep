@@ -719,9 +719,22 @@ class ProtocolRunnerWidget(QWidget):
 
     def _dismiss_ssvep_overlay(self) -> None:
         if self._ssvep_cue_overlay is not None:
-            self._ssvep_cue_overlay.hide_overlay()
-            self._ssvep_cue_overlay.deleteLater()
+            ov = self._ssvep_cue_overlay
             self._ssvep_cue_overlay = None
+            ov.hide_overlay()
+            ov.close()
+            ov.deleteLater()
+        if self._runner is not None:
+            self._runner.clear_ssvep_display()
+        QApplication.processEvents()
+
+    def _restore_operator_window(self) -> None:
+        """После ССВП — снова окно настроек поверх чёрного оверлея."""
+        self._dismiss_ssvep_overlay()
+        self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
         QApplication.processEvents()
 
     def _sync_ssvep_cue_overlay(self) -> None:
@@ -798,12 +811,14 @@ class ProtocolRunnerWidget(QWidget):
                 ):
                     plog_info("стимулятор плиток остановлен — этап ССВП (оверлей / мигалка)")
         if self._runner.state in ("finalize", "stopped"):
-            self._dismiss_ssvep_overlay()
+            self._restore_operator_window()
         if self._runner.state in ("stopped",):
             self._timer.stop()
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
-            self._dismiss_ssvep_overlay()
+            self._restore_operator_window()
+        elif str(st).startswith("Готово."):
+            self._restore_operator_window()
 
 
 def main() -> None:
