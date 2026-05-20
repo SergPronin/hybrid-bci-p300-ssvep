@@ -28,6 +28,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from experiment_protocol.protocol_log import info as plog_info  # noqa: E402
 from experiment_protocol.protocol_runner import ProtocolConfig, ProtocolRunner  # noqa: E402
 
 
@@ -39,6 +40,7 @@ class ProtocolRunnerWidget(QWidget):
 
         self._runner: ProtocolRunner | None = None
         self._stimulus_proc: subprocess.Popen[str] | None = None
+        self._last_status_printed: str = ""
 
         root = QVBoxLayout(self)
         form = QFormLayout()
@@ -140,8 +142,7 @@ class ProtocolRunnerWidget(QWidget):
             run_py = sys.executable
             run_script = _ROOT / "run_app.py"
             if run_script.exists():
-                self._stimulus_proc = subprocess.Popen(
-                    [
+                stim_args = [
                         run_py,
                         str(run_script),
                         "--auto-random-protocol",
@@ -160,7 +161,10 @@ class ProtocolRunnerWidget(QWidget):
                         "0",
                         "--auto-plan-target-epochs",
                         str(int(self.spin_plan_target_epochs.value())),
-                    ],
+                ]
+                plog_info(f"запуск стимулятора: {run_py} {' '.join(stim_args)}")
+                self._stimulus_proc = subprocess.Popen(
+                    stim_args,
                     cwd=str(_ROOT),
                 )
 
@@ -172,6 +176,10 @@ class ProtocolRunnerWidget(QWidget):
             ssvep_blocks_per_mode=int(self.spin_ssvep.value()),
         )
         self._runner = ProtocolRunner(cfg)
+        plog_info(
+            f"GUI Start: subject={subject!r} P300={self.spin_p300.value()} SSVEP={self.spin_ssvep.value()} "
+            f"COM={com!r} inter_trial={self.spin_inter_trial.value()} seq={self.spin_sequences.value()}"
+        )
         self._runner.start()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -198,8 +206,13 @@ class ProtocolRunnerWidget(QWidget):
     def _on_tick(self) -> None:
         if self._runner is None:
             return
+        prev = getattr(self, "_last_status_printed", "")
         self._runner.tick()
-        self.lbl_status.setText(self._runner.status_text)
+        st = self._runner.status_text
+        self.lbl_status.setText(st)
+        if st != prev:
+            plog_info(f"status [{self._runner.state}]: {st}")
+            self._last_status_printed = st
         # After P300 stage ends, stop the PsychoPy stimulator so it won't keep generating extra trials
         if self._stimulus_proc is not None and self._stimulus_proc.poll() is None:
             if self._runner.state in ("ssvep_continuous", "ssvep_burst", "finalize", "stopped"):

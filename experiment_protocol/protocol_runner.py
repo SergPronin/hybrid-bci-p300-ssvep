@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover
     def lsl_local_clock() -> float:  # type: ignore
         return time.time()
 
+from experiment_protocol import protocol_log as plog
 from experiment_protocol.unified_logger import UnifiedExperimentLogger
 from p300_analysis.constants import EEG_PULL_MAX_SAMPLES, MARKERS_PULL_MAX_SAMPLES
 from p300_analysis.lsl_streams import find_allowed_eeg_streams, resolve_marker_streams, stream_inlet_with_buffer
@@ -96,6 +97,13 @@ class ProtocolRunner:
         self._pause_status: Optional[str] = None
         self._pause_next_state: Optional[str] = None
         self._pause_next_ssvep_mode: Optional[str] = None
+        self._last_state: str = ProtocolState.Idle
+
+    def _set_state(self, new_state: str, *, detail: str = "") -> None:
+        if new_state != self._last_state:
+            plog.state_change(self._last_state, new_state, detail=detail)
+            self._last_state = str(new_state)
+        self.state = str(new_state)
 
     def _total_experiments(self) -> int:
         return int(self.cfg.p300_trials_per_mode) * 2 + int(self.cfg.ssvep_blocks_per_mode) * 2
@@ -115,6 +123,10 @@ class ProtocolRunner:
         self._pause_status = str(status)
         self._pause_next_state = str(next_state)
         self._pause_next_ssvep_mode = str(next_ssvep_mode) if next_ssvep_mode is not None else None
+        plog.info(
+            f"пауза {sec:.1f}s -> next_state={next_state}"
+            + (f", ssvep_mode={next_ssvep_mode}" if next_ssvep_mode else "")
+        )
 
     def _tick_pause(self) -> bool:
         """Returns True if we are in pause (and handled it)."""
@@ -135,8 +147,9 @@ class ProtocolRunner:
         self._pause_next_state = None
         self._pause_next_ssvep_mode = None
         if next_state:
-            self.state = next_state
+            self._set_state(next_state, detail="pause finished")
             if next_state in (ProtocolState.SSVEP_CONT, ProtocolState.SSVEP_BURST) and next_mode is not None:
+                plog.info(f"пауза закончилась — запуск SSVEP migalka, mode={next_mode}")
                 self._start_ssvep_block(mode=str(next_mode))
         return False
 
@@ -145,7 +158,12 @@ class ProtocolRunner:
         return self._logger
 
     def start(self) -> None:
-        self.state = ProtocolState.Preflight
+        plog.info(
+            f"=== PROTOCOL START subject={self.cfg.subject_id!r} "
+            f"P300={self.cfg.p300_trials_per_mode}x2 SSVEP={self.cfg.ssvep_blocks_per_mode}x2 "
+            f"COM={self.cfg.com_port!r} ==="
+        )
+        self._set_state(ProtocolState.Preflight, detail="start()")
         self.status_text = "Preflight: поиск LSL и COM…"
         plan = {
             "p300": {
@@ -170,11 +188,12 @@ class ProtocolRunner:
         )
 
     def stop(self, *, reason: str = "user_stop") -> None:
+        plog.info(f"=== PROTOCOL STOP reason={reason!r} ===")
         try:
             self._migalka.stop_and_close()
-        except Exception:
-            pass
-        self.state = ProtocolState.Stopped
+        except Exception as e:
+            plog.exc("migalka stop", e)
+        self._set_state(ProtocolState.Stopped, detail=reason)
         self.status_text = f"Stopped: {reason}"
         if self._logger is not None:
             self._logger.finalize(stop_payload={"reason": reason})
@@ -213,13 +232,22 @@ class ProtocolRunner:
         eeg_streams = find_allowed_eeg_streams(timeout=1.0)
         marker_streams = resolve_marker_streams(timeout=1.0, attempts=1)
         if not eeg_streams:
+            plog.error("Preflight: LSL EEG не найден")
             self.status_text = "Preflight: не найден LSL EEG поток (проверьте EEG/LSL)."
             return
         if not marker_streams:
+            plog.error("Preflight: LSL Markers не найден (запущен run_app.py / стимулятор?)")
             self.status_text = "Preflight: не найден LSL Markers поток (проверьте стимулятор/LSL)."
             return
         info_eeg = eeg_streams[0]
         info_mk = marker_streams[0]
+        try:
+            eeg_name = info_eeg.name()
+            mk_name = info_mk.name()
+        except Exception:
+            eeg_name = "?"
+            mk_name = "?"
+        plog.info(f"Preflight OK: EEG stream={eeg_name!r}, Markers stream={mk_name!r}, COM={self.cfg.com_port!r}")
         self._inlet_eeg = stream_inlet_with_buffer(info_eeg, buffer_seconds=20)
         self._inlet_markers = stream_inlet_with_buffer(info_mk, buffer_seconds=20)
         # EEG labels from StreamInfo are optional; keep for later storage.
@@ -240,8 +268,9 @@ class ProtocolRunner:
 
         # Start with P300 AUC block
         self._reset_for_new_p300_block()
-        self.state = ProtocolState.P300_AUC
+        self._set_state(ProtocolState.P300_AUC, detail="preflight ok")
         self.status_text = f"Эксперимент {self._next_experiment_index_1based()}/{self._total_experiments()}: P300 AUC — ждём trial_start|target=…"
+        plog.info(self.status_text)
 
     def _pull_lsl(self) -> None:
         if self._inlet_eeg is None or self._inlet_markers is None or self._logger is None:
@@ -258,10 +287,12 @@ class ProtocolRunner:
             for sample in marker_chunk:
                 if parse_trial_end(sample):
                     self._p300_trial_end_seen = True
+                    plog.event("LSL trial_end", sample=str(sample)[:80])
                 tid = parse_trial_target_tile_id(sample)
                 if tid is not None:
                     self._p300_trial_armed = True
                     self._p300_trial_end_seen = False
+                    plog.event("LSL trial_start", target=int(tid), sample=str(sample)[:80])
                     self._logger.write("protocol_trial_start_arm", {"cue_target_tile_id": int(tid)})
                     # Обновляем статус сразу на старте trial.
                     mode = "P300 AUC" if self.state == ProtocolState.P300_AUC else ("P300 template_corr" if self.state == ProtocolState.P300_TEMPLATE else "P300")
@@ -320,7 +351,7 @@ class ProtocolRunner:
         if n >= int(self.cfg.template_warmup_target_epochs):
             self._logger.write("template_warmup_done", {"target_tile_id": int(cue), "epochs": int(n)})
             self._reset_for_new_p300_block()
-            self.state = ProtocolState.P300_TEMPLATE
+            self._set_state(ProtocolState.P300_TEMPLATE, detail="warmup done")
             self.status_text = "P300 template_corr: стартовали основной блок."
 
     def _run_p300_trials(self, *, winner_mode: str) -> None:
@@ -371,6 +402,13 @@ class ProtocolRunner:
             self._p300_trial_count_template += 1
             done = self._p300_trial_count_template >= int(self.cfg.p300_trials_per_mode)
 
+        plog.info(
+            f"P300 trial #{self._p300_trial_count_auc if winner_mode == WINNER_MODE_AUC else self._p300_trial_count_template} "
+            f"mode={winner_mode} auc={self._p300_trial_count_auc}/{self.cfg.p300_trials_per_mode} "
+            f"template={self._p300_trial_count_template}/{self.cfg.p300_trials_per_mode} "
+            f"winner={decision.winner_key!r} used={decision.mode_used!r}"
+        )
+
         self._p300.reset(params=self._p300.params)  # preserve params but clear buffers
         self._p300_trial_armed = False
         self._p300_trial_end_seen = False
@@ -378,6 +416,7 @@ class ProtocolRunner:
         if done:
             if winner_mode == WINNER_MODE_AUC:
                 self._logger.write("block_done", {"block": "p300_auc", "n_trials": int(self._p300_trial_count_auc)})
+                plog.info("=== P300 AUC блок завершён -> P300 template_corr ===")
                 # Без отдельного warmup: держим протокол ровно в 60 единиц (15+15+15+15).
                 self._reset_for_new_p300_block()
                 self._start_pause(
@@ -387,6 +426,7 @@ class ProtocolRunner:
                 )
             else:
                 self._logger.write("block_done", {"block": "p300_template", "n_trials": int(self._p300_trial_count_template)})
+                plog.info("=== P300 template_corr блок завершён -> SSVEP continuous (мигалка) ===")
                 self._start_pause(
                     seconds=float(self.cfg.pause_between_experiments_s),
                     status=f"Пауза перед экспериментом {self._next_experiment_index_1based()}/{self._total_experiments()} (SSVEP continuous)",
@@ -407,6 +447,7 @@ class ProtocolRunner:
 
     def _start_ssvep_block(self, *, mode: str) -> None:
         assert self._logger is not None
+        plog.info(f"=== SSVEP block START mode={mode!r} COM={self.cfg.com_port!r} ===")
         self._ssvep.reset(
             params=SSVEPParams(
                 fs_hz=float(self.cfg.ssvep_fs_hz),
@@ -415,18 +456,32 @@ class ProtocolRunner:
                 mode=str(mode),
             )
         )
-        self._ssvep_block_started_at = float(time.time())
         # Pick target lamp index (0..5) round-robin to keep deterministic
         idx = (self._ssvep_block_count_cont + self._ssvep_block_count_burst) % 6
         self._ssvep_target_lamp = int(idx)
-        # Activate migalka only for SSVEP blocks
         freq_labels = tuple(str(x).replace(",", ".") for x in self.cfg.ssvep_freqs_hz[:6])
         mcfg = MigalkaConfig(
             port=str(self.cfg.com_port),
             mode=0 if mode == "continuous" else 1,
             freqs=freq_labels if len(freq_labels) == 6 else ("0", "0", "0", "0", "0", "0"),
         )
-        self._migalka.open_and_start(mcfg)
+        try:
+            self._migalka.open_and_start(mcfg)
+            if not self._migalka.is_open():
+                raise RuntimeError("порт открыт, но is_open() == False")
+        except Exception as e:
+            plog.exc(f"Migalka не запустилась на {self.cfg.com_port!r}", e)
+            self._ssvep_block_started_at = None
+            self.status_text = f"SSVEP {mode}: ОШИБКА мигалки {self.cfg.com_port}: {e}"
+            self._logger.write("migalka_error", {"port": str(self.cfg.com_port), "error": str(e), "mode": str(mode)})
+            return
+
+        self._ssvep_block_started_at = float(time.time())
+        plog.info(f"мигалка запущена, блок {self.cfg.ssvep_block_sec}s, лампа-цель={self._ssvep_target_lamp}")
+        self.status_text = (
+            f"Эксперимент {self._next_experiment_index_1based()}/{self._total_experiments()}: "
+            f"SSVEP {mode} — мигалка ON, 0/{self.cfg.ssvep_block_sec:.0f} c"
+        )
         self._logger.write(
             "ssvep_block_start",
             {"mode": str(mode), "target_lamp": int(self._ssvep_target_lamp), "freqs_hz": [float(x) for x in self.cfg.ssvep_freqs_hz]},
@@ -487,7 +542,8 @@ class ProtocolRunner:
                     next_ssvep_mode="burst",
                 )
             else:
-                self.state = ProtocolState.Finalize
+                plog.info("=== SSVEP burst завершён -> Finalize ===")
+                self._set_state(ProtocolState.Finalize, detail="ssvep burst done")
         else:
             # Следующий блок стартуем через паузу (см. ветку self._ssvep_block_started_at is None).
             self.state = ProtocolState.SSVEP_CONT if mode == "continuous" else ProtocolState.SSVEP_BURST
@@ -509,6 +565,7 @@ class ProtocolRunner:
             }
         )
         self._logger = None
-        self.state = ProtocolState.Stopped
+        self._set_state(ProtocolState.Stopped, detail="finalize")
         self.status_text = f"Готово. Логи: {out_dir}"
+        plog.info(f"=== PROTOCOL DONE logs={out_dir} ===")
 

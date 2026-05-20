@@ -10,6 +10,17 @@ import serial
 from ssvep_analysis.burst_gate import parse_led_serial_line
 from ssvep_analysis.migalka_lsl import MigalkaLslSender
 
+try:
+    from experiment_protocol.protocol_log import error as _log_error
+    from experiment_protocol.protocol_log import info as _log_info
+except Exception:  # pragma: no cover
+
+    def _log_info(msg: str) -> None:
+        print(f"[migalka] {msg}", flush=True)
+
+    def _log_error(msg: str) -> None:
+        print(f"[migalka] ERROR {msg}", flush=True)
+
 
 @dataclass(frozen=True)
 class MigalkaConfig:
@@ -47,17 +58,22 @@ class MigalkaSerialController:
     def open_and_start(self, cfg: MigalkaConfig) -> None:
         with self._lock:
             if self.is_open():
+                _log_info(f"уже открыта на {cfg.port}, пропуск open_and_start")
                 return
+            _log_info(f"открываем COM {cfg.port!r} baud={cfg.baudrate}, mode={cfg.mode}, freqs={cfg.freqs}")
             self._ser = serial.Serial(cfg.port, cfg.baudrate, timeout=cfg.timeout_s)
             time.sleep(0.5)
             self._running = True
             self._send_mode(cfg.mode)
             self._send_freqs(cfg.freqs)
+            _log_info(f"команды отправлены: M {cfg.mode}, freqs={' '.join(cfg.freqs)}")
             self._thread = threading.Thread(target=self._read_loop, name="MigalkaSerialReader", daemon=True)
             self._thread.start()
+            _log_info("read_loop запущен")
 
     def stop_and_close(self) -> None:
         with self._lock:
+            _log_info("stop_and_close")
             self._running = False
             try:
                 self._send_freqs(("0", "0", "0", "0", "0", "0"))
