@@ -376,8 +376,9 @@ class StimulusApp:
             return
         if self._auto_pause_until is None or self._auto_next_target is None:
             return
-        # number is next trial index (1-based)
-        exp_n = int(self._auto_trials_started) + 1
+        # В авто-режиме self._auto_trials_started уже является номером следующего trial (1-based),
+        # т.к. инкремент делается перед планированием паузы/оверлея.
+        exp_n = max(1, int(self._auto_trials_started))
         self._auto_overlay_title.text = f"Эксперимент №{exp_n}"
         tid = int(self._auto_next_target)
         self._auto_overlay_sub.text = "Смотрите на плитку:"

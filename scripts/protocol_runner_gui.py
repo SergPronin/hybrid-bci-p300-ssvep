@@ -12,6 +12,7 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -54,6 +55,29 @@ class ProtocolRunnerWidget(QWidget):
         self.spin_ssvep.setRange(1, 200)
         self.spin_ssvep.setValue(15)
 
+        # Stimulator (PsychoPy) auto-mode parameters
+        self.spin_inter_trial = QDoubleSpinBox()
+        self.spin_inter_trial.setRange(0.0, 30.0)
+        self.spin_inter_trial.setDecimals(1)
+        self.spin_inter_trial.setSingleStep(0.5)
+        self.spin_inter_trial.setValue(1.0)
+
+        self.spin_sequences = QSpinBox()
+        self.spin_sequences.setRange(1, 50)
+        self.spin_sequences.setValue(12)
+
+        self.spin_plan_trials = QSpinBox()
+        self.spin_plan_trials.setRange(1, 50)
+        self.spin_plan_trials.setValue(15)
+
+        self.spin_plan_target = QSpinBox()
+        self.spin_plan_target.setRange(0, 8)
+        self.spin_plan_target.setValue(4)
+
+        self.spin_plan_target_epochs = QSpinBox()
+        self.spin_plan_target_epochs.setRange(1, 50)
+        self.spin_plan_target_epochs.setValue(12)
+
         self.chk_run_stimulus = QCheckBox(
             "Запускать экранную стимуляцию (PsychoPy, случайная цель, без клика START)"
         )
@@ -70,6 +94,11 @@ class ProtocolRunnerWidget(QWidget):
         form.addRow("COM port (Migalka):", self.ed_com)
         form.addRow("P300 trials per mode:", self.spin_p300)
         form.addRow("SSVEP blocks per mode:", self.spin_ssvep)
+        form.addRow("Stimulus inter-trial pause (s):", self.spin_inter_trial)
+        form.addRow("Stimulus sequences (per trial):", self.spin_sequences)
+        form.addRow("AUC plan trials:", self.spin_plan_trials)
+        form.addRow("AUC plan target tile (0..8):", self.spin_plan_target)
+        form.addRow("Template target epochs:", self.spin_plan_target_epochs)
         form.addRow("", self.chk_run_stimulus)
 
         root.addLayout(form)
@@ -117,14 +146,16 @@ class ProtocolRunnerWidget(QWidget):
                         str(run_script),
                         "--auto-random-protocol",
                         "--no-analyzer",
+                        "--inter-trial-s",
+                        str(float(self.spin_inter_trial.value())),
                         "--auto-plan-trials",
-                        "15",
+                        str(int(self.spin_plan_trials.value())),
                         "--auto-plan-target-tile-id",
-                        "4",
+                        str(int(self.spin_plan_target.value())),
                         "--auto-plan-target-repeats",
                         "0",
                         "--auto-plan-target-epochs",
-                        "12",
+                        str(int(self.spin_plan_target_epochs.value())),
                     ],
                     cwd=str(_ROOT),
                 )
