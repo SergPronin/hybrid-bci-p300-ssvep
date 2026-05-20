@@ -757,6 +757,8 @@ class ProtocolRunnerWidget(QWidget):
             return
         prev = getattr(self, "_last_status_printed", "")
         self._runner.tick()
+        self._sync_ssvep_cue_overlay()
+        QApplication.processEvents()
         st = self._runner.status_text
         self.lbl_status.setText(st)
         if st != prev:
@@ -772,7 +774,6 @@ class ProtocolRunnerWidget(QWidget):
                 self._stimulus_proc = None
                 if prev != st and self._runner.state == "ssvep_continuous":
                     plog_info("стимулятор плиток остановлен — этап ССВП, запуск мигалки по COM")
-        self._sync_ssvep_cue_overlay()
         if self._runner.state in ("stopped",):
             self._timer.stop()
             self.btn_start.setEnabled(True)

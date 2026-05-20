@@ -50,6 +50,7 @@ class SsvepCueOverlay(QWidget):
 
         root.addStretch(3)
         self.hide()
+        self._shown_key: tuple[int, int, int, float, str] | None = None
 
     def show_cue(
         self,
@@ -60,18 +61,26 @@ class SsvepCueOverlay(QWidget):
         freq_hz: float | None = None,
         mode_label: str = "",
     ) -> None:
-        self.lbl_title.setText(f"Эксперимент №{int(experiment_index)} из {int(experiment_total)}")
-        self.lbl_mode.setText(str(mode_label) if mode_label else "ССВП")
-        self.lbl_lamp.setText(str(int(lamp_1based)))
-        if freq_hz is not None and float(freq_hz) > 0:
-            self.lbl_hz.setText(f"≈ {float(freq_hz):g} Гц")
-            self.lbl_hz.show()
-        else:
-            self.lbl_hz.hide()
+        key = (
+            int(experiment_index),
+            int(experiment_total),
+            int(lamp_1based),
+            float(freq_hz or 0.0),
+            str(mode_label),
+        )
+        if key != self._shown_key:
+            self.lbl_title.setText(f"Эксперимент №{int(experiment_index)} из {int(experiment_total)}")
+            self.lbl_mode.setText(str(mode_label) if mode_label else "ССВП")
+            self.lbl_lamp.setText(str(int(lamp_1based)))
+            if freq_hz is not None and float(freq_hz) > 0:
+                self.lbl_hz.setText(f"≈ {float(freq_hz):g} Гц")
+                self.lbl_hz.show()
+            else:
+                self.lbl_hz.hide()
+            self._shown_key = key
         if not self.isVisible():
             self.showFullScreen()
-        self.raise_()
-        self.activateWindow()
 
     def hide_overlay(self) -> None:
+        self._shown_key = None
         self.hide()

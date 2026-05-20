@@ -238,7 +238,11 @@ class ProtocolRunner:
             self._set_state(next_state, detail="pause finished")
             if next_state in (ProtocolState.SSVEP_CONT, ProtocolState.SSVEP_BURST) and next_mode is not None:
                 plog.info(f"пауза закончилась — запуск SSVEP migalka, mode={next_mode}")
-                self._start_ssvep_block(mode=str(next_mode))
+                try:
+                    self._start_ssvep_block(mode=str(next_mode))
+                except Exception as e:
+                    plog.exc("критическая ошибка _start_ssvep_block", e)
+                    self.status_text = f"ССВП: ошибка запуска блока: {e}"
         return False
 
     @property
@@ -616,6 +620,7 @@ class ProtocolRunner:
         assert self._logger is not None
         plog.info(f"=== SSVEP block START mode={mode!r} COM={self.cfg.com_port!r} ===")
         active_freqs = self._active_ssvep_freqs_hz()
+        n_lamps = max(1, len(active_freqs))
         fs_hz = float(self._eeg_nominal_fs_hz or self.cfg.ssvep_fs_hz)
         self._ssvep.reset(
             params=SSVEPParams(
@@ -698,7 +703,11 @@ class ProtocolRunner:
                     next_ssvep_mode=str(mode),
                 )
                 return
-            self._start_ssvep_block(mode=str(mode))
+            try:
+                self._start_ssvep_block(mode=str(mode))
+            except Exception as e:
+                plog.exc("критическая ошибка _start_ssvep_block", e)
+                self.status_text = f"ССВП: ошибка запуска блока: {e}"
             return
         elapsed = float(time.time()) - float(self._ssvep_block_started_at)
         sm = _ru_ssvep_stim_mode(mode)
