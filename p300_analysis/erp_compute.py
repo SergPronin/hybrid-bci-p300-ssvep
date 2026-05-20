@@ -14,7 +14,11 @@ from p300_analysis.signal_processing import (
     normalize_channels,
     time_window_to_indices,
 )
-from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_SIGNED_MEAN
+from p300_analysis.winner_selection import (
+    WINNER_MODE_AUC,
+    WINNER_MODE_SIGNED_MEAN,
+    WINNER_MODE_TEMPLATE_CORR,
+)
 
 
 def artifact_reject_epochs(
@@ -120,6 +124,8 @@ def compute_winner_metrics(
     window_x_ms: int,
     window_y_ms: int,
     winner_mode: str = WINNER_MODE_AUC,
+    *,
+    template_window: Optional[np.ndarray] = None,
 ) -> Tuple[int, str, Dict[str, Any]]:
     """Возвращает winner_idx, mode_used, data для debug_ndjson (winner_compare).
 
@@ -132,7 +138,38 @@ def compute_winner_metrics(
     signed_mean_values = np.mean(corr_win, axis=1) if corr_win.size else np.zeros(len(stim_keys))
     positive_peak_values = np.max(corr_win, axis=1) if corr_win.size else np.zeros(len(stim_keys))
 
-    if winner_mode == WINNER_MODE_SIGNED_MEAN:
+    template_corr_values = None
+    if winner_mode == WINNER_MODE_TEMPLATE_CORR:
+        # Template correlation in the decision window. If template is missing or degenerate,
+        # gracefully fall back to AUC mode.
+        tw = None if template_window is None else np.asarray(template_window, dtype=np.float64).ravel()
+        if tw is None or tw.size != corr_win.shape[1]:
+            final_metric_values = abs_auc_values
+            mode_used = WINNER_MODE_AUC
+        else:
+            t = tw.copy()
+            t = t - float(np.mean(t)) if t.size else t
+            t_std = float(np.std(t, ddof=1)) if t.size > 1 else 0.0
+            if not np.isfinite(t_std) or t_std < 1e-12:
+                final_metric_values = abs_auc_values
+                mode_used = WINNER_MODE_AUC
+            else:
+                t /= t_std
+                # Per-stimulus Pearson correlation with z-scored template
+                template_corr_values = np.zeros(len(stim_keys), dtype=np.float64)
+                for i in range(len(stim_keys)):
+                    x = np.asarray(corr_win[i], dtype=np.float64).ravel()
+                    x = x - float(np.mean(x)) if x.size else x
+                    x_std = float(np.std(x, ddof=1)) if x.size > 1 else 0.0
+                    if not np.isfinite(x_std) or x_std < 1e-12:
+                        template_corr_values[i] = 0.0
+                        continue
+                    x /= x_std
+                    denom = float(max(1, x.size - 1))
+                    template_corr_values[i] = float(np.sum(x * t) / denom) if x.size else 0.0
+                final_metric_values = template_corr_values
+                mode_used = WINNER_MODE_TEMPLATE_CORR
+    elif winner_mode == WINNER_MODE_SIGNED_MEAN:
         final_metric_values = signed_mean_values
         mode_used = WINNER_MODE_SIGNED_MEAN
     else:
@@ -157,6 +194,9 @@ def compute_winner_metrics(
         "final_metric_values": [float(x) for x in final_metric_values],
         "signed_mean_final": [float(x) for x in signed_mean_values],
         "abs_auc_values": [float(x) for x in abs_auc_values],
+        "template_corr_values": (
+            [float(x) for x in template_corr_values] if template_corr_values is not None else None
+        ),
         "auc_winner_idx": auc_winner_idx,
         "auc_winner_key": stim_keys[auc_winner_idx],
         "positive_peak_values": [float(x) for x in positive_peak_values],

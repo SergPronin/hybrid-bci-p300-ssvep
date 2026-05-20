@@ -100,6 +100,7 @@ from p300_analysis.run_export import (
 from p300_analysis.session_recorder import SessionRecorder
 from p300_analysis.winner_selection import (
     WINNER_MODE_AUC,
+    WINNER_MODE_TEMPLATE_CORR,
     mode_to_short_label,
 )
 
@@ -882,6 +883,10 @@ class P300AnalyzerWindow(QMainWindow):
         self.combo_winner_mode.setStyleSheet("")
         self.combo_winner_mode.addItem(
             "Интегрирование по модулю |corrected| в окне [X–Y]", WINNER_MODE_AUC
+        )
+        self.combo_winner_mode.addItem(
+            "Корреляция corrected с шаблоном (эталоном) в окне [X–Y] (нужен cue)",
+            WINNER_MODE_TEMPLATE_CORR,
         )
         self.combo_winner_mode.setCurrentIndex(0)
         self.combo_winner_mode.currentIndexChanged.connect(self._on_params_changed)
@@ -2136,6 +2141,13 @@ class P300AnalyzerWindow(QMainWindow):
                 wx,
                 wy,
                 winner_mode=str(self.combo_winner_mode.currentData() or WINNER_MODE_AUC),
+                template_window=self._build_template_window(
+                    stim_keys=stim_keys,
+                    corrected=corrected,
+                    time_ms=time_ms,
+                    window_x_ms=wx,
+                    window_y_ms=wy,
+                ),
             )
             winner_key = stim_keys[winner_idx]
             dbg["lsl_cue_target_id"] = self._lsl_cue_target_id
@@ -2241,6 +2253,37 @@ class P300AnalyzerWindow(QMainWindow):
             f"Эпохи: {counts}.{need_hint}{filter_hint}"
         )
         self._update_epoch_summary_panel()
+
+    def _build_template_window(
+        self,
+        *,
+        stim_keys: List[str],
+        corrected: np.ndarray,
+        time_ms: np.ndarray,
+        window_x_ms: int,
+        window_y_ms: int,
+    ) -> Optional[np.ndarray]:
+        """Build template (window slice) from current cue target ERP.
+
+        For template-correlation winner mode we use the current LSL cue target tile id
+        as the template source. If cue is missing or the target stim isn't present yet,
+        return None (compute_winner_metrics will fall back to AUC).
+        """
+        try:
+            tgt = self._lsl_cue_target_id
+            if tgt is None:
+                return None
+            key = f"стимул_{int(tgt)}"
+            if key not in stim_keys:
+                return None
+            ti = stim_keys.index(key)
+            from p300_analysis.signal_processing import time_window_to_indices
+
+            xi0, xi1 = time_window_to_indices(time_ms, int(window_x_ms), int(window_y_ms))
+            win = np.asarray(corrected[ti, xi0:xi1], dtype=np.float64).ravel()
+            return win if win.size else None
+        except Exception:
+            return None
 
     def _plot_last_single_epochs(
         self,

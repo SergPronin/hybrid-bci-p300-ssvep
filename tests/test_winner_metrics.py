@@ -15,7 +15,11 @@ from p300_analysis.signal_processing import (
     normalize_channels,
     time_window_to_indices,
 )
-from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_SIGNED_MEAN
+from p300_analysis.winner_selection import (
+    WINNER_MODE_AUC,
+    WINNER_MODE_SIGNED_MEAN,
+    WINNER_MODE_TEMPLATE_CORR,
+)
 
 
 def test_auc_mode_uses_absolute_integral_and_matches_integrated_plot() -> None:
@@ -75,6 +79,35 @@ def test_signed_mean_mode_remains_available_for_offline_comparison() -> None:
 
     assert mode_used == WINNER_MODE_SIGNED_MEAN
     assert winner_idx == 1
+
+
+def test_template_corr_mode_prefers_shape_match_in_window() -> None:
+    stim_keys = ["стимул_0", "стимул_1"]
+    time_ms = np.array([0.0, 100.0, 200.0, 300.0], dtype=np.float64)
+    # Two candidates have similar energy, but only stim_1 matches the template shape.
+    corrected = np.array(
+        [
+            [0.0, 1.0, -1.0, 0.0],   # anti-shape
+            [0.0, 1.0, 1.0, 0.0],    # matches
+        ],
+        dtype=np.float64,
+    )
+    template_window = np.array([1.0, 1.0, 0.0], dtype=np.float64)  # indices 1..4 (100,200,300)
+
+    winner_idx, mode_used, dbg = compute_winner_metrics(
+        stim_keys,
+        raw_averaged=corrected,
+        corrected=corrected,
+        time_ms=time_ms,
+        window_x_ms=100,
+        window_y_ms=300,
+        winner_mode=WINNER_MODE_TEMPLATE_CORR,
+        template_window=template_window,
+    )
+
+    assert mode_used == WINNER_MODE_TEMPLATE_CORR
+    assert winner_idx == 1
+    assert dbg["template_corr_values"] is not None
 
 
 def test_build_averaged_erp_per_channel_noisy_channel_does_not_dominate() -> None:
