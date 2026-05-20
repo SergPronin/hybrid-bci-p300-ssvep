@@ -652,16 +652,22 @@ class ProtocolRunner:
         while len(freq_labels_list) < 6:
             freq_labels_list.append("0")
         freq_labels = tuple(freq_labels_list[:6])
+        mig_mode = 0 if str(mode) == "continuous" else 1
         mcfg = MigalkaConfig(
             port=str(self.cfg.com_port),
-            mode=0 if mode == "continuous" else 1,
+            mode=int(mig_mode),
             freqs=freq_labels,
         )
         plog.info(
             f"SSVEP engine: lamps={n_lamps} freqs_Hz={list(active_freqs)} "
-            f"roi={list(self.cfg.ssvep_roi_channels_0idx) or 'ALL'}"
+            f"roi={list(self.cfg.ssvep_roi_channels_0idx) or 'ALL'} "
+            f"migalka_M={mig_mode} ({'постоянный' if mig_mode == 0 else 'пакетный'})"
         )
         try:
+            try:
+                self._migalka.stop_and_close()
+            except Exception:
+                pass
             self._migalka.open_and_start(mcfg)
             if not self._migalka.is_open():
                 raise RuntimeError("порт открыт, но is_open() == False")
@@ -775,6 +781,8 @@ class ProtocolRunner:
                 )
             else:
                 plog.info("=== SSVEP burst завершён -> Finalize ===")
+                self._set_ssvep_blackout(False)
+                self._set_ssvep_cue_overlay(ssvep_mode=None)
                 self._set_state(ProtocolState.Finalize, detail="ssvep burst done")
         else:
             # Следующий блок стартуем через паузу (см. ветку self._ssvep_block_started_at is None).
@@ -782,6 +790,8 @@ class ProtocolRunner:
 
     def _finalize(self) -> None:
         assert self._logger is not None
+        self._set_ssvep_blackout(False)
+        self._set_ssvep_cue_overlay(ssvep_mode=None)
         self.status_text = "Завершение: сохранение логов…"
         try:
             self._migalka.stop_and_close()

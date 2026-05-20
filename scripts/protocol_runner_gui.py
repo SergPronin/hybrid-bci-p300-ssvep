@@ -722,6 +722,10 @@ class ProtocolRunnerWidget(QWidget):
             if self._ssvep_cue_overlay is not None:
                 self._ssvep_cue_overlay.hide_overlay()
             return
+        if self._runner.state in ("finalize", "stopped"):
+            if self._ssvep_cue_overlay is not None:
+                self._ssvep_cue_overlay.hide_overlay()
+            return
         if bool(self._runner.ssvep_blackout_visible):
             if self._ssvep_cue_overlay is None:
                 self._ssvep_cue_overlay = SsvepCueOverlay()
@@ -789,12 +793,13 @@ class ProtocolRunnerWidget(QWidget):
                     or bool(self._runner.ssvep_cue_visible)
                 ):
                     plog_info("стимулятор плиток остановлен — этап ССВП (оверлей / мигалка)")
+        if self._runner.state in ("finalize", "stopped"):
+            if self._ssvep_cue_overlay is not None:
+                self._ssvep_cue_overlay.hide_overlay()
         if self._runner.state in ("stopped",):
             self._timer.stop()
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
-            if self._ssvep_cue_overlay is not None:
-                self._ssvep_cue_overlay.hide_overlay()
 
 
 def main() -> None:

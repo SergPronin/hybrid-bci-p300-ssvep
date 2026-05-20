@@ -58,9 +58,18 @@ class MigalkaSerialController:
     def open_and_start(self, cfg: MigalkaConfig) -> None:
         with self._lock:
             if self.is_open():
-                _log_info(f"уже открыта на {cfg.port}, пропуск open_and_start")
+                _log_info(
+                    f"COM уже открыт — перенастройка mode={cfg.mode} "
+                    f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'}), freqs={cfg.freqs}"
+                )
+                self._send_mode(cfg.mode)
+                time.sleep(0.05)
+                self._send_freqs(cfg.freqs)
                 return
-            _log_info(f"открываем COM {cfg.port!r} baud={cfg.baudrate}, mode={cfg.mode}, freqs={cfg.freqs}")
+            _log_info(
+                f"открываем COM {cfg.port!r} baud={cfg.baudrate}, mode={cfg.mode} "
+                f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'}), freqs={cfg.freqs}"
+            )
             self._ser = serial.Serial(cfg.port, cfg.baudrate, timeout=cfg.timeout_s)
             time.sleep(0.5)
             self._running = True
