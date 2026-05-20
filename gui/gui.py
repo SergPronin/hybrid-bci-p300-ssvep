@@ -55,6 +55,8 @@ class StimulusApp:
         auto_plan_target_tile_id: int = 4,
         auto_plan_target_repeats: int = 0,
         auto_plan_target_epochs: int = 12,
+        sequences_override: int | None = None,
+        auto_max_trials: int | None = None,
     ) -> None:
         self.auto_random_trials = bool(auto_random_trials)
         self.inter_trial_s = max(0.0, float(inter_trial_s))
@@ -66,6 +68,8 @@ class StimulusApp:
         self._auto_target_plan: list[int] = []
         self._auto_pause_until: float | None = None
         self._auto_next_target: int | None = None
+        self._auto_max_trials = int(auto_max_trials) if auto_max_trials is not None else None
+        self._sequences_override = int(sequences_override) if sequences_override is not None else None
         self.win = visual.Window(
             size=config.WINDOW_SIZE,
             color=config.WINDOW_COLOR,
@@ -162,6 +166,16 @@ class StimulusApp:
         self.tb_inter = add_row("Между рядами (с)", f"{config.DEFAULT_INTER_BLOCK_S:.2f}")
         self.tb_seq = add_row("Раунды", f"{config.DEFAULT_SEQUENCES}")
         self.tb_target = add_row("Цель 0–8", f"{config.DEFAULT_TARGET_ID}")
+
+        # Apply sequences override for auto-protocol so operator changes in protocol_runner_gui take effect.
+        if self._sequences_override is not None:
+            seq = _clamp_int(
+                self._sequences_override,
+                config.SEQUENCES_MIN,
+                config.SEQUENCES_MAX,
+                default=config.DEFAULT_SEQUENCES,
+            )
+            self.tb_seq.text = str(seq)
 
         self.hint = visual.TextStim(
             self.win,
@@ -547,6 +561,9 @@ class StimulusApp:
 
     def run(self) -> None:
         while True:
+            # Stop auto stimulator after N trials (so protocol can move to SSVEP without extra P300).
+            if self.auto_random_trials and self._auto_max_trials is not None and self._auto_trials_started >= int(self._auto_max_trials):
+                break
             if self._auto_pending_first_trial:
                 self._auto_pending_first_trial = False
                 # Show instruction before the very first auto trial as well

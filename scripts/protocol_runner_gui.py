@@ -148,6 +148,10 @@ class ProtocolRunnerWidget(QWidget):
                         "--no-analyzer",
                         "--inter-trial-s",
                         str(float(self.spin_inter_trial.value())),
+                        "--sequences",
+                        str(int(self.spin_sequences.value())),
+                        "--auto-max-trials",
+                        str(int(self.spin_p300.value()) * 2),
                         "--auto-plan-trials",
                         str(int(self.spin_plan_trials.value())),
                         "--auto-plan-target-tile-id",
@@ -196,6 +200,14 @@ class ProtocolRunnerWidget(QWidget):
             return
         self._runner.tick()
         self.lbl_status.setText(self._runner.status_text)
+        # After P300 stage ends, stop the PsychoPy stimulator so it won't keep generating extra trials
+        if self._stimulus_proc is not None and self._stimulus_proc.poll() is None:
+            if self._runner.state in ("ssvep_continuous", "ssvep_burst", "finalize", "stopped"):
+                try:
+                    self._stimulus_proc.terminate()
+                except Exception:
+                    pass
+                self._stimulus_proc = None
         if self._runner.state in ("stopped",):
             self._timer.stop()
             self.btn_start.setEnabled(True)

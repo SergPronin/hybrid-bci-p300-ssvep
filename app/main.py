@@ -9,6 +9,8 @@ def main(
     auto_plan_target_tile_id: int = 4,
     auto_plan_target_repeats: int = 0,
     auto_plan_target_epochs: int = 12,
+    sequences_override: int | None = None,
+    auto_max_trials: int | None = None,
 ) -> None:
     app = StimulusApp(
         auto_random_trials=auto_random_trials,
@@ -17,6 +19,8 @@ def main(
         auto_plan_target_tile_id=auto_plan_target_tile_id,
         auto_plan_target_repeats=auto_plan_target_repeats,
         auto_plan_target_epochs=auto_plan_target_epochs,
+        sequences_override=sequences_override,
+        auto_max_trials=auto_max_trials,
     )
     app.run()
 

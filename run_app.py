@@ -82,6 +82,18 @@ def main() -> None:
         default=12,
         help="Сколько target-эпох нужно набрать для шаблона (используется при --auto-plan-target-repeats=0).",
     )
+    parser.add_argument(
+        "--sequences",
+        type=int,
+        default=None,
+        help="Переопределить число sequences (раундов) в P300 trial (полезно для автопротокола).",
+    )
+    parser.add_argument(
+        "--auto-max-trials",
+        type=int,
+        default=None,
+        help="Ограничить число auto-trial (после достижения — стимулятор завершится).",
+    )
     args = parser.parse_args()
 
     analyzer_proc: subprocess.Popen[str] | None = None
@@ -102,6 +114,8 @@ def main() -> None:
         else int(args.auto_calib_target_tile_id),
         auto_plan_target_repeats=int(args.auto_plan_target_repeats),
         auto_plan_target_epochs=int(args.auto_plan_target_epochs),
+        sequences_override=int(args.sequences) if args.sequences is not None else None,
+        auto_max_trials=int(args.auto_max_trials) if args.auto_max_trials is not None else None,
     )
     if analyzer_proc is not None and analyzer_proc.poll() is None:
         print(
