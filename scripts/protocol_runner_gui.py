@@ -60,6 +60,7 @@ class ProtocolRunnerWidget(QWidget):
         self.chk_run_stimulus.setChecked(True)
         self.chk_run_stimulus.setToolTip(
             "Поднимает `python run_app.py --auto-random-protocol --no-analyzer`.\n"
+            "Можно задать первые trial с фиксированной целью для набора шаблона (см. run_app.py --auto-calib-*).\n"
             "Нужен Python с установленным psychopy.\n"
             "Маркеры trial_start/target идут в LSL как и при ручном START."
         )
@@ -111,7 +112,20 @@ class ProtocolRunnerWidget(QWidget):
             run_script = _ROOT / "run_app.py"
             if run_script.exists():
                 self._stimulus_proc = subprocess.Popen(
-                    [run_py, str(run_script), "--auto-random-protocol", "--no-analyzer"],
+                    [
+                        run_py,
+                        str(run_script),
+                        "--auto-random-protocol",
+                        "--no-analyzer",
+                        "--auto-plan-trials",
+                        "15",
+                        "--auto-plan-target-tile-id",
+                        "4",
+                        "--auto-plan-target-repeats",
+                        "0",
+                        "--auto-plan-target-epochs",
+                        "12",
+                    ],
                     cwd=str(_ROOT),
                 )
 

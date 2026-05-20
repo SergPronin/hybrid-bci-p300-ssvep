@@ -42,9 +42,19 @@ class StimulusApp:
         *,
         auto_random_trials: bool = False,
         inter_trial_s: float = 1.0,
+        auto_plan_trials: int = 15,
+        auto_plan_target_tile_id: int = 4,
+        auto_plan_target_repeats: int = 0,
+        auto_plan_target_epochs: int = 12,
     ) -> None:
         self.auto_random_trials = bool(auto_random_trials)
         self.inter_trial_s = max(0.0, float(inter_trial_s))
+        self.auto_plan_trials = max(0, int(auto_plan_trials))
+        self.auto_plan_target_tile_id = int(auto_plan_target_tile_id)
+        self.auto_plan_target_repeats = max(0, int(auto_plan_target_repeats))
+        self.auto_plan_target_epochs = max(0, int(auto_plan_target_epochs))
+        self._auto_trials_started = 0
+        self._auto_target_plan: list[int] = []
         self.win = visual.Window(
             size=config.WINDOW_SIZE,
             color=config.WINDOW_COLOR,
@@ -91,6 +101,7 @@ class StimulusApp:
         self.mouse = event.Mouse(win=self.win)
         if self.auto_random_trials:
             self.win.mouseVisible = False
+            self._auto_target_plan = self._build_auto_target_plan()
 
         px = self._right_panel_x()
         y = config.PANEL_FIRST_ROW_Y
@@ -264,9 +275,135 @@ class StimulusApp:
         core.wait(0.2)
 
     def _start_trial_random_target(self) -> None:
-        """Случайная цель 0..N-1 на каждый trial (для клинического автопротокола)."""
-        tgt = random.randint(0, len(self.grid.tiles) - 1)
+        """Авто-цель на каждый trial.
+
+        В первые auto_plan_trials trial используем план целей, чтобы нужная плитка встретилась
+        auto_plan_target_repeats раз, но не подряд (для набора шаблона без монотонности).
+        После окончания плана — обычный рандом.
+        """
+        tgt: int
+        if self._auto_trials_started < len(self._auto_target_plan):
+            tgt = int(self._auto_target_plan[self._auto_trials_started])
+        else:
+            prev = None
+            if self._auto_trials_started > 0:
+                prev = int(self._auto_target_plan[-1]) if self._auto_target_plan else None
+            tgt = self._rand_target_avoid(prev=prev)
+        self._auto_trials_started += 1
         self._start_trial_with_target(tgt)
+
+    def _rand_target_avoid(self, *, prev: int | None) -> int:
+        n = len(self.grid.tiles)
+        if n <= 1:
+            return 0
+        tries = 0
+        while True:
+            x = random.randint(0, n - 1)
+            if prev is None or x != int(prev):
+                return int(x)
+            tries += 1
+            if tries > 50:
+                # fallback: just pick next different
+                return int((int(prev) + 1) % n)
+
+    def _build_auto_target_plan(self) -> list[int]:
+        """Plan for first trials: target repeats spaced out, never adjacent.
+
+        Produces a list of length <= auto_plan_trials.
+        """
+        n_tiles = len(self.grid.tiles)
+        if n_tiles <= 0 or self.auto_plan_trials <= 0:
+            return []
+        trials = int(self.auto_plan_trials)
+        tgt = _clamp_int(self.auto_plan_target_tile_id, 0, n_tiles - 1, default=4)
+        # How many repeats do we need for a reliable template?
+        # Each trial contributes approx. `sequences` target epochs (target flashes once per sequence).
+        seq = _parse_int(
+            self.tb_seq.text,
+            config.DEFAULT_SEQUENCES,
+            config.SEQUENCES_MIN,
+            config.SEQUENCES_MAX,
+        )
+        max_non_adjacent = (trials + 1) // 2
+        if self.auto_plan_target_repeats > 0:
+            reps_needed = int(self.auto_plan_target_repeats)
+        else:
+            # auto: ensure target_epochs collected within non-adjacent constraint
+            target_epochs = int(self.auto_plan_target_epochs)
+            if target_epochs <= 0:
+                reps_needed = 0
+            else:
+                # if sequences too small, raise it so we can satisfy both epochs and non-adjacent constraint
+                # need: reps <= max_non_adjacent and reps*seq >= target_epochs  => seq >= ceil(target_epochs/max_non_adjacent)
+                if max_non_adjacent > 0:
+                    min_seq = int(np.ceil(target_epochs / float(max_non_adjacent)))
+                else:
+                    min_seq = target_epochs
+                if seq < min_seq:
+                    seq = _clamp_int(min_seq, config.SEQUENCES_MIN, config.SEQUENCES_MAX, default=config.DEFAULT_SEQUENCES)
+                    self.tb_seq.text = str(seq)
+                reps_needed = int(np.ceil(target_epochs / float(max(1, seq))))
+        reps = max(0, min(int(reps_needed), trials, max_non_adjacent))
+        if reps <= 0:
+            # no special plan
+            plan: list[int] = []
+            prev: int | None = None
+            for _ in range(trials):
+                x = self._rand_target_avoid(prev=prev)
+                plan.append(x)
+                prev = x
+            return plan
+
+        # Choose positions for target: spread roughly evenly, avoid adjacency.
+        positions: set[int] = set()
+        if reps == 1:
+            positions.add(trials // 2)
+        else:
+            step = (trials - 1) / float(reps - 1)
+            for i in range(reps):
+                positions.add(int(round(i * step)))
+        # Fix adjacency if any
+        pos_sorted = sorted(positions)
+        fixed: list[int] = []
+        for p in pos_sorted:
+            if fixed and p == fixed[-1] + 1:
+                # try shift right, else left
+                pr = p + 1
+                pl = p - 1
+                if pr < trials and pr not in positions and (not fixed or pr != fixed[-1] + 1):
+                    p = pr
+                elif pl >= 0 and pl not in positions and (not fixed or p != fixed[-1] + 1):
+                    p = pl
+            fixed.append(p)
+        positions = set(fixed)
+
+        # Build plan
+        plan: list[int] = []
+        prev: int | None = None
+        for i in range(trials):
+            if i in positions:
+                x = tgt
+                if prev is not None and int(prev) == int(x):
+                    # shouldn't happen; pick non-target
+                    x = self._rand_target_avoid(prev=prev)
+                plan.append(int(x))
+                prev = int(x)
+            else:
+                # pick random, avoid repeating prev and avoid target if prev was target to prevent adjacency
+                avoid_prev = prev
+                tries = 0
+                while True:
+                    x = self._rand_target_avoid(prev=avoid_prev)
+                    if prev is not None and int(prev) == int(tgt) and int(x) == int(tgt):
+                        tries += 1
+                        if tries > 50:
+                            x = int((int(tgt) + 1) % n_tiles)
+                        else:
+                            continue
+                    plan.append(int(x))
+                    prev = int(x)
+                    break
+        return plan
 
     def _draw(self) -> None:
         for (tile, rect, tile_text) in zip(

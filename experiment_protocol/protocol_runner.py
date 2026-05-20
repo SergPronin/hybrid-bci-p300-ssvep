@@ -34,6 +34,7 @@ class ProtocolConfig:
 
     p300_trials_per_mode: int = 15
     ssvep_blocks_per_mode: int = 15
+    pause_between_experiments_s: float = 2.0
 
     # Warmup for template_corr: require at least N epochs for cue target
     template_warmup_target_epochs: int = 12
@@ -86,6 +87,56 @@ class ProtocolRunner:
 
         self._ssvep_block_started_at: Optional[float] = None
         self._ssvep_target_lamp: Optional[int] = None
+        self._p300_external_template_ready: bool = False
+
+        # Неблокирующая пауза перед стартом следующей "единицы эксперимента" (trial/block).
+        self._pause_until_wall: Optional[float] = None
+        self._pause_status: Optional[str] = None
+        self._pause_next_state: Optional[str] = None
+        self._pause_next_ssvep_mode: Optional[str] = None
+
+    def _total_experiments(self) -> int:
+        return int(self.cfg.p300_trials_per_mode) * 2 + int(self.cfg.ssvep_blocks_per_mode) * 2
+
+    def _next_experiment_index_1based(self) -> int:
+        return (
+            int(self._p300_trial_count_auc)
+            + int(self._p300_trial_count_template)
+            + int(self._ssvep_block_count_cont)
+            + int(self._ssvep_block_count_burst)
+            + 1
+        )
+
+    def _start_pause(self, *, seconds: float, status: str, next_state: str, next_ssvep_mode: Optional[str] = None) -> None:
+        sec = max(0.0, float(seconds))
+        self._pause_until_wall = float(time.time()) + sec
+        self._pause_status = str(status)
+        self._pause_next_state = str(next_state)
+        self._pause_next_ssvep_mode = str(next_ssvep_mode) if next_ssvep_mode is not None else None
+
+    def _tick_pause(self) -> bool:
+        """Returns True if we are in pause (and handled it)."""
+        if self._pause_until_wall is None:
+            return False
+        now = float(time.time())
+        rem = float(self._pause_until_wall) - now
+        if rem > 0:
+            base = self._pause_status or "Пауза"
+            self.status_text = f"{base} ({rem:.1f} c)"
+            return True
+
+        # Pause finished: apply scheduled transition once.
+        next_state = self._pause_next_state
+        next_mode = self._pause_next_ssvep_mode
+        self._pause_until_wall = None
+        self._pause_status = None
+        self._pause_next_state = None
+        self._pause_next_ssvep_mode = None
+        if next_state:
+            self.state = next_state
+            if next_state in (ProtocolState.SSVEP_CONT, ProtocolState.SSVEP_BURST) and next_mode is not None:
+                self._start_ssvep_block(mode=str(next_mode))
+        return False
 
     @property
     def logger(self) -> Optional[UnifiedExperimentLogger]:
@@ -138,6 +189,10 @@ class ProtocolRunner:
         # Always pull EEG + markers while protocol runs (shared across modes).
         self._pull_lsl()
 
+        # Pause between experiments (do not advance state while pausing).
+        if self._tick_pause():
+            return
+
         if self.state == ProtocolState.WarmupTemplate:
             self._warmup_template()
         elif self.state == ProtocolState.P300_AUC:
@@ -184,7 +239,7 @@ class ProtocolRunner:
         # Start with P300 AUC block
         self._reset_for_new_p300_block()
         self.state = ProtocolState.P300_AUC
-        self.status_text = "P300 AUC: ждём trial_start|target=… и накопления эпох."
+        self.status_text = f"Эксперимент {self._next_experiment_index_1based()}/{self._total_experiments()}: P300 AUC — ждём trial_start|target=…"
 
     def _pull_lsl(self) -> None:
         if self._inlet_eeg is None or self._inlet_markers is None or self._logger is None:
@@ -203,6 +258,9 @@ class ProtocolRunner:
                 if tid is not None:
                     self._p300_trial_armed = True
                     self._logger.write("protocol_trial_start_arm", {"cue_target_tile_id": int(tid)})
+                    # Обновляем статус сразу на старте trial.
+                    mode = "P300 AUC" if self.state == ProtocolState.P300_AUC else ("P300 template_corr" if self.state == ProtocolState.P300_TEMPLATE else "P300")
+                    self.status_text = f"Эксперимент {self._next_experiment_index_1based()}/{self._total_experiments()}: {mode}, цель={int(tid)}"
             self._p300.ingest_marker_chunk(marker_chunk=marker_chunk, marker_ts=marker_ts, lsl_local_clock_now=now_lc)
 
         # EEG
@@ -220,6 +278,17 @@ class ProtocolRunner:
         extracted = self._p300.extract_ready_epochs()
         if extracted and self._logger is not None:
             self._logger.write("p300_epochs_extracted", {"n": int(extracted)})
+            # Try to learn template in the background during AUC stage to avoid extra warmup time.
+            if self.state == ProtocolState.P300_AUC and not self._p300_external_template_ready:
+                if self._p300.try_build_external_template_from_epochs(min_epochs=int(self.cfg.template_warmup_target_epochs)):
+                    self._p300_external_template_ready = True
+                    self._logger.write(
+                        "p300_external_template_ready",
+                        {
+                            "target_tile_id": int(self._p300.external_template_target_id) if self._p300.external_template_target_id is not None else None,
+                            "n_epochs": int(self.cfg.template_warmup_target_epochs),
+                        },
+                    )
 
     def _reset_for_new_p300_block(self) -> None:
         prof = P300EngineParams(
@@ -251,16 +320,16 @@ class ProtocolRunner:
     def _run_p300_trials(self, *, winner_mode: str) -> None:
         assert self._logger is not None
         if not self._p300_trial_armed:
-            self.status_text = f"P300 {winner_mode}: ждём trial_start|target=…"
+            self.status_text = f"Эксперимент {self._next_experiment_index_1based()}/{self._total_experiments()}: P300 {winner_mode} — ждём trial_start|target=…"
             return
         cue_tid = self._p300.current_cue_target_id
         if cue_tid is None:
-            self.status_text = f"P300 {winner_mode}: нет cue target (ожидаем -1|trial_start|…)"
+            self.status_text = f"Эксперимент {self._next_experiment_index_1based()}/{self._total_experiments()}: P300 {winner_mode} — нет cue target (ожидаем -1|trial_start|…)"
             return
 
         decision = self._p300.compute_decision(winner_mode=winner_mode)
         if not decision.can_decide:
-            self.status_text = f"P300 {winner_mode}: сбор… min_epochs={decision.min_epochs_per_class}"
+            self.status_text = f"Эксперимент {self._next_experiment_index_1based()}/{self._total_experiments()}: P300 {winner_mode} — сбор (min_epochs={decision.min_epochs_per_class})"
             return
 
         # Record trial outcome; ждём следующий trial_start (даже если target тот же).
@@ -289,15 +358,24 @@ class ProtocolRunner:
         if done:
             if winner_mode == WINNER_MODE_AUC:
                 self._logger.write("block_done", {"block": "p300_auc", "n_trials": int(self._p300_trial_count_auc)})
-                # Warmup before template_corr
-                self.state = ProtocolState.WarmupTemplate
-                self.status_text = "Warmup template_corr: накопление эталона по cue target…"
+                # Без отдельного warmup: держим протокол ровно в 60 единиц (15+15+15+15).
+                self._reset_for_new_p300_block()
+                self._start_pause(
+                    seconds=float(self.cfg.pause_between_experiments_s),
+                    status=f"Пауза перед экспериментом {self._next_experiment_index_1based()}/{self._total_experiments()} (P300 template_corr)",
+                    next_state=ProtocolState.P300_TEMPLATE,
+                )
             else:
                 self._logger.write("block_done", {"block": "p300_template", "n_trials": int(self._p300_trial_count_template)})
-                self.state = ProtocolState.SSVEP_CONT
-                self._start_ssvep_block(mode="continuous")
+                self._start_pause(
+                    seconds=float(self.cfg.pause_between_experiments_s),
+                    status=f"Пауза перед экспериментом {self._next_experiment_index_1based()}/{self._total_experiments()} (SSVEP continuous)",
+                    next_state=ProtocolState.SSVEP_CONT,
+                    next_ssvep_mode="continuous",
+                )
         else:
-            self.status_text = f"P300 {winner_mode}: trial записан ({self._p300_trial_count_auc if winner_mode == WINNER_MODE_AUC else self._p300_trial_count_template}/{self.cfg.p300_trials_per_mode}), ждём следующий trial_start…"
+            done_n = self._p300_trial_count_auc if winner_mode == WINNER_MODE_AUC else self._p300_trial_count_template
+            self.status_text = f"P300 {winner_mode}: trial записан ({int(done_n)}/{int(self.cfg.p300_trials_per_mode)}), ждём следующий trial_start…"
 
     def _on_migalka_event(self, ev: Tuple[int, bool, str]) -> None:
         # Feed burst gate via SSVEP engine
@@ -337,10 +415,17 @@ class ProtocolRunner:
     def _run_ssvep_blocks(self, *, mode: str) -> None:
         assert self._logger is not None
         if self._ssvep_block_started_at is None:
-            self._start_ssvep_block(mode=mode)
+            # Пауза перед каждым SSVEP-блоком (каждый блок = 1 "эксперимент" в счётчике 60).
+            if self._pause_until_wall is None:
+                self._start_pause(
+                    seconds=float(self.cfg.pause_between_experiments_s),
+                    status=f"Пауза перед экспериментом {self._next_experiment_index_1based()}/{self._total_experiments()} (SSVEP {mode})",
+                    next_state=ProtocolState.SSVEP_CONT if mode == "continuous" else ProtocolState.SSVEP_BURST,
+                    next_ssvep_mode=str(mode),
+                )
             return
         elapsed = float(time.time()) - float(self._ssvep_block_started_at)
-        self.status_text = f"SSVEP {mode}: блок {elapsed:.1f}/{self.cfg.ssvep_block_sec:.0f} c, цель лампа={self._ssvep_target_lamp}"
+        self.status_text = f"Эксперимент {self._next_experiment_index_1based()}/{self._total_experiments()}: SSVEP {mode} — {elapsed:.1f}/{self.cfg.ssvep_block_sec:.0f} c, цель лампа={self._ssvep_target_lamp}"
         if elapsed < float(self.cfg.ssvep_block_sec):
             return
 
@@ -375,13 +460,17 @@ class ProtocolRunner:
         if done:
             self._logger.write("block_done", {"block": f"ssvep_{mode}", "n_blocks": int(self._ssvep_block_count_cont if mode == 'continuous' else self._ssvep_block_count_burst)})
             if mode == "continuous":
-                self.state = ProtocolState.SSVEP_BURST
-                self._start_ssvep_block(mode="burst")
+                self._start_pause(
+                    seconds=float(self.cfg.pause_between_experiments_s),
+                    status=f"Пауза перед экспериментом {self._next_experiment_index_1based()}/{self._total_experiments()} (SSVEP burst)",
+                    next_state=ProtocolState.SSVEP_BURST,
+                    next_ssvep_mode="burst",
+                )
             else:
                 self.state = ProtocolState.Finalize
         else:
-            # Start next block immediately
-            self._start_ssvep_block(mode=mode)
+            # Следующий блок стартуем через паузу (см. ветку self._ssvep_block_started_at is None).
+            self.state = ProtocolState.SSVEP_CONT if mode == "continuous" else ProtocolState.SSVEP_BURST
 
     def _finalize(self) -> None:
         assert self._logger is not None

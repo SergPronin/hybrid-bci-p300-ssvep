@@ -58,6 +58,9 @@ class P300OnlineEngine:
         self._lsl_clock_at_buffer_end: Optional[float] = None
 
         self.current_cue_target_id: Optional[int] = None
+        # Optional external template window (e.g., learned in AUC stage) to reuse in template_corr.
+        self.external_template_window: Optional[np.ndarray] = None
+        self.external_template_target_id: Optional[int] = None
 
     def reset(self, *, params: Optional[P300EngineParams] = None) -> None:
         if params is not None:
@@ -72,6 +75,50 @@ class P300OnlineEngine:
         self._calib_first_marker_lsl_clock = None
         self._lsl_clock_at_buffer_end = None
         self.current_cue_target_id = None
+        # Do NOT clear external template here by default: protocol may reuse it across stages.
+
+    def clear_external_template(self) -> None:
+        self.external_template_window = None
+        self.external_template_target_id = None
+
+    def try_build_external_template_from_epochs(self, *, min_epochs: int) -> bool:
+        """If enough epochs for current cue target exist, build and store external template.
+
+        Uses ONLY epochs for the current cue target and the current engine params (baseline/window).
+        Returns True if template was built or already exists; False if not enough data / no cue.
+        """
+        if self.external_template_window is not None:
+            return True
+        if self.current_cue_target_id is None:
+            return False
+        key = f"стимул_{int(self.current_cue_target_id)}"
+        epochs = self.epochs_data.get(key, [])
+        if len(epochs) < int(min_epochs):
+            return False
+        el = self._epoch_geom.epoch_len
+        time_ms = self._epoch_geom.time_ms_template
+        if el is None or time_ms is None:
+            return False
+
+        # Average epochs of the target only: shape (epoch_len, n_ch)
+        stack = np.stack([np.asarray(e, dtype=np.float64) for e in epochs[: int(min_epochs)]], axis=0)
+        avg = np.mean(stack, axis=0)
+        raw_averaged = np.expand_dims(avg.T, axis=0)  # (1, n_ch, epoch_len)
+        corrected, _, _, wx, wy = compute_corrected_and_integrated(
+            raw_averaged,
+            time_ms,
+            int(self.params.baseline_ms),
+            int(self.params.window_x_ms),
+            int(self.params.window_y_ms),
+        )
+        if corrected.size == 0:
+            return False
+        from p300_analysis.signal_processing import time_window_to_indices
+
+        xi0, xi1 = time_window_to_indices(time_ms, int(wx), int(wy))
+        self.external_template_window = np.asarray(corrected[0, xi0:xi1], dtype=np.float64).ravel()
+        self.external_template_target_id = int(self.current_cue_target_id)
+        return True
 
     def ingest_marker_chunk(
         self,
@@ -262,7 +309,10 @@ class P300OnlineEngine:
             )
 
         template_window = None
-        if self.current_cue_target_id is not None:
+        # Prefer externally learned template (e.g. from AUC stage) if present.
+        if self.external_template_window is not None:
+            template_window = np.asarray(self.external_template_window, dtype=np.float64).ravel()
+        elif self.current_cue_target_id is not None:
             key = f"стимул_{int(self.current_cue_target_id)}"
             if key in stim_keys:
                 idx = stim_keys.index(key)

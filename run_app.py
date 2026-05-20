@@ -45,6 +45,43 @@ def main() -> None:
         default=1.0,
         help="Пауза между trial в режиме --auto-random-protocol, сек.",
     )
+    parser.add_argument(
+        "--auto-calib-trials",
+        type=int,
+        default=0,
+        help="DEPRECATED: используйте --auto-plan-trials/--auto-plan-target-*. Оставлено для совместимости.",
+    )
+    parser.add_argument(
+        "--auto-calib-target-tile-id",
+        type=int,
+        default=4,
+        help="DEPRECATED: используйте --auto-plan-trials/--auto-plan-target-*. Оставлено для совместимости.",
+    )
+    parser.add_argument(
+        "--auto-plan-trials",
+        type=int,
+        default=15,
+        help="Длина плана целей (первые trial) в авто-режиме.",
+    )
+    parser.add_argument(
+        "--auto-plan-target-tile-id",
+        type=int,
+        default=4,
+        help="Какая плитка (0..8) должна встретиться нужное число раз в плане.",
+    )
+    parser.add_argument(
+        "--auto-plan-target-repeats",
+        type=int,
+        default=0,
+        help="Сколько раз выбранная плитка должна появиться в первых --auto-plan-trials trial (не подряд). "
+        "0 = посчитать автоматически по --auto-plan-target-epochs и sequences.",
+    )
+    parser.add_argument(
+        "--auto-plan-target-epochs",
+        type=int,
+        default=12,
+        help="Сколько target-эпох нужно набрать для шаблона (используется при --auto-plan-target-repeats=0).",
+    )
     args = parser.parse_args()
 
     analyzer_proc: subprocess.Popen[str] | None = None
@@ -59,6 +96,12 @@ def main() -> None:
     app_main(
         auto_random_trials=bool(args.auto_random_protocol),
         inter_trial_s=float(args.inter_trial_s),
+        auto_plan_trials=int(args.auto_plan_trials) if int(args.auto_calib_trials) <= 0 else int(args.auto_calib_trials),
+        auto_plan_target_tile_id=int(args.auto_plan_target_tile_id)
+        if int(args.auto_calib_trials) <= 0
+        else int(args.auto_calib_target_tile_id),
+        auto_plan_target_repeats=int(args.auto_plan_target_repeats),
+        auto_plan_target_epochs=int(args.auto_plan_target_epochs),
     )
     if analyzer_proc is not None and analyzer_proc.poll() is None:
         print(
