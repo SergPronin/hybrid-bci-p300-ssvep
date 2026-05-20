@@ -23,6 +23,7 @@ from p300_analysis.lsl_streams import (
     BCI_STIM_MARKER_STREAM_NAME,
     discover_eeg_streams,
     select_eeg_stream,
+    stream_channel_labels,
     stream_inlet_with_buffer,
     wait_for_stimulus_marker_stream,
 )
@@ -137,6 +138,9 @@ class ProtocolRunner:
         self._pause_next_state: Optional[str] = None
         self._pause_next_ssvep_mode: Optional[str] = None
         self._last_state: str = ProtocolState.Idle
+        self._eeg_nominal_fs_hz: float = 250.0
+        self._ssvep_migalka_retry_at: float = 0.0
+        self._ssvep_migalka_fail_streak: int = 0
 
     def _set_state(self, new_state: str, *, detail: str = "") -> None:
         if new_state != self._last_state:
@@ -318,13 +322,20 @@ class ProtocolRunner:
         except Exception:
             eeg_name = "?"
             mk_name = "?"
-        plog.info(f"Preflight OK: EEG stream={eeg_name!r}, Markers stream={mk_name!r}, COM={self.cfg.com_port!r}")
+        try:
+            fs_raw = float(info_eeg.nominal_srate() or 0.0)
+        except Exception:
+            fs_raw = 0.0
+        self._eeg_nominal_fs_hz = fs_raw if fs_raw > 1.0 else float(self.cfg.ssvep_fs_hz)
+        plog.info(
+            f"Preflight OK: EEG={eeg_name!r} fs={self._eeg_nominal_fs_hz:g} Hz, "
+            f"Markers={mk_name!r}, COM={self.cfg.com_port!r}"
+        )
         self._inlet_eeg = stream_inlet_with_buffer(info_eeg, buffer_seconds=20)
         self._inlet_markers = stream_inlet_with_buffer(info_mk, buffer_seconds=20)
-        # EEG labels from StreamInfo are optional; keep for later storage.
         try:
-            labels = []
-            # channel labels are not always available; leave empty if missing
+            n_ch = max(1, int(info_eeg.channel_count()))
+            labels = stream_channel_labels(info_eeg, n_ch)
             self._logger.set_eeg_channel_labels(labels)
         except Exception:
             pass
@@ -334,6 +345,7 @@ class ProtocolRunner:
                 "eeg_stream": {"name": getattr(info_eeg, "name", lambda: "")(), "type": getattr(info_eeg, "type", lambda: "")()},
                 "markers_stream": {"name": getattr(info_mk, "name", lambda: "")(), "type": getattr(info_mk, "type", lambda: "")()},
                 "com_port": str(self.cfg.com_port),
+                "eeg_nominal_fs_hz": float(self._eeg_nominal_fs_hz),
             },
         )
 
@@ -379,7 +391,10 @@ class ProtocolRunner:
                         f"Эксперимент {self._next_experiment_index_1based()}/{self._total_experiments()}: "
                         f"{mode}, целевая плитка={int(tid)}"
                     )
-            self._p300.ingest_marker_chunk(marker_chunk=marker_chunk, marker_ts=marker_ts, lsl_local_clock_now=now_lc)
+            if self.state in (ProtocolState.P300_AUC, ProtocolState.P300_TEMPLATE, ProtocolState.WarmupTemplate):
+                self._p300.ingest_marker_chunk(
+                    marker_chunk=marker_chunk, marker_ts=marker_ts, lsl_local_clock_now=now_lc
+                )
 
         # EEG
         try:
@@ -392,8 +407,10 @@ class ProtocolRunner:
             self._p300.ingest_eeg_chunk(eeg_chunk=arr, eeg_ts=eeg_ts, lsl_local_clock_now=now_lc)
             self._ssvep.ingest_eeg_chunk(times=eeg_ts, samples=arr)
 
-        # extract P300 epochs whenever possible
-        extracted = self._p300.extract_ready_epochs()
+        if self.state in (ProtocolState.P300_AUC, ProtocolState.P300_TEMPLATE, ProtocolState.WarmupTemplate):
+            extracted = self._p300.extract_ready_epochs()
+        else:
+            extracted = 0
         if extracted and self._logger is not None:
             self._logger.write("p300_epochs_extracted", {"n": int(extracted)})
             # Try to learn template in the background during AUC stage to avoid extra warmup time.
@@ -555,9 +572,10 @@ class ProtocolRunner:
         active_freqs = tuple(float(x) for x in self.cfg.ssvep_freqs_hz if float(x) > 0.0)
         if not active_freqs:
             active_freqs = tuple(float(x) for x in self.cfg.ssvep_freqs_hz)
+        fs_hz = float(self._eeg_nominal_fs_hz or self.cfg.ssvep_fs_hz)
         self._ssvep.reset(
             params=SSVEPParams(
-                fs_hz=float(self.cfg.ssvep_fs_hz),
+                fs_hz=fs_hz,
                 window_sec=float(self.cfg.ssvep_window_sec),
                 freqs_hz=active_freqs,
                 mode=str(mode),
@@ -587,11 +605,17 @@ class ProtocolRunner:
         except Exception as e:
             plog.exc(f"Migalka не запустилась на {self.cfg.com_port!r}", e)
             self._ssvep_block_started_at = None
+            self._ssvep_migalka_fail_streak += 1
+            self._ssvep_migalka_retry_at = float(time.time()) + 3.0
             sm = _ru_ssvep_stim_mode(mode)
-            self.status_text = f"ССВП ({sm}): ошибка мигалки {self.cfg.com_port}: {e}"
+            self.status_text = (
+                f"ССВП ({sm}): ошибка мигалки {self.cfg.com_port}: {e}. "
+                f"Повтор через 3 с (закройте migalka.py, если порт занят)."
+            )
             self._logger.write("migalka_error", {"port": str(self.cfg.com_port), "error": str(e), "mode": str(mode)})
             return
 
+        self._ssvep_migalka_fail_streak = 0
         self._ssvep_block_started_at = float(time.time())
         plog.info(f"мигалка запущена, блок {self.cfg.ssvep_block_sec}s, лампа-цель={self._ssvep_target_lamp}")
         sm = _ru_ssvep_stim_mode(mode)
@@ -607,14 +631,32 @@ class ProtocolRunner:
     def _run_ssvep_blocks(self, *, mode: str) -> None:
         assert self._logger is not None
         if self._ssvep_block_started_at is None:
-            # Пауза перед каждым SSVEP-блоком (каждый блок = 1 "эксперимент" в счётчике 60).
-            if self._pause_until_wall is None:
+            if self._pause_until_wall is not None:
+                return
+            if self._ssvep_migalka_fail_streak >= 15:
+                sm = _ru_ssvep_stim_mode(mode)
+                self.status_text = (
+                    f"ССВП ({sm}): мигалка на {self.cfg.com_port!r} не отвечает. "
+                    "Проверьте COM, питание и что migalka.py не занял порт."
+                )
+                return
+            now = float(time.time())
+            if now < float(self._ssvep_migalka_retry_at):
+                sm = _ru_ssvep_stim_mode(mode)
+                rem = float(self._ssvep_migalka_retry_at) - now
+                self.status_text = f"ССВП ({sm}): повтор подключения мигалки через {rem:.1f} с…"
+                return
+            # Пауза только между блоками (не первый старт после P300 — его делает _tick_pause).
+            n_done = int(self._ssvep_block_count_cont) + int(self._ssvep_block_count_burst)
+            if n_done > 0:
                 self._start_pause(
                     seconds=float(self.cfg.pause_between_experiments_s),
                     status=f"Пауза перед экспериментом {self._next_experiment_index_1based()}/{self._total_experiments()} (ССВП, {_ru_ssvep_stim_mode(mode)})",
                     next_state=ProtocolState.SSVEP_CONT if mode == "continuous" else ProtocolState.SSVEP_BURST,
                     next_ssvep_mode=str(mode),
                 )
+                return
+            self._start_ssvep_block(mode=str(mode))
             return
         elapsed = float(time.time()) - float(self._ssvep_block_started_at)
         sm = _ru_ssvep_stim_mode(mode)

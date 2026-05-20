@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 import subprocess
 
@@ -651,6 +652,11 @@ class ProtocolRunnerWidget(QWidget):
             run_py = sys.executable
             run_script = _ROOT / "run_app.py"
             if run_script.exists():
+                # AUC + template_corr: по spin_p300 прогонов на каждый режим
+                n_stim_trials = max(
+                    int(self.spin_p300.value()) * 2 + 2,
+                    int(self.spin_plan_trials.value()) + 2,
+                )
                 stim_args = [
                         run_py,
                         str(run_script),
@@ -661,7 +667,7 @@ class ProtocolRunnerWidget(QWidget):
                         "--sequences",
                         str(int(self.spin_sequences.value())),
                         "--auto-max-trials",
-                        str(int(self.spin_p300.value()) * 2),
+                        str(n_stim_trials),
                         "--auto-plan-trials",
                         str(int(self.spin_plan_trials.value())),
                         "--auto-plan-target-tile-id",
@@ -671,13 +677,15 @@ class ProtocolRunnerWidget(QWidget):
                         "--auto-plan-target-epochs",
                         str(int(self.spin_plan_target_epochs.value())),
                 ]
-                plog_info(f"запуск стимулятора: {' '.join(stim_args)}")
+                plog_info(f"запуск стимулятора ({n_stim_trials} прогонов): {' '.join(stim_args)}")
                 self._stimulus_proc = subprocess.Popen(
                     stim_args,
                     cwd=str(_ROOT),
                 )
-                # Дать PsychoPy время поднять LSL BCI_StimMarkers до preflight протокола
-                QApplication.processEvents()
+                plog_info("ожидание стимулятора и BCI_StimMarkers (3 с)…")
+                for _ in range(30):
+                    QApplication.processEvents()
+                    time.sleep(0.1)
 
         cfg = ProtocolConfig(
             output_root=Path(out_root),
@@ -735,7 +743,7 @@ class ProtocolRunnerWidget(QWidget):
         if st != prev:
             plog_info(f"status [{self._runner.state}]: {st}")
             self._last_status_printed = st
-        # After P300 stage ends, stop the PsychoPy stimulator so it won't keep generating extra trials
+        # После P300 останавливаем PsychoPy — дальше только мигалка (ССВП)
         if self._stimulus_proc is not None and self._stimulus_proc.poll() is None:
             if self._runner.state in ("ssvep_continuous", "ssvep_burst", "finalize", "stopped"):
                 try:
@@ -743,6 +751,8 @@ class ProtocolRunnerWidget(QWidget):
                 except Exception:
                     pass
                 self._stimulus_proc = None
+                if prev != st and self._runner.state == "ssvep_continuous":
+                    plog_info("стимулятор плиток остановлен — этап ССВП, запуск мигалки по COM")
         if self._runner.state in ("stopped",):
             self._timer.stop()
             self.btn_start.setEnabled(True)
