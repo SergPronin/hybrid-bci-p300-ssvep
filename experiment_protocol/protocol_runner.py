@@ -141,6 +141,13 @@ class ProtocolRunner:
         self._eeg_nominal_fs_hz: float = 250.0
         self._ssvep_migalka_retry_at: float = 0.0
         self._ssvep_migalka_fail_streak: int = 0
+        # Полноэкранная подсказка для оператора (рисует protocol_runner_gui)
+        self.ssvep_cue_visible: bool = False
+        self.ssvep_cue_exp_index: int = 0
+        self.ssvep_cue_exp_total: int = 0
+        self.ssvep_cue_lamp_1based: int = 1
+        self.ssvep_cue_freq_hz: float = 0.0
+        self.ssvep_cue_mode_label: str = ""
 
     def _set_state(self, new_state: str, *, detail: str = "") -> None:
         if new_state != self._last_state:
@@ -160,12 +167,49 @@ class ProtocolRunner:
             + 1
         )
 
+    def _active_ssvep_freqs_hz(self) -> Tuple[float, ...]:
+        active = tuple(float(x) for x in self.cfg.ssvep_freqs_hz if float(x) > 0.0)
+        return active if active else tuple(float(x) for x in self.cfg.ssvep_freqs_hz)
+
+    def _peek_next_ssvep_target_lamp_0idx(self) -> int:
+        freqs = self._active_ssvep_freqs_hz()
+        n_lamps = max(1, len(freqs))
+        return int(self._ssvep_block_count_cont + self._ssvep_block_count_burst) % n_lamps
+
+    def _ssvep_lamp_display(self, lamp_0idx: int) -> Tuple[int, float]:
+        """Номер лампы для оператора (1-based) и частота."""
+        freqs = self._active_ssvep_freqs_hz()
+        lamp_1 = int(lamp_0idx) + 1
+        hz = float(freqs[lamp_0idx]) if 0 <= int(lamp_0idx) < len(freqs) else 0.0
+        return lamp_1, hz
+
+    def _set_ssvep_cue_overlay(self, *, ssvep_mode: Optional[str]) -> None:
+        if ssvep_mode is None:
+            self.ssvep_cue_visible = False
+            return
+        lamp0 = self._peek_next_ssvep_target_lamp_0idx()
+        lamp1, hz = self._ssvep_lamp_display(lamp0)
+        self.ssvep_cue_visible = True
+        self.ssvep_cue_exp_index = int(self._next_experiment_index_1based())
+        self.ssvep_cue_exp_total = int(self._total_experiments())
+        self.ssvep_cue_lamp_1based = int(lamp1)
+        self.ssvep_cue_freq_hz = float(hz)
+        self.ssvep_cue_mode_label = f"ССВП — {_ru_ssvep_stim_mode(str(ssvep_mode))}"
+        plog.info(
+            f"оверлей ССВП: эксп. {self.ssvep_cue_exp_index}/{self.ssvep_cue_exp_total}, "
+            f"лампа L{self.ssvep_cue_lamp_1based} ({self.ssvep_cue_freq_hz:g} Гц)"
+        )
+
     def _start_pause(self, *, seconds: float, status: str, next_state: str, next_ssvep_mode: Optional[str] = None) -> None:
         sec = max(0.0, float(seconds))
         self._pause_until_wall = float(time.time()) + sec
         self._pause_status = str(status)
         self._pause_next_state = str(next_state)
         self._pause_next_ssvep_mode = str(next_ssvep_mode) if next_ssvep_mode is not None else None
+        if next_ssvep_mode is not None:
+            self._set_ssvep_cue_overlay(ssvep_mode=str(next_ssvep_mode))
+        else:
+            self._set_ssvep_cue_overlay(ssvep_mode=None)
         plog.info(
             f"пауза {sec:.1f}s -> next_state={next_state}"
             + (f", ssvep_mode={next_ssvep_mode}" if next_ssvep_mode else "")
@@ -189,6 +233,7 @@ class ProtocolRunner:
         self._pause_status = None
         self._pause_next_state = None
         self._pause_next_ssvep_mode = None
+        self._set_ssvep_cue_overlay(ssvep_mode=None)
         if next_state:
             self._set_state(next_state, detail="pause finished")
             if next_state in (ProtocolState.SSVEP_CONT, ProtocolState.SSVEP_BURST) and next_mode is not None:
@@ -244,6 +289,7 @@ class ProtocolRunner:
 
     def stop(self, *, reason: str = "user_stop") -> None:
         plog.info(f"=== PROTOCOL STOP reason={reason!r} ===")
+        self._set_ssvep_cue_overlay(ssvep_mode=None)
         try:
             self._migalka.stop_and_close()
         except Exception as e:
@@ -569,9 +615,7 @@ class ProtocolRunner:
     def _start_ssvep_block(self, *, mode: str) -> None:
         assert self._logger is not None
         plog.info(f"=== SSVEP block START mode={mode!r} COM={self.cfg.com_port!r} ===")
-        active_freqs = tuple(float(x) for x in self.cfg.ssvep_freqs_hz if float(x) > 0.0)
-        if not active_freqs:
-            active_freqs = tuple(float(x) for x in self.cfg.ssvep_freqs_hz)
+        active_freqs = self._active_ssvep_freqs_hz()
         fs_hz = float(self._eeg_nominal_fs_hz or self.cfg.ssvep_fs_hz)
         self._ssvep.reset(
             params=SSVEPParams(
@@ -582,9 +626,7 @@ class ProtocolRunner:
                 roi_channels_0idx=tuple(int(c) for c in self.cfg.ssvep_roi_channels_0idx),
             )
         )
-        n_lamps = max(1, len(active_freqs))
-        idx = (self._ssvep_block_count_cont + self._ssvep_block_count_burst) % n_lamps
-        self._ssvep_target_lamp = int(idx)
+        self._ssvep_target_lamp = int(self._peek_next_ssvep_target_lamp_0idx())
         freq_labels_list = [str(x).replace(",", ".") if float(x) > 0 else "0" for x in self.cfg.ssvep_freqs_hz]
         while len(freq_labels_list) < 6:
             freq_labels_list.append("0")

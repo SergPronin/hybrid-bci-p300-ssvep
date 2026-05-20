@@ -36,6 +36,7 @@ if str(_ROOT) not in sys.path:
 
 from experiment_protocol.protocol_log import info as plog_info  # noqa: E402
 from experiment_protocol.protocol_runner import ProtocolConfig, ProtocolRunner  # noqa: E402
+from experiment_protocol.ssvep_cue_overlay import SsvepCueOverlay  # noqa: E402
 from p300_analysis.analysis_profiles import (  # noqa: E402
     ANALYSIS_PROFILE_GENERAL,
     ANALYSIS_PROFILE_RECENT,
@@ -124,6 +125,7 @@ class ProtocolRunnerWidget(QWidget):
         self._stimulus_proc: subprocess.Popen[str] | None = None
         self._last_status_printed: str = ""
         self._eeg_test_inlet = None
+        self._ssvep_cue_overlay: SsvepCueOverlay | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -715,8 +717,25 @@ class ProtocolRunnerWidget(QWidget):
         self._timer.start()
         self.lbl_status.setText("Запущено. Проверка перед стартом…")
 
+    def _sync_ssvep_cue_overlay(self) -> None:
+        if self._runner is None or not bool(self._runner.ssvep_cue_visible):
+            if self._ssvep_cue_overlay is not None:
+                self._ssvep_cue_overlay.hide_overlay()
+            return
+        if self._ssvep_cue_overlay is None:
+            self._ssvep_cue_overlay = SsvepCueOverlay()
+        self._ssvep_cue_overlay.show_cue(
+            experiment_index=int(self._runner.ssvep_cue_exp_index),
+            experiment_total=int(self._runner.ssvep_cue_exp_total),
+            lamp_1based=int(self._runner.ssvep_cue_lamp_1based),
+            freq_hz=float(self._runner.ssvep_cue_freq_hz),
+            mode_label=str(self._runner.ssvep_cue_mode_label),
+        )
+
     def _on_stop(self) -> None:
         self._close_eeg_test_inlet()
+        if self._ssvep_cue_overlay is not None:
+            self._ssvep_cue_overlay.hide_overlay()
         if self._stimulus_proc is not None:
             try:
                 if self._stimulus_proc.poll() is None:
@@ -753,10 +772,13 @@ class ProtocolRunnerWidget(QWidget):
                 self._stimulus_proc = None
                 if prev != st and self._runner.state == "ssvep_continuous":
                     plog_info("стимулятор плиток остановлен — этап ССВП, запуск мигалки по COM")
+        self._sync_ssvep_cue_overlay()
         if self._runner.state in ("stopped",):
             self._timer.stop()
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
+            if self._ssvep_cue_overlay is not None:
+                self._ssvep_cue_overlay.hide_overlay()
 
 
 def main() -> None:
