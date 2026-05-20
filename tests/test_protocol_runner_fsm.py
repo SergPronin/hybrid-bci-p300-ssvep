@@ -36,7 +36,7 @@ def _inlet_with_markers(markers: list) -> MagicMock:
 
 @patch("experiment_protocol.protocol_runner.stream_inlet_with_buffer")
 @patch("experiment_protocol.protocol_runner.resolve_marker_streams")
-@patch("experiment_protocol.protocol_runner.find_allowed_eeg_streams")
+@patch("experiment_protocol.protocol_runner.discover_eeg_streams")
 @patch("ssvep_analysis.migalka_serial_controller.serial.Serial")
 def test_fsm_reaches_ssvep_and_opens_migalka(
     mock_serial: MagicMock,
@@ -70,6 +70,7 @@ def test_fsm_reaches_ssvep_and_opens_migalka(
         output_root=tmp_path,
         subject_id="test",
         com_port="COM_TEST",
+        eeg_stream_name="EEG",
         p300_trials_per_mode=1,
         ssvep_blocks_per_mode=1,
         pause_between_experiments_s=0.0,

@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -63,6 +64,10 @@ from ssvep_analysis.burst_gate import (  # noqa: E402
     append_chunk_timestamps,
     parse_lsl_marker,
 )
+from ssvep_analysis.burst_debug import (  # noqa: E402
+    BurstDebugSession,
+    expected_msi_lamp_from_diag,
+)
 from ssvep_analysis.experiment_logger import (  # noqa: E402
     SSVEPExperimentLogger,
     coef_values,
@@ -71,6 +76,7 @@ from ssvep_analysis.gantt_timeline import GanttExtraRow, StimGanttChart  # noqa:
 from ssvep_analysis.migalka_lsl import STREAM_NAME as MIGALKA_MARKER_STREAM  # noqa: E402
 
 EXPERIMENT_LOG_DIR = _REPO / "ssvep_experiment_logs"
+BURST_DEBUG_DIR = _REPO / "ssvep_burst_debug"
 
 # Как в WinForms: for (int i = 1; i <= 500; i++) Items.Add((1000.0f / i).ToString().Replace(',', '.'))
 _LAMP_FREQ_CHOICES: List[Tuple[str, float]] = []
@@ -199,8 +205,14 @@ class SSVEPAnalyzerWindow(QMainWindow):
     DEFAULT_FS = 250.0
     WINDOW_SEC = 2.0
     BUFFER_MARGIN = 1.15
+    MAX_ROLLING_BUFFER_SEC = 8.0
     CLASSIFY_MS = 200
     PULL_MS = 40
+    PLOT_REFRESH_MS = 120
+    GANTT_REFRESH_MS = 450
+    LOG_MAX_LINES = 250
+    # В поток ламп — не чаще одного MSI-решения на длину окна (см. _append_winner_trace).
+    WINNER_TRACE_PER_LINE = 24
     CHANNEL_PLOT_SEP = 100.0
     CHANNEL_CB_COLUMNS = 4
     MAX_LAMPS = 6
@@ -233,6 +245,8 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._nominal_fs: float = self.DEFAULT_FS
         self._n_channels: int = 1
         self._last_msi_exec_ms: Optional[float] = None
+        self._last_msi_run_winner: Optional[int] = None
+        self._last_msi_run_n: int = 0
 
         self._msi = None
         self._freqs_hz: List[float] = []
@@ -240,10 +254,11 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._freq_row_widgets: List[QWidget] = []
         self._freq_combos: List[QComboBox] = []
 
-        # rolling EEG (samples, channels)
-        self._max_buf: int = int(
-            self.DEFAULT_FS * self._msi_window_sec * self.BUFFER_MARGIN
-        ) + 64
+        # rolling EEG (samples, channels) — кольцевой буфер фикс. размера
+        self._max_buf: int = 0
+        self._ring_eeg: Optional[np.ndarray] = None
+        self._ring_t: Optional[np.ndarray] = None
+        self._ring_fill: int = 0
         self._buf: np.ndarray = np.zeros((0, 1), dtype=np.float64)
 
         self._ch_labels: List[str] = []
@@ -253,6 +268,14 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._ch_grid_layout: Optional[QGridLayout] = None
 
         self._last_winner: Optional[int] = None
+        self._winner_trace: List[int] = []
+        self.WINNER_TRACE_MAX = 800
+        self._last_trace_lsl_t: Optional[float] = None
+        self._last_burst_msi_lsl_t: Optional[float] = None
+        self._burst_debug: Optional[BurstDebugSession] = None
+        self._last_plot_mono: float = 0.0
+        self._last_gantt_mono: float = 0.0
+        self._last_gate_debug_allowed: Optional[bool] = None
         self._last_gate_allowed: bool = True
         self._msi_events: Deque[Tuple[float, int]] = deque(maxlen=self.GANTT_MSI_HISTORY)
         self._gate_open_t: Optional[float] = None
@@ -276,6 +299,7 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._timer_class.setInterval(self.CLASSIFY_MS)
         self._timer_class.timeout.connect(self._on_classify)
 
+        self._recompute_msi_buffer()
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -349,11 +373,14 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._spin_msi_fs.valueChanged.connect(self._on_msi_fs_changed)
         msi_grid.addWidget(self._spin_msi_fs, 0, 1)
 
-        msi_grid.addWidget(QLabel("Число отсчётов:"), 1, 0)
+        msi_grid.addWidget(QLabel("Окно MSI, отсч.:"), 1, 0)
         self._spin_msi_samples = QSpinBox()
         self._spin_msi_samples.setRange(8, 200000)
         self._spin_msi_samples.setValue(self._n_template)
-        self._spin_msi_samples.setToolTip("Длина окна ЭЭГ и каждого шаблона ModelSignal (сэмплы).")
+        self._spin_msi_samples.setToolTip(
+            "Сколько последних сэмплов EEG подаётся в MSIExec за один прогон (не накапливается).\n"
+            "Связано с полем «Окно, с»: отсчёты = Гц × секунды."
+        )
         self._spin_msi_samples.valueChanged.connect(self._on_msi_samples_changed)
         msi_grid.addWidget(self._spin_msi_samples, 1, 1)
 
@@ -374,16 +401,27 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._lbl_msi_points.setToolTip("Число частот / шаблонов ModelSignal (лампы).")
         msi_grid.addWidget(self._lbl_msi_points, 3, 1)
 
-        msi_grid.addWidget(QLabel("В буфере:"), 4, 0)
-        self._lbl_msi_buffer = QLabel("0")
-        msi_grid.addWidget(self._lbl_msi_buffer, 4, 1)
+        msi_grid.addWidget(QLabel("Готов к MSI:"), 4, 0)
+        self._lbl_msi_ready = QLabel("нет EEG")
+        self._lbl_msi_ready.setToolTip(
+            "В rolling-буфере должно быть ≥ «Окно MSI, отсч.» сэмплов.\n"
+            "Число в буфере растёт при приёме LSL и не сбрасывается после MSI — это нормально."
+        )
+        msi_grid.addWidget(self._lbl_msi_ready, 4, 1)
 
-        msi_grid.addWidget(QLabel("Время MSI:"), 5, 0)
+        msi_grid.addWidget(QLabel("Последний MSI:"), 5, 0)
+        self._lbl_msi_last_run = QLabel("—")
+        self._lbl_msi_last_run.setToolTip(
+            "Обновляется после каждого MSIExec: сколько отсчётов взято и номер лампы (L1…)."
+        )
+        msi_grid.addWidget(self._lbl_msi_last_run, 5, 1)
+
+        msi_grid.addWidget(QLabel("Время MSI:"), 6, 0)
         self._lbl_msi_exec = QLabel("—")
         self._lbl_msi_exec.setToolTip("Длительность последнего вызова MSIExec.")
-        msi_grid.addWidget(self._lbl_msi_exec, 5, 1)
+        msi_grid.addWidget(self._lbl_msi_exec, 6, 1)
 
-        msi_grid.addWidget(QLabel("Целевая лампа №:"), 6, 0)
+        msi_grid.addWidget(QLabel("Целевая лампа №:"), 7, 0)
         self._spin_target_lamp = QSpinBox()
         self._spin_target_lamp.setRange(0, self.MAX_LAMPS)
         self._spin_target_lamp.setValue(0)
@@ -393,13 +431,13 @@ class SSVEPAnalyzerWindow(QMainWindow):
             "Обязательно перед «Начать анализ»."
         )
         self._spin_target_lamp.valueChanged.connect(self._on_target_lamp_changed)
-        msi_grid.addWidget(self._spin_target_lamp, 6, 1)
+        msi_grid.addWidget(self._spin_target_lamp, 7, 1)
 
-        msi_grid.addWidget(QLabel("Цель vs MSI:"), 7, 0)
+        msi_grid.addWidget(QLabel("Цель vs MSI:"), 8, 0)
         self._lbl_target_match = QLabel("—")
         self._lbl_target_match.setWordWrap(True)
         self._lbl_target_match.setToolTip("Совпадение последнего решения MSI с целевой лампой.")
-        msi_grid.addWidget(self._lbl_target_match, 7, 1)
+        msi_grid.addWidget(self._lbl_target_match, 8, 1)
         left.addWidget(msi_box)
 
         left.addWidget(QLabel("Частоты SSVEP (лампы), MSI templates"))
@@ -475,6 +513,22 @@ class SSVEPAnalyzerWindow(QMainWindow):
         left.addWidget(self._lbl_analysis)
 
         left.addWidget(QLabel("Status / log"))
+        left.addWidget(QLabel("MSI лампы (≈раз в окно):"))
+        self._msi_trace = QPlainTextEdit()
+        self._msi_trace.setReadOnly(True)
+        self._msi_trace.setMaximumBlockCount(200)
+        self._msi_trace.setMaximumHeight(88)
+        self._msi_trace.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._msi_trace.setStyleSheet(
+            "font-family: monospace; font-size: 12px; color: #9cf; background: #111;"
+        )
+        self._msi_trace.setToolTip(
+            "Одна цифра после каждого MSIExec, когда прошло ≥ длины окна MSI (поле «Окно, с»).\n"
+            "Внутри MSI считается чаще (таймер 200 ms), но сюда попадает шаг окна.\n"
+            f"Перенос строки каждые {self.WINNER_TRACE_PER_LINE} числа."
+        )
+        self._msi_trace.setPlainText("—")
+        left.addWidget(self._msi_trace)
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setMinimumHeight(100)
@@ -573,12 +627,15 @@ class SSVEPAnalyzerWindow(QMainWindow):
                 w.blockSignals(was)
 
     def _recompute_msi_buffer(self) -> None:
-        self._max_buf = (
-            int(self._nominal_fs * self._msi_window_sec * self.BUFFER_MARGIN) + 64
-        )
-        if self._buf.shape[0] > self._max_buf:
-            self._buf = self._buf[-self._max_buf :]
-            self._buf_t = self._buf_t[-self._max_buf :]
+        need = max(8, int(self._n_template))
+        margin = int(self._nominal_fs * self._msi_window_sec * self.BUFFER_MARGIN) + 64
+        cap = int(self._nominal_fs * self.MAX_ROLLING_BUFFER_SEC) + 64
+        self._max_buf = max(need, min(margin, cap))
+        self._ring_eeg = None
+        self._ring_t = None
+        self._ring_fill = 0
+        self._buf = np.zeros((0, max(1, self._n_channels)), dtype=np.float64)
+        self._buf_t = np.zeros(0, dtype=np.float64)
         cfg = self._burst_gate.config
         self._burst_gate = BurstGate(
             BurstGateConfig(
@@ -607,6 +664,7 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
     def _on_msi_window_sec_changed(self, sec: float) -> None:
         self._msi_window_sec = max(0.1, float(sec))
+        self._last_trace_lsl_t = None
         self._n_template = max(8, int(round(self._nominal_fs * self._msi_window_sec)))
         self._sync_msi_spins_from_state()
         self._recompute_msi_buffer()
@@ -617,7 +675,26 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._lbl_msi_points.setText(str(n_lamps))
         buf_n = int(self._buf.shape[0]) if self._buf is not None else 0
         need = int(self._n_template)
-        self._lbl_msi_buffer.setText(f"{buf_n} / {need}")
+        cap = int(self._max_buf)
+        if buf_n >= need:
+            self._lbl_msi_ready.setText(
+                f"да · {buf_n}/{cap} отсч. (окно MSI {need})"
+            )
+            self._lbl_msi_ready.setStyleSheet("color: #5cb85c;")
+        elif buf_n > 0:
+            self._lbl_msi_ready.setText(f"нет · {buf_n} / {need} отсч.")
+            self._lbl_msi_ready.setStyleSheet("color: #f0ad4e;")
+        else:
+            self._lbl_msi_ready.setText("нет · нет EEG")
+            self._lbl_msi_ready.setStyleSheet("color: #888;")
+        if self._last_msi_run_winner is not None and self._last_msi_run_n > 0:
+            self._lbl_msi_last_run.setText(
+                f"{self._last_msi_run_n} отсч. → L{self._last_msi_run_winner}"
+            )
+            self._lbl_msi_last_run.setStyleSheet("color: #9cf; font-weight: bold;")
+        else:
+            self._lbl_msi_last_run.setText("—")
+            self._lbl_msi_last_run.setStyleSheet("color: #888;")
         if self._last_msi_exec_ms is not None:
             self._lbl_msi_exec.setText(f"{self._last_msi_exec_ms:.1f} мс")
         else:
@@ -767,10 +844,180 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
     def _log_line(self, msg: str) -> None:
         self._log.append(msg)
+        doc = self._log.document()
+        if doc.blockCount() > self.LOG_MAX_LINES:
+            cursor = self._log.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.movePosition(
+                cursor.MoveOperation.Down,
+                cursor.MoveMode.KeepAnchor,
+                doc.blockCount() - self.LOG_MAX_LINES,
+            )
+            cursor.removeSelectedText()
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    def _ensure_ring_storage(self, n_ch: int) -> None:
+        n_ch = max(1, int(n_ch))
+        cap = max(8, int(self._max_buf))
+        if (
+            self._ring_eeg is None
+            or self._ring_eeg.shape != (cap, n_ch)
+        ):
+            self._ring_eeg = np.zeros((cap, n_ch), dtype=np.float64)
+            self._ring_t = np.zeros(cap, dtype=np.float64)
+            self._ring_fill = 0
+
+    def _rebuild_buf_views(self) -> None:
+        """Собрать линейный вид для MSI/графика из кольцевого буфера."""
+        if self._ring_eeg is None or self._ring_fill <= 0:
+            self._buf = np.zeros((0, max(1, self._n_channels)), dtype=np.float64)
+            self._buf_t = np.zeros(0, dtype=np.float64)
+            return
+        cap = self._ring_eeg.shape[0]
+        n = min(self._ring_fill, cap)
+        n_ch = self._ring_eeg.shape[1]
+        if self._ring_fill <= cap:
+            self._buf = np.ascontiguousarray(self._ring_eeg[:n, :n_ch], dtype=np.float64)
+            self._buf_t = np.ascontiguousarray(self._ring_t[:n], dtype=np.float64)
+        else:
+            start = self._ring_fill % cap
+            idx = (start + np.arange(n, dtype=np.int64)) % cap
+            self._buf = np.ascontiguousarray(self._ring_eeg[idx, :n_ch], dtype=np.float64)
+            self._buf_t = np.ascontiguousarray(self._ring_t[idx], dtype=np.float64)
+
+    def _push_eeg_chunk(self, arr: np.ndarray, ts: Any) -> int:
+        """Добавить LSL-chunk; при переполнении старые отсчёты замещаются (без роста RAM)."""
+        arr = np.asarray(arr, dtype=np.float64)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        n_new = int(arr.shape[0])
+        if n_new <= 0:
+            return 0
+        n_ch = int(arr.shape[1])
+        self._ensure_ring_storage(n_ch)
+        assert self._ring_eeg is not None and self._ring_t is not None
+        cap = int(self._ring_eeg.shape[0])
+
+        if n_new >= cap:
+            arr = arr[-cap:]
+            n_new = cap
+
+        t_prev = (
+            np.asarray([float(self._ring_t[(self._ring_fill - 1) % cap])], dtype=np.float64)
+            if self._ring_fill > 0
+            else np.zeros(0, dtype=np.float64)
+        )
+        new_t = append_chunk_timestamps(
+            t_prev,
+            ts if ts is not None else [],
+            n_new,
+            self._nominal_fs,
+        )
+        if new_t.size != n_new:
+            step = 1.0 / max(self._nominal_fs, 1.0)
+            if self._ring_fill > 0:
+                t0 = float(self._ring_t[(self._ring_fill - 1) % cap]) + step
+            else:
+                t0 = 0.0
+            new_t = t0 + step * np.arange(n_new, dtype=np.float64)
+
+        for i in range(n_new):
+            w = self._ring_fill % cap
+            self._ring_eeg[w, :n_ch] = arr[i, :n_ch]
+            self._ring_t[w] = float(new_t[i])
+            self._ring_fill += 1
+
+        self._rebuild_buf_views()
+        return n_new
+
+    def _ui_due(self, last_mono: float, interval_ms: int) -> bool:
+        now = time.monotonic()
+        if (now - last_mono) * 1000.0 >= float(interval_ms):
+            return True
+        return False
+
+    def _clear_winner_trace(self) -> None:
+        self._winner_trace.clear()
+        self._last_trace_lsl_t = None
+        self._last_burst_msi_lsl_t = None
+        self._msi_trace.setPlainText("—")
+
+    def _burst_classify_period_due(self, t_lsl: float) -> bool:
+        """Пакетный режим: не чаще одного MSIExec на длину окна EEG."""
+        period = max(0.1, float(self._msi_window_sec))
+        if self._last_burst_msi_lsl_t is None:
+            return True
+        return (float(t_lsl) - float(self._last_burst_msi_lsl_t)) >= period * 0.98
+
+    def _mark_burst_classify(self, t_lsl: float) -> None:
+        self._last_burst_msi_lsl_t = float(t_lsl)
+
+    def _start_burst_debug(self) -> None:
+        if self._burst_debug is not None:
+            return
+        try:
+            self._burst_debug = BurstDebugSession.open_new(
+                BURST_DEBUG_DIR,
+                start_payload={
+                    "stim_mode": "burst",
+                    "params": self._snapshot_experiment_params(),
+                },
+            )
+            self._log_line(f"Пакетный автолог: {self._burst_debug.session_dir}")
+        except Exception as e:
+            self._burst_debug = None
+            self._log_line(f"Пакетный автолог: ошибка {e}")
+
+    def _stop_burst_debug(self, *, reason: str) -> None:
+        if self._burst_debug is None:
+            return
+        try:
+            log_dir = self._burst_debug.finalize(
+                stop_payload={"reason": reason, "last_winner": self._last_winner},
+                channel_labels=self._ch_labels,
+                target_lamp=self._get_target_lamp() or None,
+            )
+            self._log_line(f"Пакетный автолог сохранён: {log_dir}")
+        except Exception as e:
+            self._log_line(f"Пакетный автолог: ошибка сохранения {e}")
+        finally:
+            self._burst_debug = None
+            self._last_gate_debug_allowed = None
+
+    def _burst_debug_write(self, event: str, data: Optional[Dict[str, Any]] = None) -> None:
+        if self._burst_debug is not None:
+            self._burst_debug.write(event, data)
+
+    def _winner_trace_display_text(self) -> str:
+        if not self._winner_trace:
+            return "—"
+        nums = [str(w) for w in self._winner_trace]
+        n = self.WINNER_TRACE_PER_LINE
+        lines = [" ".join(nums[i : i + n]) for i in range(0, len(nums), n)]
+        return "\n".join(lines)
+
+    def _msi_trace_period_due(self, t_lsl: float) -> bool:
+        """Новая цифра в потоке не чаще одного раза на длину окна MSI."""
+        period = max(0.1, float(self._msi_window_sec))
+        if self._last_trace_lsl_t is None:
+            return True
+        return (float(t_lsl) - float(self._last_trace_lsl_t)) >= period * 0.98
+
+    def _append_winner_trace(self, winner: int, *, t_lsl: float) -> None:
+        """Цифра в поток после MSIExec; в пакетном режиме — вместе с отфильтрованным MSI."""
+        if not self._is_burst_mode() and not self._msi_trace_period_due(t_lsl):
+            return
+        self._last_trace_lsl_t = float(t_lsl)
+        self._winner_trace.append(int(winner))
+        if len(self._winner_trace) > self.WINNER_TRACE_MAX:
+            self._winner_trace = self._winner_trace[-self.WINNER_TRACE_MAX :]
+        self._msi_trace.setPlainText(self._winner_trace_display_text())
+        sb = self._msi_trace.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._stop_burst_debug(reason="window_close")
         self._timer_pull.stop()
         self._timer_class.stop()
         if self._inlet is not None:
@@ -794,10 +1041,13 @@ class SSVEPAnalyzerWindow(QMainWindow):
         if self._is_burst_mode():
             self._log_line(
                 "Пакетный режим: запустите migalka.py, затем Connect EEG. "
-                f"Нужен LSL «{MIGALKA_MARKER_STREAM}»."
+                f"Нужен LSL «{MIGALKA_MARKER_STREAM}». Автолог → {BURST_DEBUG_DIR.name}/"
             )
             self._try_connect_markers()
+            if self._inlet is not None:
+                self._start_burst_debug()
         else:
+            self._stop_burst_debug(reason="mode_continuous")
             self._lbl_burst_status.setText("Пакетный гейт: выкл (постоянный режим)")
             self._lbl_burst_status.setStyleSheet("color: #888; font-size: 12px;")
 
@@ -857,15 +1107,15 @@ class SSVEPAnalyzerWindow(QMainWindow):
                 val = sample
             self._burst_gate.ingest_marker(float(ts), val)
             parsed = parse_lsl_marker(val)
-            self._exp_write(
-                "lsl_marker",
-                {
-                    "lsl_time": float(ts),
-                    "raw": str(val),
-                    "lamp_index": parsed[0] if parsed else None,
-                    "is_on": parsed[1] if parsed else None,
-                },
-            )
+            payload = {
+                "lsl_time": float(ts),
+                "raw": str(val),
+                "lamp_index_0idx": parsed[0] if parsed else None,
+                "lamp_msi_1idx": (int(parsed[0]) + 1) if parsed else None,
+                "is_on": parsed[1] if parsed else None,
+            }
+            self._exp_write("lsl_marker", payload)
+            self._burst_debug_write("lsl_marker", payload)
 
     def _on_refresh_streams(self) -> None:
         self._list_streams.clear()
@@ -915,8 +1165,10 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
         self._sync_msi_spins_from_state()
         self._recompute_msi_buffer()
-        self._buf = np.zeros((0, self._n_channels), dtype=np.float64)
-        self._buf_t = np.zeros(0, dtype=np.float64)
+        self._ring_fill = 0
+        self._rebuild_buf_views()
+        self._last_msi_run_winner = None
+        self._last_msi_run_n = 0
         self._msi_events.clear()
         self._clear_gate_history()
         if self._gantt_chart is not None:
@@ -937,6 +1189,9 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
         self._timer_pull.start()
         self._timer_class.start()
+        if self._is_burst_mode():
+            self._stop_burst_debug(reason="reconnect")
+            self._start_burst_debug()
 
         if self._is_burst_mode():
             self._try_connect_markers()
@@ -1273,6 +1528,7 @@ class SSVEPAnalyzerWindow(QMainWindow):
         self._msi_events.clear()
         self._clear_gate_history()
         self._last_winner = None
+        self._clear_winner_trace()
         self._recompute_msi_buffer()
         if self._curve_session is not None:
             self._curve_session.setData([], [])
@@ -1396,6 +1652,9 @@ class SSVEPAnalyzerWindow(QMainWindow):
             QMessageBox.critical(self, "MSI", str(e))
             return
         self._last_winner = None
+        self._last_msi_run_winner = None
+        self._last_msi_run_n = 0
+        self._refresh_msi_status_labels()
 
     def _on_pull(self) -> None:
         if self._inlet is None:
@@ -1418,34 +1677,49 @@ class SSVEPAnalyzerWindow(QMainWindow):
         if arr.shape[1] != self._n_channels:
             # динамическое число каналов (редко)
             self._n_channels = int(arr.shape[1])
-            self._buf = np.zeros((0, self._n_channels), dtype=np.float64)
-            self._buf_t = np.zeros(0, dtype=np.float64)
+            self._ring_eeg = None
+            self._ring_t = None
+            self._ring_fill = 0
             self._rebuild_channel_controls()
 
-        n_new = int(arr.shape[0])
-        self._buf_t = append_chunk_timestamps(
-            self._buf_t, ts if ts is not None else [], n_new, self._nominal_fs
-        )
-        self._buf = np.vstack([self._buf, arr])
-        if self._buf.shape[0] > self._max_buf:
-            self._buf = self._buf[-self._max_buf :]
-            self._buf_t = self._buf_t[-self._max_buf :]
+        n_new = self._push_eeg_chunk(arr, ts)
+        n_log = min(n_new, int(self._buf.shape[0]))
+        tail_t = self._buf_t[-n_log:] if n_log > 0 else None
+        tail_eeg = self._buf[-n_log:] if n_log > 0 else None
 
-        if self._analysis_active and self._exp_logger is not None:
+        if (
+            self._analysis_active
+            and self._exp_logger is not None
+            and tail_t is not None
+            and tail_eeg is not None
+        ):
             self._exp_logger.append_eeg_chunk(
-                self._buf_t[-n_new:],
-                arr,
+                tail_t,
+                tail_eeg,
+                max_total_samples=int(self._nominal_fs * 120),
             )
+        if self._burst_debug is not None and tail_t is not None and tail_eeg is not None:
+            self._burst_debug.append_eeg_chunk(tail_t, tail_eeg)
 
         if self._is_burst_mode():
             self._pull_markers()
 
-        self._update_gantt()
+        now_mono = time.monotonic()
+        if self._ui_due(self._last_gantt_mono, self.GANTT_REFRESH_MS):
+            self._last_gantt_mono = now_mono
+            self._update_gantt()
         self._refresh_msi_status_labels()
 
+        if not self._ui_due(self._last_plot_mono, self.PLOT_REFRESH_MS):
+            return
+        self._last_plot_mono = now_mono
         n_show = min(self._buf.shape[0], int(self._nominal_fs * 3))
+        if n_show < 2:
+            return
         tail = self._buf[-n_show:]
-        x = np.arange(tail.shape[0], dtype=np.float64) / max(self._nominal_fs, 1.0)
+        t_end = float(self._buf_t[-1]) if self._buf_t.size else 0.0
+        t_start = t_end - (n_show - 1) / max(self._nominal_fs, 1.0)
+        x = t_start + np.arange(n_show, dtype=np.float64) / max(self._nominal_fs, 1.0)
         n_ch = tail.shape[1]
         for i, curve in enumerate(self._plot_curves):
             if i >= n_ch:
@@ -1466,6 +1740,8 @@ class SSVEPAnalyzerWindow(QMainWindow):
             return
 
         gate_ok = True
+        t_buf_end = float(self._buf_t[-1]) if self._buf_t.size else None
+        win_diag: Dict[str, Any] = {}
         if self._is_burst_mode():
             if self._marker_inlet is None and not self._try_connect_markers():
                 self._lbl_winner.setText("CURRENT TARGET:\n—\n\n(нет LSL маркеров)")
@@ -1473,18 +1749,37 @@ class SSVEPAnalyzerWindow(QMainWindow):
                 self._update_gantt(gate_allowed=False)
                 self._append_session_point(0, 0.0, False)
                 self._exp_write("burst_gate", {"allowed": False, "reason": "no_marker_stream"})
+                self._burst_debug_write(
+                    "burst_gate", {"allowed": False, "reason": "no_marker_stream"}
+                )
                 return
+            win_diag = self._burst_gate.window_diagnostics(self._buf_t)
             allowed, reason = self._burst_gate.classify_allowed(self._buf_t)
             gate_ok = allowed
+            gate_payload = {
+                "allowed": allowed,
+                "reason": reason,
+                "lsl_time": t_buf_end,
+                **win_diag,
+            }
+            if allowed != self._last_gate_debug_allowed:
+                self._last_gate_debug_allowed = allowed
+                self._burst_debug_write("burst_gate", gate_payload)
             self._lbl_burst_status.setText(f"Пакетный гейт: {reason}")
             if not allowed:
                 self._lbl_burst_status.setStyleSheet("color: #f0ad4e; font-size: 12px;")
                 self._lbl_winner.setText(f"CURRENT TARGET:\n—\n\nПАУЗА\n({reason})")
                 self._update_gantt(gate_allowed=False)
                 self._append_session_point(0, 0.0, False)
-                self._exp_write("burst_gate", {"allowed": False, "reason": reason})
+                self._exp_write("burst_gate", {"allowed": False, "reason": reason, **win_diag})
                 return
             self._lbl_burst_status.setStyleSheet("color: #5cb85c; font-size: 12px;")
+            if t_buf_end is not None and not self._burst_classify_period_due(t_buf_end):
+                self._burst_debug_write(
+                    "burst_skip_throttle",
+                    {"lsl_time": t_buf_end, "reason": "wait_next_window", **win_diag},
+                )
+                return
         else:
             self._last_gate_allowed = True
 
@@ -1495,6 +1790,8 @@ class SSVEPAnalyzerWindow(QMainWindow):
             t0 = time.perf_counter()
             winner = int(self._msi.MSIExec(managed))
             self._last_msi_exec_ms = (time.perf_counter() - t0) * 1000.0
+            self._last_msi_run_n = int(self._n_template)
+            self._last_msi_run_winner = int(winner)
             self._refresh_msi_status_labels()
         except Exception as e:
             self._log_line(f"MSIExec error: {e}")
@@ -1502,41 +1799,61 @@ class SSVEPAnalyzerWindow(QMainWindow):
             return
 
         t_lsl = self._session_time_base()
+        if self._is_burst_mode() and t_lsl is not None:
+            self._mark_burst_classify(float(t_lsl))
         coefs = coef_values(self._msi, len(self._freqs_hz))
         prev_winner = self._last_winner
         tgt = self._target_ground_truth_payload()
         match = self._classification_match(int(winner))
         self._refresh_target_match_label(int(winner))
-        self._exp_write(
-            "msi_classify",
-            {
-                "lsl_time": t_lsl,
-                "target_lamp": tgt["target_lamp"],
-                "target_hz": tgt["target_hz"],
-                "predicted_lamp": int(winner),
-                "predicted_hz": (
-                    float(self._freqs_hz[winner - 1])
-                    if 1 <= winner <= len(self._freqs_hz)
-                    else None
-                ),
-                "match": match,
-                "winner": int(winner),
-                "winner_prev": prev_winner,
-                "gate_ok": bool(gate_ok),
-                "coef_by_freq_hz": {
-                    f"{self._freqs_hz[i]:g}": coefs[i]
-                    for i in range(len(self._freqs_hz))
-                },
-                "coefs": coefs,
-                "msi_exec_ms": self._last_msi_exec_ms,
-                "channels_used": ch_idx,
-                "n_template": int(self._n_template),
-                "buf_samples": int(self._buf.shape[0]),
-            },
+        expected_marker = (
+            expected_msi_lamp_from_diag(win_diag) if win_diag else None
         )
+        match_marker = (
+            int(winner) == int(expected_marker)
+            if expected_marker is not None
+            else None
+        )
+        classify_payload = {
+            "lsl_time": t_lsl,
+            "target_lamp": tgt["target_lamp"],
+            "target_hz": tgt["target_hz"],
+            "predicted_lamp": int(winner),
+            "predicted_hz": (
+                float(self._freqs_hz[winner - 1])
+                if 1 <= winner <= len(self._freqs_hz)
+                else None
+            ),
+            "expected_from_markers": expected_marker,
+            "match_target": match,
+            "match_markers": match_marker,
+            "match": match,
+            "winner": int(winner),
+            "winner_prev": prev_winner,
+            "gate_ok": bool(gate_ok),
+            "coef_by_freq_hz": {
+                f"{self._freqs_hz[i]:g}": coefs[i]
+                for i in range(len(self._freqs_hz))
+            },
+            "coefs": coefs,
+            "msi_exec_ms": self._last_msi_exec_ms,
+            "channels_used": ch_idx,
+            "n_template": int(self._n_template),
+            "buf_samples": int(self._buf.shape[0]),
+            "buf_t_first": float(self._buf_t[-self._n_template])
+            if self._buf_t.size >= self._n_template
+            else None,
+            "buf_t_last": float(self._buf_t[-1]) if self._buf_t.size else None,
+            **(win_diag if self._is_burst_mode() else {}),
+        }
+        self._exp_write("msi_classify", classify_payload)
+        if self._is_burst_mode():
+            self._burst_debug_write("burst_msi", classify_payload)
+
+        if t_lsl is not None:
+            self._append_winner_trace(int(winner), t_lsl=float(t_lsl))
 
         if winner != self._last_winner:
-            self._log_line(f"Winner changed → {winner}")
             self._exp_write(
                 "winner_changed",
                 {
@@ -1563,6 +1880,7 @@ class SSVEPAnalyzerWindow(QMainWindow):
 
         score_lines = _coef_to_strings(self._msi, self._freqs_hz)
         self._lbl_scores.setText("Scores / Coef:\n" + "\n".join(score_lines))
+        self._last_gantt_mono = time.monotonic()
         self._update_gantt(gate_allowed=gate_ok, record_msi=(winner, gate_ok))
         hz_out = self._freqs_hz[winner - 1] if 0 <= winner - 1 < len(self._freqs_hz) else 0.0
         self._append_session_point(winner, hz_out, gate_ok)

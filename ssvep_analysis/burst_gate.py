@@ -127,6 +127,62 @@ class BurstGate:
                 return True
         return False
 
+    def prune_intervals_before(self, t_min: float) -> int:
+        """Удалить закрытые интервалы старше t_min (снижает «хвосты» чужих ламп)."""
+        t_min = float(t_min)
+        before = len(self._intervals)
+        kept: List[_Interval] = []
+        for iv in self._intervals:
+            t_end = iv.t_off if iv.t_off is not None else float("inf")
+            if iv.t_off is None or t_end >= t_min:
+                kept.append(iv)
+        self._intervals = kept
+        self._open = {iv.lamp: iv for iv in self._intervals if iv.t_off is None}
+        return before - len(self._intervals)
+
+    def window_diagnostics(
+        self,
+        buf_times: np.ndarray,
+        *,
+        now: Optional[float] = None,
+    ) -> Dict[str, object]:
+        """Снимок окна для отладки пакетного режима."""
+        if buf_times.size == 0:
+            return {"error": "empty_buf_times"}
+        t_end = float(now if now is not None else buf_times[-1])
+        t_start = t_end - self.config.window_sec
+        mask = (buf_times >= t_start) & (buf_times <= t_end)
+        times = buf_times[mask]
+        if times.size == 0:
+            return {"t_start": t_start, "t_end": t_end, "n_samples": 0}
+
+        per_lamp: Dict[int, float] = {}
+        for lamp in self.active_lamps:
+            on_n = sum(1 for t in times if self._lamp_on_at(lamp, float(t)))
+            per_lamp[int(lamp)] = on_n / float(times.size)
+
+        on_at_end = [
+            int(lamp)
+            for lamp in self.active_lamps
+            if self._lamp_on_at(lamp, t_end)
+        ]
+        open_iv = [
+            {"lamp": iv.lamp, "t_on": iv.t_on, "t_off": iv.t_off}
+            for iv in self._intervals
+            if iv.t_off is None
+        ]
+        return {
+            "t_start": t_start,
+            "t_end": t_end,
+            "n_samples": int(times.size),
+            "dt_sec": float(times[-1] - times[0]) if times.size > 1 else 0.0,
+            "on_fraction_by_lamp_0idx": per_lamp,
+            "lamps_on_at_end_0idx": on_at_end,
+            "n_lamps_on_at_end": len(on_at_end),
+            "open_intervals": open_iv,
+            "n_intervals_total": len(self._intervals),
+        }
+
     def classify_allowed(
         self,
         buf_times: np.ndarray,
@@ -140,6 +196,7 @@ class BurstGate:
             return False, "нет меток времени EEG"
 
         t_end = float(now if now is not None else buf_times[-1])
+        self.prune_intervals_before(t_end - self.config.window_sec * 4.0)
         t_start = t_end - self.config.window_sec
         mask = (buf_times >= t_start) & (buf_times <= t_end)
         times = buf_times[mask]

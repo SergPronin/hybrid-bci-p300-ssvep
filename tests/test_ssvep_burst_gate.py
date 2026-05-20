@@ -125,3 +125,23 @@ class TestBurstGate:
         ivs = gate.intervals_in_range(0.0, 10.0)
         assert (0, 5.0, 8.0) in ivs
         assert any(x[0] == 1 and x[1] == 6.0 for x in ivs)
+
+    def test_window_diagnostics_single_lamp(self) -> None:
+        gate = BurstGate(BurstGateConfig(window_sec=2.0, min_on_fraction=0.7, min_on_sec=1.4))
+        gate.set_active_lamps(4)
+        gate.ingest_marker(0.0, "102|on")
+        t = np.linspace(0.0, 2.0, 500)
+        diag = gate.window_diagnostics(t, now=2.0)
+        assert diag["lamps_on_at_end_0idx"] == [2]
+        assert diag["on_fraction_by_lamp_0idx"][2] >= 0.7
+
+    def test_prune_drops_old_closed(self) -> None:
+        gate = BurstGate()
+        gate.set_active_lamps(2)
+        gate.ingest_marker(0.0, "100|on")
+        gate.ingest_marker(1.0, "100|off")
+        gate.ingest_marker(10.0, "101|on")
+        gate.ingest_marker(11.0, "101|off")
+        n = gate.prune_intervals_before(9.0)
+        assert n >= 1
+        assert all(iv.t_on >= 9.0 or iv.t_off is None for iv in gate._intervals)

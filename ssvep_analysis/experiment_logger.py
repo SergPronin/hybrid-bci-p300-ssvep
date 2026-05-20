@@ -144,6 +144,8 @@ class SSVEPExperimentLogger:
         samples: np.ndarray,
         *,
         lsl_local_clock: Optional[float] = None,
+        write_chunk_event: bool = True,
+        max_total_samples: Optional[int] = None,
     ) -> None:
         """Накопить EEG (samples, channels) с LSL-временами."""
         if self._closed or samples.size == 0:
@@ -163,17 +165,41 @@ class SSVEPExperimentLogger:
                 return
         self._eeg_times.extend(ts.tolist())
         self._eeg_data.append(arr)
-        self.write(
-            "eeg_chunk",
-            {
-                "n_samples": int(arr.shape[0]),
-                "n_channels": int(arr.shape[1]),
-                "t_first": float(ts[0]),
-                "t_last": float(ts[-1]),
-                "lsl_local_clock": lsl_local_clock,
-                "total_eeg_samples": len(self._eeg_times),
-            },
-        )
+        if max_total_samples is not None:
+            self.trim_eeg_samples(int(max_total_samples))
+        if write_chunk_event:
+            self.write(
+                "eeg_chunk",
+                {
+                    "n_samples": int(arr.shape[0]),
+                    "n_channels": int(arr.shape[1]),
+                    "t_first": float(ts[0]),
+                    "t_last": float(ts[-1]),
+                    "lsl_local_clock": lsl_local_clock,
+                    "total_eeg_samples": len(self._eeg_times),
+                },
+            )
+
+    def trim_eeg_samples(self, max_samples: int) -> None:
+        """Оставить только последние max_samples точек EEG в RAM."""
+        max_samples = max(0, int(max_samples))
+        n = len(self._eeg_times)
+        if n <= max_samples:
+            return
+        drop = n - max_samples
+        self._eeg_times = self._eeg_times[drop:]
+        remaining = max_samples
+        trimmed: List[np.ndarray] = []
+        for ch in self._eeg_data:
+            if remaining <= 0:
+                break
+            if ch.shape[0] <= remaining:
+                trimmed.append(ch)
+                remaining -= int(ch.shape[0])
+            else:
+                trimmed.append(ch[-remaining:])
+                remaining = 0
+        self._eeg_data = trimmed
 
     def finalize(
         self,

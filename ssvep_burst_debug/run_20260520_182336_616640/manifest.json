@@ -1,0 +1,22 @@
+{
+  "schema": "ssvep_experiment/v1",
+  "run_id": "run_20260520_182336_616640",
+  "session_dir": "/Users/sergejpronin/PycharmProjects/hybrid-bci-p300-ssvep/ssvep_burst_debug/run_20260520_182336_616640",
+  "events_file": "/Users/sergejpronin/PycharmProjects/hybrid-bci-p300-ssvep/ssvep_burst_debug/run_20260520_182336_616640/events.ndjson",
+  "n_events": 37142,
+  "stop": {
+    "reason": "window_close",
+    "last_winner": 4,
+    "burst_summary": {
+      "n_burst_msi": 197,
+      "match_marker_fraction": 0.16243654822335024,
+      "match_target_fraction": null,
+      "multi_lamp_at_end_count": 86,
+      "target_lamp": null
+    }
+  },
+  "eeg_npz": "/Users/sergejpronin/PycharmProjects/hybrid-bci-p300-ssvep/ssvep_burst_debug/run_20260520_182336_616640/eeg.npz",
+  "eeg_samples": 22500,
+  "eeg_channels": 20,
+  "eeg_t_span_sec": 4.499810695648193
+}

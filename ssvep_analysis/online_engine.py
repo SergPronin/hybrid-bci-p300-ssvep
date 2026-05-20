@@ -18,6 +18,8 @@ class SSVEPParams:
     window_sec: float = 2.0
     freqs_hz: Tuple[float, ...] = ()
     mode: str = "continuous"  # "continuous" | "burst"
+    # Индексы каналов EEG с 0; пустой кортеж = все каналы потока
+    roi_channels_0idx: Tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,22 @@ class SSVEPOnlineEngine:
         # MSI expects (channels, samples)
         X = np.stack(self._buf_x, axis=0)  # (samples, channels)
         sig_np = np.ascontiguousarray(X.T, dtype=np.float64)
+        roi = [int(c) for c in self.params.roi_channels_0idx]
+        ch_idx = (
+            [c for c in roi if 0 <= c < int(sig_np.shape[0])]
+            if roi
+            else list(range(int(sig_np.shape[0])))
+        )
+        if not ch_idx:
+            return SSVEPDecision(
+                winner_1based=None,
+                winner_0idx=None,
+                coef=None,
+                mode=str(self.params.mode),
+                classify_allowed=False,
+                debug={"note": "no_valid_roi_channels", "roi": list(roi), "n_ch": int(sig_np.shape[0])},
+            )
+        sig_np = np.ascontiguousarray(sig_np[ch_idx, :], dtype=np.float64)
         sig_managed = tme.numpy_to_double_matrix2d(sig_np, verbose=False)
         t0 = time.perf_counter()
         winner = int(self._msi.MSIExec(sig_managed))

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Set, Tuple
+import xml.etree.ElementTree as ET
+from typing import Any, List, Optional, Set, Tuple
 
 from pylsl import StreamInfo, StreamInlet, resolve_byprop, resolve_streams
 
@@ -31,6 +32,67 @@ def find_allowed_eeg_streams(timeout: float = 3.0) -> List[StreamInfo]:
         except Exception:
             pass
     return [s for s in all_streams if _is_allowed_stream(s)]
+
+
+def discover_all_eeg_streams(timeout: float = 1.0) -> List[StreamInfo]:
+    """Все потоки типа EEG/Signal (без фильтра устройства) — для выбора в GUI."""
+    merged: List[StreamInfo] = []
+    seen: Set[Tuple[str, str]] = set()
+    for stream_type in EEG_STREAM_TYPES:
+        try:
+            batch = list(resolve_byprop("type", stream_type, timeout=float(timeout)))
+        except Exception:
+            batch = []
+        _append_unique_streams(merged, batch, seen)
+    return merged
+
+
+def discover_eeg_streams(timeout: float = 1.0) -> List[StreamInfo]:
+    """Разрешённые устройства + остальные EEG/Signal (для списка в операторском GUI)."""
+    merged: List[StreamInfo] = []
+    seen: Set[Tuple[str, str]] = set()
+    _append_unique_streams(merged, find_allowed_eeg_streams(timeout=timeout), seen)
+    _append_unique_streams(merged, discover_all_eeg_streams(timeout=timeout), seen)
+    return merged
+
+
+def stream_display_label(info: StreamInfo) -> str:
+    try:
+        name = info.name() or "?"
+        ch = int(info.channel_count())
+        fs = float(info.nominal_srate() or 0.0)
+        stype = info.type() or "?"
+    except Exception:
+        return "?"
+    fs_s = f"{fs:g} Гц" if fs > 1.0 else "Гц ?"
+    return f"{name} ({ch} кан., {fs_s}, {stype})"
+
+
+def select_eeg_stream(
+    streams: List[StreamInfo],
+    *,
+    name: str,
+    session_id: str = "",
+) -> Optional[StreamInfo]:
+    if not streams:
+        return None
+    want_name = (name or "").strip()
+    want_sid = (session_id or "").strip()
+    if not want_name:
+        return streams[0]
+    for s in streams:
+        try:
+            if (s.name() or "") == want_name and (not want_sid or (s.session_id() or "") == want_sid):
+                return s
+        except Exception:
+            continue
+    for s in streams:
+        try:
+            if (s.name() or "") == want_name:
+                return s
+        except Exception:
+            continue
+    return None
 
 
 def _marker_like_stream(info: StreamInfo) -> bool:
@@ -91,6 +153,48 @@ def resolve_marker_streams(
     markerish = [s for s in broad if _marker_like_stream(s)]
     _append_unique_streams(merged, markerish, seen)
     return merged
+
+
+def stream_channel_labels(info: StreamInfo, count: int) -> List[str]:
+    """Подписи каналов из LSL StreamInfo (как в p300_analysis.qt_window)."""
+    labels: List[str] = []
+    try:
+        channels = info.desc().child("channels")
+        ch = channels.child("channel")
+        for i in range(count):
+            if ch is None:
+                break
+            label = (
+                ch.child_value("label")
+                or ch.child_value("name")
+                or ch.child_value("channel")
+                or ""
+            )
+            label = str(label).strip()
+            labels.append(label if label else f"Канал {i + 1}")
+            nxt = ch.next_sibling()
+            if nxt is None:
+                break
+            ch = nxt
+    except Exception:
+        labels = []
+    if len(labels) < count:
+        try:
+            root = ET.fromstring(info.as_xml())
+            for ch_el in root.findall(".//channels/channel"):
+                if len(labels) >= count:
+                    break
+                label = (
+                    (ch_el.findtext("label") or "").strip()
+                    or (ch_el.findtext("name") or "").strip()
+                    or (ch_el.findtext("channel") or "").strip()
+                )
+                labels.append(label if label else f"Канал {len(labels) + 1}")
+        except Exception:
+            pass
+    if len(labels) < count:
+        labels.extend([f"Канал {i + 1}" for i in range(len(labels), count)])
+    return labels[:count]
 
 
 def unwrap_combo_userdata(data: Any) -> Any:
