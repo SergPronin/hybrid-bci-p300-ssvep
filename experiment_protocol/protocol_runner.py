@@ -20,7 +20,7 @@ from experiment_protocol.unified_logger import UnifiedExperimentLogger
 from p300_analysis.constants import EEG_PULL_MAX_SAMPLES, MARKERS_PULL_MAX_SAMPLES
 from p300_analysis.lsl_streams import find_allowed_eeg_streams, resolve_marker_streams, stream_inlet_with_buffer
 from p300_analysis.marker_parsing import parse_trial_end, parse_trial_target_tile_id
-from p300_analysis.online_engine import P300EngineParams, P300OnlineEngine
+from p300_analysis.online_engine import P300Decision, P300EngineParams, P300OnlineEngine
 from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_TEMPLATE_CORR
 from ssvep_analysis.migalka_serial_controller import MigalkaConfig, MigalkaSerialController
 from ssvep_analysis.online_engine import SSVEPOnlineEngine, SSVEPParams
