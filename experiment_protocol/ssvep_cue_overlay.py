@@ -104,4 +104,6 @@ class SsvepCueOverlay(QWidget):
 
     def hide_overlay(self) -> None:
         self._shown_key = None
+        self.setVisible(False)
         self.hide()
+        self.lower()

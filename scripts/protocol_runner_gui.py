@@ -717,14 +717,19 @@ class ProtocolRunnerWidget(QWidget):
         self._timer.start()
         self.lbl_status.setText("Запущено. Проверка перед стартом…")
 
+    def _dismiss_ssvep_overlay(self) -> None:
+        if self._ssvep_cue_overlay is not None:
+            self._ssvep_cue_overlay.hide_overlay()
+            self._ssvep_cue_overlay.deleteLater()
+            self._ssvep_cue_overlay = None
+        QApplication.processEvents()
+
     def _sync_ssvep_cue_overlay(self) -> None:
         if self._runner is None:
-            if self._ssvep_cue_overlay is not None:
-                self._ssvep_cue_overlay.hide_overlay()
+            self._dismiss_ssvep_overlay()
             return
         if self._runner.state in ("finalize", "stopped"):
-            if self._ssvep_cue_overlay is not None:
-                self._ssvep_cue_overlay.hide_overlay()
+            self._dismiss_ssvep_overlay()
             return
         if bool(self._runner.ssvep_blackout_visible):
             if self._ssvep_cue_overlay is None:
@@ -732,8 +737,8 @@ class ProtocolRunnerWidget(QWidget):
             self._ssvep_cue_overlay.show_blackout()
             return
         if not bool(self._runner.ssvep_cue_visible):
-            if self._ssvep_cue_overlay is not None:
-                self._ssvep_cue_overlay.hide_overlay()
+            if self._ssvep_cue_overlay is not None and not bool(self._runner.ssvep_blackout_visible):
+                self._dismiss_ssvep_overlay()
             return
         if self._ssvep_cue_overlay is None:
             self._ssvep_cue_overlay = SsvepCueOverlay()
@@ -747,8 +752,7 @@ class ProtocolRunnerWidget(QWidget):
 
     def _on_stop(self) -> None:
         self._close_eeg_test_inlet()
-        if self._ssvep_cue_overlay is not None:
-            self._ssvep_cue_overlay.hide_overlay()
+        self._dismiss_ssvep_overlay()
         if self._stimulus_proc is not None:
             try:
                 if self._stimulus_proc.poll() is None:
@@ -794,12 +798,12 @@ class ProtocolRunnerWidget(QWidget):
                 ):
                     plog_info("стимулятор плиток остановлен — этап ССВП (оверлей / мигалка)")
         if self._runner.state in ("finalize", "stopped"):
-            if self._ssvep_cue_overlay is not None:
-                self._ssvep_cue_overlay.hide_overlay()
+            self._dismiss_ssvep_overlay()
         if self._runner.state in ("stopped",):
             self._timer.stop()
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
+            self._dismiss_ssvep_overlay()
 
 
 def main() -> None:

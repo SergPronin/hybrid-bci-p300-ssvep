@@ -345,7 +345,9 @@ class ProtocolRunner:
             self._run_ssvep_blocks(mode="continuous")
         elif self.state == ProtocolState.SSVEP_BURST:
             self._run_ssvep_blocks(mode="burst")
-        elif self.state == ProtocolState.Finalize:
+
+        # Finalize может быть выставлен внутри _run_ssvep_blocks — обработать в том же tick.
+        if self.state == ProtocolState.Finalize:
             self._finalize()
 
     def _preflight(self) -> None:

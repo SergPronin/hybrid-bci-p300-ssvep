@@ -55,6 +55,18 @@ class MigalkaSerialController:
     def is_open(self) -> bool:
         return self._ser is not None and bool(getattr(self._ser, "is_open", False))
 
+    def _apply_config(self, cfg: MigalkaConfig) -> None:
+        """Сначала режим M, потом частоты — иначе Due мигает постоянным до M 1."""
+        off = ("0", "0", "0", "0", "0", "0")
+        self._send_freqs(off)
+        time.sleep(0.05)
+        self._send_mode(cfg.mode)
+        time.sleep(0.08 if int(cfg.mode) == 1 else 0.05)
+        if int(cfg.mode) == 1:
+            self._send_mode(1)
+            time.sleep(0.05)
+        self._send_freqs(cfg.freqs)
+
     def open_and_start(self, cfg: MigalkaConfig) -> None:
         with self._lock:
             if self.is_open():
@@ -62,19 +74,16 @@ class MigalkaSerialController:
                     f"COM уже открыт — перенастройка mode={cfg.mode} "
                     f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'}), freqs={cfg.freqs}"
                 )
-                self._send_mode(cfg.mode)
-                time.sleep(0.05)
-                self._send_freqs(cfg.freqs)
+                self._apply_config(cfg)
                 return
             _log_info(
                 f"открываем COM {cfg.port!r} baud={cfg.baudrate}, mode={cfg.mode} "
                 f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'}), freqs={cfg.freqs}"
             )
             self._ser = serial.Serial(cfg.port, cfg.baudrate, timeout=cfg.timeout_s)
-            time.sleep(0.5)
             self._running = True
-            self._send_mode(cfg.mode)
-            self._send_freqs(cfg.freqs)
+            time.sleep(0.15)
+            self._apply_config(cfg)
             _log_info(f"команды отправлены: M {cfg.mode}, freqs={' '.join(cfg.freqs)}")
             self._thread = threading.Thread(target=self._read_loop, name="MigalkaSerialReader", daemon=True)
             self._thread.start()
@@ -86,7 +95,9 @@ class MigalkaSerialController:
             self._running = False
             try:
                 self._send_freqs(("0", "0", "0", "0", "0", "0"))
-                time.sleep(0.2)
+                time.sleep(0.05)
+                self._send_mode(0)
+                time.sleep(0.1)
             except Exception:
                 pass
             try:
