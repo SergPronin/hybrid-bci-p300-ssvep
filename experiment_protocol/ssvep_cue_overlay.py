@@ -51,6 +51,22 @@ class SsvepCueOverlay(QWidget):
         root.addStretch(3)
         self.hide()
         self._shown_key: tuple[int, int, int, float, str] | None = None
+        self._cue_widgets = (
+            self.lbl_title,
+            self.lbl_mode,
+            self.lbl_sub,
+            self.lbl_lamp,
+            self.lbl_hz,
+        )
+
+    def show_blackout(self) -> None:
+        """Чёрный экран на ноутбуке, пока испытуемый смотрит на мигалку."""
+        self._shown_key = None
+        self.setStyleSheet("background-color: #000000;")
+        for w in self._cue_widgets:
+            w.hide()
+        if not self.isVisible():
+            self.showFullScreen()
 
     def show_cue(
         self,
@@ -61,6 +77,9 @@ class SsvepCueOverlay(QWidget):
         freq_hz: float | None = None,
         mode_label: str = "",
     ) -> None:
+        self.setStyleSheet("background-color: #202020;")
+        for w in self._cue_widgets:
+            w.show()
         key = (
             int(experiment_index),
             int(experiment_total),

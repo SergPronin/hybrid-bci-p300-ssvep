@@ -718,7 +718,16 @@ class ProtocolRunnerWidget(QWidget):
         self.lbl_status.setText("Запущено. Проверка перед стартом…")
 
     def _sync_ssvep_cue_overlay(self) -> None:
-        if self._runner is None or not bool(self._runner.ssvep_cue_visible):
+        if self._runner is None:
+            if self._ssvep_cue_overlay is not None:
+                self._ssvep_cue_overlay.hide_overlay()
+            return
+        if bool(self._runner.ssvep_blackout_visible):
+            if self._ssvep_cue_overlay is None:
+                self._ssvep_cue_overlay = SsvepCueOverlay()
+            self._ssvep_cue_overlay.show_blackout()
+            return
+        if not bool(self._runner.ssvep_cue_visible):
             if self._ssvep_cue_overlay is not None:
                 self._ssvep_cue_overlay.hide_overlay()
             return

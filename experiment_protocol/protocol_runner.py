@@ -148,6 +148,12 @@ class ProtocolRunner:
         self.ssvep_cue_lamp_1based: int = 1
         self.ssvep_cue_freq_hz: float = 0.0
         self.ssvep_cue_mode_label: str = ""
+        self.ssvep_blackout_visible: bool = False
+
+    def _set_ssvep_blackout(self, visible: bool) -> None:
+        self.ssvep_blackout_visible = bool(visible)
+        if visible:
+            self.ssvep_cue_visible = False
 
     def _set_state(self, new_state: str, *, detail: str = "") -> None:
         if new_state != self._last_state:
@@ -187,6 +193,7 @@ class ProtocolRunner:
         if ssvep_mode is None:
             self.ssvep_cue_visible = False
             return
+        self.ssvep_blackout_visible = False
         lamp0 = self._peek_next_ssvep_target_lamp_0idx()
         lamp1, hz = self._ssvep_lamp_display(lamp0)
         self.ssvep_cue_visible = True
@@ -294,6 +301,7 @@ class ProtocolRunner:
     def stop(self, *, reason: str = "user_stop") -> None:
         plog.info(f"=== PROTOCOL STOP reason={reason!r} ===")
         self._set_ssvep_cue_overlay(ssvep_mode=None)
+        self._set_ssvep_blackout(False)
         try:
             self._migalka.stop_and_close()
         except Exception as e:
@@ -664,6 +672,7 @@ class ProtocolRunner:
 
         self._ssvep_migalka_fail_streak = 0
         self._ssvep_block_started_at = float(time.time())
+        self._set_ssvep_blackout(True)
         plog.info(f"мигалка запущена, блок {self.cfg.ssvep_block_sec}s, лампа-цель={self._ssvep_target_lamp}")
         sm = _ru_ssvep_stim_mode(mode)
         self.status_text = (
@@ -719,6 +728,7 @@ class ProtocolRunner:
             return
 
         # End of block: stop migalka and compute MSI decision from last window
+        self._set_ssvep_blackout(False)
         try:
             self._migalka.stop_and_close()
         except Exception:
