@@ -1,3 +1,4 @@
+import math
 import random
 from typing import List, Tuple
 
@@ -63,6 +64,8 @@ class StimulusApp:
         self.auto_plan_target_epochs = max(0, int(auto_plan_target_epochs))
         self._auto_trials_started = 0
         self._auto_target_plan: list[int] = []
+        self._auto_pause_until: float | None = None
+        self._auto_next_target: int | None = None
         self.win = visual.Window(
             size=config.WINDOW_SIZE,
             color=config.WINDOW_COLOR,
@@ -109,7 +112,6 @@ class StimulusApp:
         self.mouse = event.Mouse(win=self.win)
         if self.auto_random_trials:
             self.win.mouseVisible = False
-            self._auto_target_plan = self._build_auto_target_plan()
 
         px = self._right_panel_x()
         y = config.PANEL_FIRST_ROW_Y
@@ -169,6 +171,10 @@ class StimulusApp:
             height=config.OPERATOR_HINT_H,
         )
 
+        # В авто-режиме строим план целей только после того, как инициализированы tb_seq и др. поля.
+        if self.auto_random_trials:
+            self._auto_target_plan = self._build_auto_target_plan()
+
         self.fixation_cross = visual.ShapeStim(
             self.win,
             vertices=(
@@ -182,6 +188,45 @@ class StimulusApp:
             lineWidth=2,
             lineColor=config.FIXATION_CROSS_COLOR,
             pos=(0, 0),
+        )
+
+        # Overlay text shown between trials in auto mode
+        w, h = float(self.win.size[0]), float(self.win.size[1])
+        # Operator tuning: title/sub ~1.5x smaller, target number ~2x bigger
+        title_h = max(32, int(h * 0.10 / 1.5))
+        sub_h = max(24, int(h * 0.085 / 1.5))
+        self._auto_overlay_title = visual.TextStim(
+            self.win,
+            text="",
+            pos=(0, int(h * 0.18)),
+            color="white",
+            height=title_h,
+            wrapWidth=w * 0.9,
+        )
+        self._auto_overlay_sub = visual.TextStim(
+            self.win,
+            text="",
+            pos=(0, int(h * -0.02)),
+            color="white",
+            height=sub_h,
+            wrapWidth=w * 0.9,
+        )
+        self._auto_overlay_target_num = visual.TextStim(
+            self.win,
+            text="",
+            pos=(0, int(h * -0.22)),
+            color="yellow",
+            height=max(28, int((h * 0.44) / 3.0)),
+            bold=True,
+        )
+        self._auto_overlay_bg = visual.Rect(
+            self.win,
+            width=w,
+            height=h,
+            pos=(0, 0),
+            fillColor="#202020",
+            lineColor=None,
+            opacity=1.0,
         )
 
     def _right_panel_x(self) -> float:
@@ -300,6 +345,48 @@ class StimulusApp:
         self._auto_trials_started += 1
         self._start_trial_with_target(tgt)
 
+    def _schedule_auto_trial(self, *, target_tile_id: int) -> None:
+        """Show overlay during pause, then start trial with given target."""
+        tgt = max(0, min(len(self.grid.tiles) - 1, int(target_tile_id)))
+        self._auto_next_target = tgt
+        if self.inter_trial_s <= 0:
+            self._auto_pause_until = None
+            self._auto_next_target = None
+            self._start_trial_with_target(tgt)
+            return
+        self._auto_pause_until = float(core.getTime()) + float(self.inter_trial_s)
+
+    def _auto_pause_active(self) -> bool:
+        if self._auto_pause_until is None:
+            return False
+        now = float(core.getTime())
+        if now < float(self._auto_pause_until):
+            return True
+        # pause finished
+        self._auto_pause_until = None
+        if self._auto_next_target is not None:
+            tgt = int(self._auto_next_target)
+            self._auto_next_target = None
+            self._start_trial_with_target(tgt)
+        return False
+
+    def _draw_auto_overlay(self) -> None:
+        """Draw 'experiment number' + instruction during pause."""
+        if not self.auto_random_trials:
+            return
+        if self._auto_pause_until is None or self._auto_next_target is None:
+            return
+        # number is next trial index (1-based)
+        exp_n = int(self._auto_trials_started) + 1
+        self._auto_overlay_title.text = f"Эксперимент №{exp_n}"
+        tid = int(self._auto_next_target)
+        self._auto_overlay_sub.text = "Смотрите на плитку:"
+        self._auto_overlay_target_num.text = str(tid)
+        self._auto_overlay_bg.draw()
+        self._auto_overlay_title.draw()
+        self._auto_overlay_sub.draw()
+        self._auto_overlay_target_num.draw()
+
     def _rand_target_avoid(self, *, prev: int | None) -> int:
         n = len(self.grid.tiles)
         if n <= 1:
@@ -344,13 +431,13 @@ class StimulusApp:
                 # if sequences too small, raise it so we can satisfy both epochs and non-adjacent constraint
                 # need: reps <= max_non_adjacent and reps*seq >= target_epochs  => seq >= ceil(target_epochs/max_non_adjacent)
                 if max_non_adjacent > 0:
-                    min_seq = int(np.ceil(target_epochs / float(max_non_adjacent)))
+                    min_seq = int(math.ceil(target_epochs / float(max_non_adjacent)))
                 else:
                     min_seq = target_epochs
                 if seq < min_seq:
                     seq = _clamp_int(min_seq, config.SEQUENCES_MIN, config.SEQUENCES_MAX, default=config.DEFAULT_SEQUENCES)
                     self.tb_seq.text = str(seq)
-                reps_needed = int(np.ceil(target_epochs / float(max(1, seq))))
+                reps_needed = int(math.ceil(target_epochs / float(max(1, seq))))
         reps = max(0, min(int(reps_needed), trials, max_non_adjacent))
         if reps <= 0:
             # no special plan
@@ -461,7 +548,22 @@ class StimulusApp:
         while True:
             if self._auto_pending_first_trial:
                 self._auto_pending_first_trial = False
-                self._start_trial_random_target()
+                # Show instruction before the very first auto trial as well
+                if self._auto_trials_started < len(self._auto_target_plan):
+                    tgt0 = int(self._auto_target_plan[self._auto_trials_started])
+                else:
+                    tgt0 = self._rand_target_avoid(prev=None)
+                self._auto_trials_started += 1
+                self._schedule_auto_trial(target_tile_id=int(tgt0))
+            # If we're between trials in auto mode, just render overlay and wait
+            if self._auto_pause_active():
+                self._draw()
+                self._draw_auto_overlay()
+                self.win.flip()
+                keys = event.getKeys()
+                if "escape" in keys:
+                    break
+                continue
             self._handle_buttons()
             event_data = self.controller.update()
             if event_data:
@@ -480,14 +582,21 @@ class StimulusApp:
                     self.win.callOnFlip(self.controller.lsl.send, -2, "trial_end")
                     print("TRIAL END")
                     if self.auto_random_trials:
-                        core.wait(self.inter_trial_s)
                         self.controller.stop()
-                        self._start_trial_random_target()
+                        # Plan the next target now, but show overlay during pause
+                        if self._auto_trials_started < len(self._auto_target_plan):
+                            nxt = int(self._auto_target_plan[self._auto_trials_started])
+                        else:
+                            prev = int(self._auto_target_plan[-1]) if self._auto_target_plan else None
+                            nxt = int(self._rand_target_avoid(prev=prev))
+                        self._auto_trials_started += 1
+                        self._schedule_auto_trial(target_tile_id=int(nxt))
                     else:
                         self.controller.stop()
                         self.show_controls = True
                         self.win.mouseVisible = True
             self._draw()
+            self._draw_auto_overlay()
             self.win.flip()
             keys = event.getKeys()
             if "escape" in keys:

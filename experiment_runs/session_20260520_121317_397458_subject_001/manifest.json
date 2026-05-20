@@ -1,0 +1,48 @@
+{
+  "schema": "hybrid_protocol/v1",
+  "session_id": "session_20260520_121317_397458",
+  "subject_id": "subject_001",
+  "protocol_plan": {
+    "p300": {
+      "modes": [
+        "auc",
+        "template_corr"
+      ],
+      "trials_per_mode": 15,
+      "warmup_target_epochs": 12
+    },
+    "ssvep": {
+      "modes": [
+        "continuous",
+        "burst"
+      ],
+      "blocks_per_mode": 15,
+      "block_sec": 6.0,
+      "window_sec": 2.0,
+      "fs_hz": 250.0,
+      "freqs_hz": [
+        10.0,
+        12.0,
+        15.0,
+        20.0,
+        8.57,
+        7.5
+      ]
+    }
+  },
+  "start": {
+    "note": "protocol_start"
+  },
+  "paths": {
+    "events": "/Users/sergejpronin/PycharmProjects/hybrid-bci-p300-ssvep/experiment_runs/session_20260520_121317_397458_subject_001/events.ndjson",
+    "manifest": "/Users/sergejpronin/PycharmProjects/hybrid-bci-p300-ssvep/experiment_runs/session_20260520_121317_397458_subject_001/manifest.json",
+    "eeg_npz": "/Users/sergejpronin/PycharmProjects/hybrid-bci-p300-ssvep/experiment_runs/session_20260520_121317_397458_subject_001/eeg.npz",
+    "p300_trials": "/Users/sergejpronin/PycharmProjects/hybrid-bci-p300-ssvep/experiment_runs/session_20260520_121317_397458_subject_001/p300_trials.ndjson",
+    "ssvep_blocks": "/Users/sergejpronin/PycharmProjects/hybrid-bci-p300-ssvep/experiment_runs/session_20260520_121317_397458_subject_001/ssvep_blocks.ndjson"
+  },
+  "stop": {
+    "reason": "user_stop"
+  },
+  "n_events": 3,
+  "eeg_npz": null
+}
