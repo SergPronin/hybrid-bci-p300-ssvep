@@ -10,38 +10,42 @@ from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 class ProtocolInstructionOverlay(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
         self.setStyleSheet("background-color: #1a1a2e;")
         root = QVBoxLayout(self)
         root.setContentsMargins(48, 48, 48, 48)
         root.addStretch(2)
 
         self.lbl_title = QLabel("")
-        self.lbl_title.setAlignment(Qt.AlignCenter)
+        self.lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_title.setStyleSheet("color: #eaeaea;")
-        self.lbl_title.setFont(QFont("", 40, QFont.Bold))
+        self.lbl_title.setFont(QFont("", 40, QFont.Weight.Bold))
         root.addWidget(self.lbl_title)
 
         self.lbl_kind = QLabel("")
-        self.lbl_kind.setAlignment(Qt.AlignCenter)
+        self.lbl_kind.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_kind.setStyleSheet("color: #a0a0b8;")
         self.lbl_kind.setFont(QFont("", 24))
         root.addWidget(self.lbl_kind)
 
         self.lbl_hint = QLabel("")
-        self.lbl_hint.setAlignment(Qt.AlignCenter)
+        self.lbl_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_hint.setStyleSheet("color: #ffffff;")
         self.lbl_hint.setFont(QFont("", 30))
         root.addWidget(self.lbl_hint)
 
         self.lbl_big = QLabel("")
-        self.lbl_big.setAlignment(Qt.AlignCenter)
+        self.lbl_big.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_big.setStyleSheet("color: #7ee787;")
-        self.lbl_big.setFont(QFont("", 88, QFont.Bold))
+        self.lbl_big.setFont(QFont("", 88, QFont.Weight.Bold))
         root.addWidget(self.lbl_big)
 
         self.lbl_sub = QLabel("")
-        self.lbl_sub.setAlignment(Qt.AlignCenter)
+        self.lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_sub.setStyleSheet("color: #8b949e;")
         self.lbl_sub.setFont(QFont("", 20))
         root.addWidget(self.lbl_sub)

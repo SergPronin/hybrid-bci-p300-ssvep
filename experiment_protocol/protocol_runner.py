@@ -400,11 +400,21 @@ class ProtocolRunner:
     ) -> None:
         total_main = int(len(self._main_queue)) if self._main_queue else 0
         if self._pause_until_wall is not None:
-            self.participant_instruction = {
+            rec: Dict[str, Any] = {
                 "type": "pause",
                 "message": pause_message or self._pause_status or "Пауза",
                 "seconds_left": seconds_left,
             }
+            item_pause = self._current_queue_item()
+            if item_pause is not None and item_pause.kind == "p300":
+                rec["tile"] = int(item_pause.target_tile_id or 0)
+                rec["index"] = int(item_pause.p300_block_index or self._main_queue_index + 1)
+                rec["total"] = int(
+                    item_pause.p300_block_total
+                    or (int(self.cfg.p300_calib_trials) if item_pause.p300_phase == "calib" else total_main)
+                )
+                rec["phase"] = str(item_pause.p300_phase or "main")
+            self.participant_instruction = rec
             return
         item = self._current_queue_item()
         if item is None:
