@@ -6,6 +6,23 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
+# Номер лампы (1…4) → направление взгляда испытуемого
+_LAMP_ARROW: dict[int, str] = {1: "←", 2: "→", 3: "↑", 4: "↓"}
+_LAMP_DIRECTION_RU: dict[int, str] = {
+    1: "влево",
+    2: "вправо",
+    3: "вверх",
+    4: "вниз",
+}
+
+
+def lamp_direction_arrow(lamp_1based: int) -> str:
+    return _LAMP_ARROW.get(int(lamp_1based), "•")
+
+
+def lamp_direction_label_ru(lamp_1based: int) -> str:
+    return _LAMP_DIRECTION_RU.get(int(lamp_1based), "")
+
 
 class SsvepCueOverlay(QWidget):
     """Серый fullscreen, как оверлей паузы в PsychoPy-стимуляторе."""
@@ -30,11 +47,23 @@ class SsvepCueOverlay(QWidget):
         self.lbl_mode.setFont(QFont("", 22))
         root.addWidget(self.lbl_mode)
 
-        self.lbl_sub = QLabel("Смотрите на лампу (диод):")
+        self.lbl_sub = QLabel("Смотрите в направление стрелки (лампа на мигалке):")
         self.lbl_sub.setAlignment(Qt.AlignCenter)
         self.lbl_sub.setStyleSheet("color: white;")
         self.lbl_sub.setFont(QFont("", 28))
         root.addWidget(self.lbl_sub)
+
+        self.lbl_arrow = QLabel("")
+        self.lbl_arrow.setAlignment(Qt.AlignCenter)
+        self.lbl_arrow.setStyleSheet("color: #ffdd44;")
+        self.lbl_arrow.setFont(QFont("", 140, QFont.Bold))
+        root.addWidget(self.lbl_arrow)
+
+        self.lbl_direction = QLabel("")
+        self.lbl_direction.setAlignment(Qt.AlignCenter)
+        self.lbl_direction.setStyleSheet("color: #cccccc;")
+        self.lbl_direction.setFont(QFont("", 26))
+        root.addWidget(self.lbl_direction)
 
         self.lbl_lamp = QLabel("")
         self.lbl_lamp.setAlignment(Qt.AlignCenter)
@@ -55,6 +84,8 @@ class SsvepCueOverlay(QWidget):
             self.lbl_title,
             self.lbl_mode,
             self.lbl_sub,
+            self.lbl_arrow,
+            self.lbl_direction,
             self.lbl_lamp,
             self.lbl_hz,
         )
@@ -95,9 +126,13 @@ class SsvepCueOverlay(QWidget):
             str(mode_label),
         )
         if key != self._shown_key:
+            lamp_n = int(lamp_1based)
             self.lbl_title.setText(f"Эксперимент №{int(experiment_index)} из {int(experiment_total)}")
             self.lbl_mode.setText(str(mode_label) if mode_label else "ССВП")
-            self.lbl_lamp.setText(str(int(lamp_1based)))
+            self.lbl_arrow.setText(lamp_direction_arrow(lamp_n))
+            dir_ru = lamp_direction_label_ru(lamp_n)
+            self.lbl_direction.setText(f"Смотрите {dir_ru}" if dir_ru else "")
+            self.lbl_lamp.setText(f"Лампа {lamp_n}")
             if freq_hz is not None and float(freq_hz) > 0:
                 self.lbl_hz.setText(f"≈ {float(freq_hz):g} Гц")
                 self.lbl_hz.show()

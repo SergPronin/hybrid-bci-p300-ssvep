@@ -257,9 +257,10 @@ class ProtocolRunnerWidget(QWidget):
 
         self.spin_calib_trials = QSpinBox()
         self.spin_calib_trials.setRange(1, 50)
-        self.spin_calib_trials.setValue(3)
+        self.spin_calib_trials.setValue(5)
         self.spin_calib_trials.setToolTip(
-            "Подряд в начале: прогоны P300 на одной плитке для эталона."
+            "Подряд в начале: прогоны P300 на одной плитке для эталона. "
+            "5 прогонов × 12 sequences ≈ больше эпох на цель (порог шаблона 12)."
         )
 
         self.spin_calib_target = QSpinBox()
