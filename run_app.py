@@ -60,8 +60,8 @@ def main() -> None:
     parser.add_argument(
         "--auto-plan-trials",
         type=int,
-        default=15,
-        help="Длина плана целей (первые trial) в авто-режиме.",
+        default=3,
+        help="Длина плана целей (первые trial) в авто-режиме; для протокола — калибровка (обычно 3).",
     )
     parser.add_argument(
         "--auto-plan-target-tile-id",

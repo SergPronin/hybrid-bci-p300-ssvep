@@ -53,7 +53,7 @@ class ProtocolConfig:
     shuffle_seed: int = -1  # -1 = случайный seed при старте main
 
     # Калибровка P300 в начале (подряд, до main)
-    p300_calib_trials: int = 12
+    p300_calib_trials: int = 3
     calib_target_tile_id: int = 4
     template_warmup_target_epochs: int = 12
 

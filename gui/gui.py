@@ -477,6 +477,9 @@ class StimulusApp:
             return []
         trials = int(self.auto_plan_trials)
         tgt = _clamp_int(self.auto_plan_target_tile_id, 0, n_tiles - 1, default=4)
+        # Протокол v2: калибровка — все прогоны на одной плитке (3×12 эпох → эталон).
+        if self.stim_control_dir is not None:
+            return [int(tgt)] * trials
         # How many repeats do we need for a reliable template?
         # Each trial contributes approx. `sequences` target epochs (target flashes once per sequence).
         seq = _parse_int(

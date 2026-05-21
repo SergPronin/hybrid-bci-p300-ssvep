@@ -257,9 +257,10 @@ class ProtocolRunnerWidget(QWidget):
 
         self.spin_calib_trials = QSpinBox()
         self.spin_calib_trials.setRange(1, 50)
-        self.spin_calib_trials.setValue(12)
+        self.spin_calib_trials.setValue(3)
         self.spin_calib_trials.setToolTip(
-            "Подряд в начале: прогоны P300 для сбора персонального шаблона (фиксированная плитка)."
+            "Подряд в начале: прогоны P300 на одной плитке для эталона. "
+            "Обычно хватает 3 прогонов (12 эпох на плитку); раньше — если шаблон уже собран."
         )
 
         self.spin_calib_target = QSpinBox()
@@ -269,6 +270,9 @@ class ProtocolRunnerWidget(QWidget):
         self.spin_template_epochs = QSpinBox()
         self.spin_template_epochs.setRange(4, 50)
         self.spin_template_epochs.setValue(12)
+        self.spin_template_epochs.setToolTip(
+            "Минимум эпох по целевой плитке для эталона. При 12 sequences в прогоне часто хватает 1–3 прогонов."
+        )
 
         self.spin_p300_main = QSpinBox()
         self.spin_p300_main.setRange(1, 200)
@@ -862,6 +866,9 @@ class ProtocolRunnerWidget(QWidget):
         self.activateWindow()
         QApplication.processEvents()
 
+    def _stimulus_process_running(self) -> bool:
+        return self._stimulus_proc is not None and self._stimulus_proc.poll() is None
+
     def _sync_participant_overlay(self) -> None:
         if self._runner is None:
             if self._participant_overlay is not None:
@@ -873,9 +880,13 @@ class ProtocolRunnerWidget(QWidget):
             if self._participant_overlay is not None:
                 self._participant_overlay.hide_overlay()
             return
+        t = str(instr.get("type") or "")
+        # P300 (калибровка и main): плитки рисует PsychoPy — PyQt-оверлей их перекрывает.
+        if t in ("calib", "p300") and self._stimulus_process_running():
+            self._dismiss_participant_overlay()
+            return
         if self._participant_overlay is None:
             self._participant_overlay = ProtocolInstructionOverlay()
-        t = str(instr.get("type") or "")
         if t == "blackout":
             self._participant_overlay.show_blackout()
             return
