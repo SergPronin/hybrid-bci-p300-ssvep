@@ -329,6 +329,29 @@ class ProtocolRunner:
             return Path(self.cfg.session_dir)
         return None
 
+    def _request_stim_p300_trial(
+        self,
+        *,
+        target_tile_id: int,
+        experiment_index: int,
+        experiment_total: int,
+        label: str = "P300",
+    ) -> None:
+        sd = self._session_dir()
+        if sd is None:
+            return
+        stim_ctl.write_trial_request(
+            sd,
+            target_tile_id=int(target_tile_id),
+            experiment_index=int(experiment_index),
+            experiment_total=int(experiment_total),
+            label=str(label),
+        )
+        plog.info(
+            f"stim_control trial: tile={int(target_tile_id)} "
+            f"({experiment_index}/{experiment_total}) {label!r}"
+        )
+
     def _sync_stim_control(self, item: Optional[QueueItem], *, message: str = "") -> None:
         sd = self._session_dir()
         if sd is None:
@@ -345,6 +368,7 @@ class ProtocolRunner:
                 target_tile_id=tid,
                 experiment_index=idx,
                 experiment_total=total,
+                label="P300",
             )
         else:
             stim_ctl.write_paused(
@@ -592,9 +616,15 @@ class ProtocolRunner:
             self._begin_main_phase()
         else:
             self._set_state(ProtocolState.P300Calib, detail="preflight ok")
+            self._request_stim_p300_trial(
+                target_tile_id=int(self.cfg.calib_target_tile_id),
+                experiment_index=1,
+                experiment_total=int(self.cfg.p300_calib_trials),
+                label="Калибровка P300",
+            )
             self.status_text = (
                 f"{self._status_progress_label()}: сбор шаблона P300, "
-                f"целевая плитка {int(self.cfg.calib_target_tile_id)} — ждём trial_start…"
+                f"плитка {int(self.cfg.calib_target_tile_id)} — запуск прогона…"
             )
             plog.info(self.status_text)
 
@@ -810,9 +840,17 @@ class ProtocolRunner:
             or int(self._p300_calib_trials_done) >= int(self.cfg.p300_calib_trials)
         )
         if not calib_done:
+            nxt = int(self._p300_calib_trials_done) + 1
+            self._request_stim_p300_trial(
+                target_tile_id=int(self.cfg.calib_target_tile_id),
+                experiment_index=nxt,
+                experiment_total=int(self.cfg.p300_calib_trials),
+                label="Калибровка P300",
+            )
             self.status_text = (
                 f"Калибровка: прогон {self._p300_calib_trials_done}/"
-                f"{self.cfg.p300_calib_trials}, шаблон={'да' if template_ok else 'нет'}…"
+                f"{self.cfg.p300_calib_trials}, шаблон={'да' if template_ok else 'нет'} — "
+                f"следующий прогон…"
             )
             return
 

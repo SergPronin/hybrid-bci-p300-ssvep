@@ -750,7 +750,6 @@ class ProtocolRunnerWidget(QWidget):
             run_py = sys.executable
             run_script = _ROOT / "run_app.py"
             if run_script.exists():
-                n_calib = int(self.spin_calib_trials.value())
                 stim_args = [
                         run_py,
                         str(run_script),
@@ -760,20 +759,17 @@ class ProtocolRunnerWidget(QWidget):
                         str(float(self.spin_inter_trial.value())),
                         "--sequences",
                         str(int(self.spin_sequences.value())),
-                        "--auto-max-trials",
-                        str(max(n_calib + 1, n_calib)),
                         "--auto-plan-trials",
-                        str(n_calib),
+                        "0",
                         "--auto-plan-target-tile-id",
                         str(int(self.spin_calib_target.value())),
-                        "--auto-plan-target-repeats",
-                        "0",
-                        "--auto-plan-target-epochs",
-                        str(int(self.spin_template_epochs.value())),
                         "--stim-control-dir",
                         str(session_dir),
                 ]
-                plog_info(f"запуск стимулятора (калибровка={n_calib}, main P300 по stim_control): {' '.join(stim_args)}")
+                plog_info(
+                    "запуск стимулятора (все P300 по stim_control: калибровка + main): "
+                    + " ".join(stim_args)
+                )
                 self._stimulus_proc = subprocess.Popen(
                     stim_args,
                     cwd=str(_ROOT),

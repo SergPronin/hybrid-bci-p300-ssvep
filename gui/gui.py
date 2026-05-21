@@ -93,7 +93,8 @@ class StimulusApp:
         )
         # Автопротокол: без клика START сразу идём в полный экран и циклы trial с случайной целью.
         self.show_controls = not self.auto_random_trials
-        self._auto_pending_first_trial = bool(self.auto_random_trials)
+        # С stim_control первый trial даёт протокол, не автостарт.
+        self._auto_pending_first_trial = bool(self.auto_random_trials) and self.stim_control_dir is None
         self._tiles_visual: list = []
         self._tile_texts: list = []
         self._build_visual_grid()
@@ -389,14 +390,14 @@ class StimulusApp:
         return False
 
     def _in_stim_control_phase(self) -> bool:
-        return (
-            self.stim_control_dir is not None
-            and self._auto_trials_started >= len(self._auto_target_plan)
-        )
+        """С протоколом v2 все P300 (включая калибровку) — только по stim_control.json."""
+        return self.stim_control_dir is not None
 
     def _draw_protocol_wait_overlay(self, *, message: str) -> None:
         self._auto_overlay_title.text = "Ожидание протокола"
-        self._auto_overlay_sub.text = str(message or "Пауза — смотрите на инструкцию на втором экране")
+        self._auto_overlay_sub.text = str(
+            message or "Скоро начнётся прогон — не закрывайте окно"
+        )
         self._auto_overlay_target_num.text = ""
         self._auto_overlay_bg.draw()
         self._auto_overlay_title.draw()
@@ -620,11 +621,11 @@ class StimulusApp:
                 if "escape" in keys:
                     break
                 continue
-            # Stop auto stimulator after N trials (калибровка без control; далее — stim_control).
+            # Без stim_control — лимит trial; с протоколом — только state=done в stim_control.json.
             if (
                 self.auto_random_trials
-                and self._auto_max_trials is not None
                 and not self._in_stim_control_phase()
+                and self._auto_max_trials is not None
                 and self._auto_trials_started >= int(self._auto_max_trials)
             ):
                 break
