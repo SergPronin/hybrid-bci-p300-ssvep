@@ -323,8 +323,8 @@ class ProtocolRunnerWidget(QWidget):
         )
         self.chk_run_stimulus.setChecked(True)
         self.chk_run_stimulus.setToolTip(
-            "PsychoPy в авто-режиме: все P300 (калибровка и main) по stim_control.json.\n"
-            "Между SSVEP окно плиток закрывается — подсказки только в SsvepCueOverlay."
+            "PsychoPy: P300 с серым оверлеем между trial (как 3a0a997), по stim_control.json.\n"
+            "ССВП — отдельное окно SsvepCueOverlay, PsychoPy закрывается."
         )
 
         stim_form.addRow("Пауза между trial P300 (с):", self.spin_inter_trial)
