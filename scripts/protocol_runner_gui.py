@@ -860,12 +860,6 @@ class ProtocolRunnerWidget(QWidget):
             ov.hide()
             ov.close()
             ov.deleteLater()
-        r = self._runner
-        if r is None or not (
-            bool(r.ssvep_cue_visible) or bool(r.ssvep_blackout_visible)
-        ):
-            self.showNormal()
-            self.show()
         QApplication.processEvents()
 
     def _restore_operator_window(self) -> None:
@@ -897,9 +891,6 @@ class ProtocolRunnerWidget(QWidget):
             if self._ssvep_cue_overlay is None:
                 self._ssvep_cue_overlay = SsvepCueOverlay()
             self._ssvep_cue_overlay.show_blackout()
-            self.hide()
-            self._ssvep_cue_overlay.raise_()
-            self._ssvep_cue_overlay.activateWindow()
             return
         if not bool(self._runner.ssvep_cue_visible):
             if self._ssvep_cue_overlay is not None and not bool(self._runner.ssvep_blackout_visible):
@@ -914,31 +905,6 @@ class ProtocolRunnerWidget(QWidget):
             freq_hz=float(self._runner.ssvep_cue_freq_hz),
             mode_label=str(self._runner.ssvep_cue_mode_label),
         )
-        self.hide()
-        self._ssvep_cue_overlay.raise_()
-        self._ssvep_cue_overlay.activateWindow()
-
-    def _kill_stimulus_if_covering_overlay(self) -> None:
-        """PsychoPy fullscreen перекрывает оверлей — закрыть до show_cue."""
-        if self._stimulus_proc is None or self._runner is None:
-            return
-        if self._stimulus_proc.poll() is not None:
-            return
-        stop_stim = self._runner.state in (
-            "ssvep_continuous",
-            "ssvep_burst",
-            "finalize",
-            "stopped",
-        )
-        if bool(self._runner.ssvep_cue_visible) or bool(self._runner.ssvep_blackout_visible):
-            stop_stim = True
-        if not stop_stim:
-            return
-        try:
-            self._stimulus_proc.terminate()
-        except Exception:
-            pass
-        self._stimulus_proc = None
 
     def _on_stop(self) -> None:
         self._close_eeg_test_inlet()
@@ -966,7 +932,6 @@ class ProtocolRunnerWidget(QWidget):
         prev = getattr(self, "_last_status_printed", "")
         self._runner.tick()
         self._ensure_stimulus_for_p300()
-        self._kill_stimulus_if_covering_overlay()
         self._sync_ssvep_cue_overlay()
         QApplication.processEvents()
         st = self._runner.status_text
@@ -974,11 +939,22 @@ class ProtocolRunnerWidget(QWidget):
         if st != prev:
             plog_info(f"status [{self._runner.state}]: {st}")
             self._last_status_printed = st
-            if (
-                self._runner.state in ("ssvep_continuous", "ssvep_burst")
-                or bool(self._runner.ssvep_cue_visible)
-            ):
-                plog_info("стимулятор плиток остановлен — этап ССВП (оверлей / мигалка)")
+        # Закрываем PsychoPy до ССВП: иначе fullscreen перекрывает оверлей и мигалку не видно
+        if self._stimulus_proc is not None and self._stimulus_proc.poll() is None:
+            stop_stim = self._runner.state in ("ssvep_continuous", "ssvep_burst", "finalize", "stopped")
+            if bool(self._runner.ssvep_cue_visible) or bool(self._runner.ssvep_blackout_visible):
+                stop_stim = True
+            if stop_stim:
+                try:
+                    self._stimulus_proc.terminate()
+                except Exception:
+                    pass
+                self._stimulus_proc = None
+                if prev != st and (
+                    self._runner.state in ("ssvep_continuous", "ssvep_burst")
+                    or bool(self._runner.ssvep_cue_visible)
+                ):
+                    plog_info("стимулятор плиток остановлен — этап ССВП (оверлей / мигалка)")
         if self._runner.state in ("finalize", "stopped"):
             self._restore_operator_window()
         if self._runner.state in ("stopped",):
