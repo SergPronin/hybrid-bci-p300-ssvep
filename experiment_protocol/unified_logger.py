@@ -9,7 +9,15 @@ from typing import Any, Dict, List, Optional, Sequence, TextIO
 
 import numpy as np
 
-LOG_SCHEMA = "hybrid_protocol/v1"
+LOG_SCHEMA = "hybrid_protocol/v2"
+
+
+def _normalize_marker_value(sample: Any) -> str:
+    if isinstance(sample, (list, tuple)) and sample:
+        sample = sample[0]
+    if isinstance(sample, (bytes, bytearray)):
+        return sample.decode("utf-8", errors="ignore")
+    return str(sample)
 
 
 def _json_safe(obj: Any) -> Any:
@@ -59,6 +67,10 @@ class UnifiedExperimentLogger:
         "_ssvep_blocks_fh",
         "_experiments_fh",
         "_n_experiments",
+        "_exp_start_seq",
+        "_exp_start_eeg_idx",
+        "_exp_start_meta",
+        "_exp_markers",
     )
 
     def __init__(
@@ -85,6 +97,11 @@ class UnifiedExperimentLogger:
         self._ssvep_blocks_fh = open(paths.ssvep_blocks_path, "a", encoding="utf-8", buffering=1)
         self._experiments_fh = open(paths.experiments_path, "a", encoding="utf-8", buffering=1)
         self._n_experiments = 0
+        self._exp_start_seq = 0
+        self._exp_start_eeg_idx = 0
+        self._exp_start_meta: Dict[str, Any] = {}
+        self._exp_markers: List[Dict[str, Any]] = []
+        (session_dir / "experiments").mkdir(exist_ok=True)
 
     @property
     def session_dir(self) -> Path:
@@ -246,19 +263,139 @@ class UnifiedExperimentLogger:
         except Exception:
             pass
 
+    def mark_experiment_start(self, **meta: Any) -> None:
+        """Начало единицы протокола (trial P300 или блок SSVEP) — для среза EEG и маркеров."""
+        if self._closed:
+            return
+        self._exp_start_seq = int(self._seq)
+        self._exp_start_eeg_idx = int(len(self._eeg_times))
+        self._exp_start_meta = _json_safe(meta)
+        self._exp_markers = []
+
+    def record_marker(self, *, lsl_time: float, sample: Any) -> None:
+        if self._closed:
+            return
+        value = _normalize_marker_value(sample)
+        row = {"lsl_time": float(lsl_time), "value": value}
+        self._exp_markers.append(row)
+        self.write("marker", row)
+
+    def _slice_session_eeg(self) -> Optional[Dict[str, Any]]:
+        if not self._eeg_times or not self._eeg_data:
+            return None
+        start = int(self._exp_start_eeg_idx)
+        if start >= len(self._eeg_times):
+            return None
+        eeg = np.vstack(self._eeg_data)
+        times = np.asarray(self._eeg_times, dtype=np.float64)
+        n = min(int(times.size), int(eeg.shape[0]))
+        times = times[:n]
+        eeg = eeg[:n]
+        if start >= n:
+            return None
+        times_s = times[start:]
+        eeg_s = eeg[start:]
+        labels = list(self._eeg_labels)
+        if len(labels) < eeg_s.shape[1]:
+            labels.extend(f"Ch{i + 1}" for i in range(len(labels), eeg_s.shape[1]))
+        return {"times": times_s, "eeg": eeg_s, "channel_labels": labels}
+
+    def _events_since_experiment_start(self) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        path = self._paths.events_path
+        if not path.is_file():
+            return out
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if int(rec.get("seq", 0)) > int(self._exp_start_seq):
+                    out.append(rec)
+        except Exception:
+            pass
+        return out
+
+    def _write_experiment_bundle(self, exp_num: int, row: Dict[str, Any]) -> Dict[str, str]:
+        exp_dir = self._dir / "experiments" / f"exp_{exp_num:05d}"
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        paths: Dict[str, str] = {}
+
+        markers_path = exp_dir / "markers.ndjson"
+        try:
+            with markers_path.open("w", encoding="utf-8") as fh:
+                for m in self._exp_markers:
+                    fh.write(json.dumps(_json_safe(m), ensure_ascii=False) + "\n")
+            paths["markers"] = str(markers_path)
+        except Exception:
+            pass
+
+        events_path = exp_dir / "events.ndjson"
+        evs = self._events_since_experiment_start()
+        try:
+            with events_path.open("w", encoding="utf-8") as fh:
+                for ev in evs:
+                    fh.write(json.dumps(_json_safe(ev), ensure_ascii=False) + "\n")
+            paths["events"] = str(events_path)
+        except Exception:
+            pass
+
+        eeg_slice = self._slice_session_eeg()
+        if eeg_slice is not None:
+            eeg_path = exp_dir / "eeg.npz"
+            try:
+                np.savez_compressed(
+                    eeg_path,
+                    times=eeg_slice["times"],
+                    eeg=eeg_slice["eeg"],
+                    channel_labels=np.array(eeg_slice["channel_labels"], dtype=object),
+                )
+                paths["eeg_npz"] = str(eeg_path)
+            except Exception:
+                pass
+
+        bundle_path = exp_dir / "experiment.json"
+        bundle = {
+            "schema": LOG_SCHEMA,
+            "experiment_number": int(exp_num),
+            "session_id": self._session_id,
+            "started": self._exp_start_meta,
+            "markers": list(self._exp_markers),
+            "n_markers": int(len(self._exp_markers)),
+            "n_events": int(len(evs)),
+            **row,
+            "artifacts": paths,
+        }
+        try:
+            bundle_path.write_text(
+                json.dumps(_json_safe(bundle), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            paths["experiment_json"] = str(bundle_path)
+        except Exception:
+            pass
+        return paths
+
     def append_experiment(self, rec: Dict[str, Any]) -> int:
         """Одна строка = одна единица протокола (калибровка / P300 / SSVEP) для разбора медиками."""
         if self._closed:
             return self._n_experiments
         self._n_experiments += 1
+        exp_num = int(self._n_experiments)
         row = dict(rec)
-        row.setdefault("experiment_record_id", int(self._n_experiments))
+        row.setdefault("experiment_record_id", exp_num)
+        row.setdefault("experiment_number", exp_num)
+        artifacts = self._write_experiment_bundle(exp_num, row)
+        row["artifacts"] = artifacts
+        row["n_markers"] = int(len(self._exp_markers))
         try:
             self._experiments_fh.write(json.dumps(_json_safe(row), ensure_ascii=False) + "\n")
             self._experiments_fh.flush()
         except Exception:
             pass
-        return int(self._n_experiments)
+        self._exp_markers = []
+        return exp_num
 
     def finalize(self, *, stop_payload: Dict[str, Any]) -> Path:
         if self._closed:
@@ -269,6 +406,7 @@ class UnifiedExperimentLogger:
         manifest["stop"] = _json_safe(stop_payload)
         manifest["n_events"] = int(self._n_events)
         manifest["n_experiments"] = int(self._n_experiments)
+        manifest["experiments_root"] = str(self._dir / "experiments")
 
         if self._eeg_times and self._eeg_data:
             eeg = np.vstack(self._eeg_data)
@@ -339,6 +477,8 @@ class UnifiedExperimentLogger:
                     "cue_target_lamp_1based": r.get("cue_target_lamp_1based"),
                     "winner_1based": r.get("winner_1based"),
                     "correct_ssvep": r.get("correct"),
+                    "bundle_dir": (r.get("artifacts") or {}).get("experiment_json"),
+                    "n_markers": r.get("n_markers"),
                 }
             )
         fieldnames = list(flat[0].keys())

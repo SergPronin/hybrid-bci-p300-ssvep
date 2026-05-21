@@ -17,7 +17,12 @@ except Exception:  # pragma: no cover
         return time.time()
 
 from experiment_protocol import protocol_log as plog
-from experiment_protocol.experiment_queue import QueueItem, build_main_queue, queue_summary
+from experiment_protocol.experiment_queue import (
+    QueueItem,
+    build_main_queue,
+    format_block_order_ru,
+    queue_summary,
+)
 from experiment_protocol import stim_control as stim_ctl
 from experiment_protocol.unified_logger import UnifiedExperimentLogger
 from p300_analysis.marker_parsing import stim_key_to_tile_digit
@@ -52,7 +57,7 @@ class ProtocolConfig:
     pause_between_experiments_s: float = 2.0
     shuffle_seed: int = -1  # -1 = случайный seed при старте main
 
-    # Калибровка P300 в начале (подряд, до main)
+    # Калибровка P300 — первые N trial в блоке P300 (подряд с main, без отдельной фазы)
     p300_calib_trials: int = 5
     calib_target_tile_id: int = 4
     template_warmup_target_epochs: int = 12
@@ -63,15 +68,15 @@ class ProtocolConfig:
     ssvep_fs_hz: float = 250.0
     # 4 лампы по умолчанию (как SSVEPAnalyzerWindow.DEFAULT_LAMP_FREQS); до 6 на мигалке
     ssvep_freqs_hz: Tuple[float, ...] = (
-        10.0,
+        1000.0 / 117.0,
         1000.0 / 99.0,
         1000.0 / 87.0,
         1000.0 / 76.0,
     )
     # P300 ROI: индексы каналов с 0; пустой кортеж = все каналы EEG
-    roi_channels_0idx: Tuple[int, ...] = (3,)
+    roi_channels_0idx: Tuple[int, ...] = (4, 5, 6, 7, 18, 19)
     # SSVEP MSI ROI; пустой кортеж = все каналы EEG
-    ssvep_roi_channels_0idx: Tuple[int, ...] = ()
+    ssvep_roi_channels_0idx: Tuple[int, ...] = (8, 9, 20)
 
     # Папка сессии (если создана до старта стимулятора — общий stim_control.json)
     session_dir: Optional[Path] = None
@@ -135,6 +140,7 @@ class ProtocolRunner:
         self._main_queue: List[QueueItem] = []
         self._main_queue_index = 0
         self._shuffle_seed_used: Optional[int] = None
+        self._main_block_order: List[str] = []
         self._ssvep_any_continuous_done = False
 
         self._p300_trial_armed: bool = False
@@ -201,20 +207,22 @@ class ProtocolRunner:
 
     def _total_main_experiments(self) -> int:
         return (
-            int(self.cfg.p300_main_trials)
+            int(self.cfg.p300_calib_trials)
+            + int(self.cfg.p300_main_trials)
             + int(self.cfg.ssvep_blocks_per_mode) * 2
         )
 
     def _status_progress_label(self) -> str:
-        if self.state == ProtocolState.P300Calib:
-            return (
-                f"Калибровка P300 {self._p300_calib_trials_done + 1}/"
-                f"{int(self.cfg.p300_calib_trials)}"
-            )
         if self.state == ProtocolState.Main and self._main_queue:
-            return (
-                f"Эксперимент {self._main_queue_index + 1}/{len(self._main_queue)}"
-            )
+            item = self._current_queue_item()
+            if item is not None and item.kind == "p300":
+                bi = int(item.p300_block_index or 0)
+                bt = int(item.p300_block_total or 0)
+                if item.p300_phase == "calib" and bi > 0 and bt > 0:
+                    return f"P300 калибровка {bi}/{bt}"
+                if bi > 0 and bt > 0:
+                    return f"P300 {bi}/{bt}"
+            return f"Эксперимент {self._main_queue_index + 1}/{len(self._main_queue)}"
         return "Протокол"
 
     def _current_queue_item(self) -> Optional[QueueItem]:
@@ -364,12 +372,15 @@ class ProtocolRunner:
             return
         if item.kind == "p300":
             tid = int(item.target_tile_id) if item.target_tile_id is not None else 0
+            pidx = int(item.p300_block_index) if item.p300_block_index else idx
+            ptotal = int(item.p300_block_total) if item.p300_block_total else total
+            label = "Калибровка P300" if item.p300_phase == "calib" else "P300"
             stim_ctl.write_trial_request(
                 sd,
                 target_tile_id=tid,
-                experiment_index=idx,
-                experiment_total=total,
-                label="P300",
+                experiment_index=pidx,
+                experiment_total=ptotal,
+                label=label,
             )
         else:
             stim_ctl.write_paused(
@@ -388,14 +399,6 @@ class ProtocolRunner:
         seconds_left: Optional[float] = None,
     ) -> None:
         total_main = int(len(self._main_queue)) if self._main_queue else 0
-        if self.state == ProtocolState.P300Calib:
-            self.participant_instruction = {
-                "type": "calib",
-                "index": int(self._p300_calib_trials_done) + 1,
-                "total": int(self.cfg.p300_calib_trials),
-                "tile": int(self.cfg.calib_target_tile_id),
-            }
-            return
         if self._pause_until_wall is not None:
             self.participant_instruction = {
                 "type": "pause",
@@ -413,12 +416,20 @@ class ProtocolRunner:
             return
         if item.kind == "p300":
             tid = int(item.target_tile_id) if item.target_tile_id is not None else 0
-            self.participant_instruction = {
-                "type": "p300",
-                "index": idx,
-                "total": total_main,
-                "tile": tid,
-            }
+            if item.p300_phase == "calib":
+                self.participant_instruction = {
+                    "type": "calib",
+                    "index": int(item.p300_block_index or idx),
+                    "total": int(item.p300_block_total or int(self.cfg.p300_calib_trials)),
+                    "tile": tid,
+                }
+            else:
+                self.participant_instruction = {
+                    "type": "p300",
+                    "index": idx,
+                    "total": total_main,
+                    "tile": tid,
+                }
             return
         if item.kind == "ssvep" and self.ssvep_cue_visible:
             lamp0 = self._ssvep_target_lamp_0idx_for_item(item)
@@ -473,6 +484,9 @@ class ProtocolRunner:
                 "block_sec": float(self.cfg.ssvep_block_sec),
                 "window_sec": float(self.cfg.ssvep_window_sec),
                 "fs_hz": float(self.cfg.ssvep_fs_hz),
+                "msi_samples": int(
+                    round(float(self.cfg.ssvep_fs_hz) * float(self.cfg.ssvep_window_sec))
+                ),
                 "freqs_hz": [float(x) for x in self.cfg.ssvep_freqs_hz],
                 "roi_channels_0idx": [int(c) for c in self.cfg.ssvep_roi_channels_0idx],
             },
@@ -518,9 +532,7 @@ class ProtocolRunner:
         if self._tick_pause():
             return
 
-        if self.state == ProtocolState.P300Calib:
-            self._run_p300_calib()
-        elif self.state == ProtocolState.Main:
+        if self.state == ProtocolState.Main:
             self._run_main_queue_item()
         elif self.state in (ProtocolState.SSVEP_CONT, ProtocolState.SSVEP_BURST):
             mode = "continuous" if self.state == ProtocolState.SSVEP_CONT else "burst"
@@ -529,8 +541,6 @@ class ProtocolRunner:
         # Finalize может быть выставлен внутри _run_ssvep_blocks — обработать в том же tick.
         if self.state == ProtocolState.Finalize:
             self._finalize()
-        elif self.state == ProtocolState.P300Calib:
-            self._update_participant_instruction(kind="calib")
         elif self.state == ProtocolState.Main and self._pause_until_wall is None:
             self._update_participant_instruction(kind="main")
 
@@ -611,23 +621,7 @@ class ProtocolRunner:
             },
         )
 
-        self._reset_for_new_p300_block()
-        if int(self.cfg.p300_calib_trials) <= 0:
-            plog.info("калибровка P300 отключена (0 прогонов) — сразу основной блок")
-            self._begin_main_phase()
-        else:
-            self._set_state(ProtocolState.P300Calib, detail="preflight ok")
-            self._request_stim_p300_trial(
-                target_tile_id=int(self.cfg.calib_target_tile_id),
-                experiment_index=1,
-                experiment_total=int(self.cfg.p300_calib_trials),
-                label="Калибровка P300",
-            )
-            self.status_text = (
-                f"{self._status_progress_label()}: сбор шаблона P300, "
-                f"плитка {int(self.cfg.calib_target_tile_id)} — запуск прогона…"
-            )
-            plog.info(self.status_text)
+        self._begin_main_phase()
 
     def _pull_lsl(self) -> None:
         if self._inlet_eeg is None or self._inlet_markers is None or self._logger is None:
@@ -641,7 +635,8 @@ class ProtocolRunner:
             marker_chunk, marker_ts = self._inlet_markers.pull_chunk(timeout=0.0)
         if marker_ts:
             self._logger.write("markers_chunk", {"n": int(len(marker_ts))})
-            for sample in marker_chunk:
+            for sample, ts in zip(marker_chunk, marker_ts):
+                self._logger.record_marker(lsl_time=float(ts), sample=sample)
                 if parse_trial_end(sample):
                     self._p300_trial_end_seen = True
                     plog.event("LSL trial_end", sample=str(sample)[:80])
@@ -650,16 +645,35 @@ class ProtocolRunner:
                     self._p300_trial_armed = True
                     self._p300_trial_end_seen = False
                     plog.event("LSL trial_start", target=int(tid), sample=str(sample)[:80])
+                    item_mk = self._current_queue_item()
+                    self._logger.mark_experiment_start(
+                        kind="p300",
+                        phase=(
+                            str(item_mk.p300_phase)
+                            if item_mk is not None and item_mk.p300_phase
+                            else ("main" if self.state == ProtocolState.Main else "preflight")
+                        ),
+                        queue_index=int(self._main_queue_index)
+                        if self.state == ProtocolState.Main
+                        else None,
+                        cue_target_tile_id=int(tid),
+                    )
                     self._logger.write("protocol_trial_start_arm", {"cue_target_tile_id": int(tid)})
                     # Обновляем статус сразу на старте trial.
-                    if self.state == ProtocolState.P300Calib:
+                    item_mk = self._current_queue_item()
+                    if (
+                        self.state == ProtocolState.Main
+                        and item_mk is not None
+                        and item_mk.kind == "p300"
+                        and item_mk.p300_phase == "calib"
+                    ):
                         mode = "P300, калибровка"
                     elif self.state == ProtocolState.Main:
                         mode = "P300, AUC + шаблон"
                     else:
                         mode = "P300"
                     self.status_text = f"{self._status_progress_label()}: {mode}, целевая плитка={int(tid)}"
-            if self.state in (ProtocolState.P300Calib, ProtocolState.Main):
+            if self.state == ProtocolState.Main:
                 self._p300.ingest_marker_chunk(
                     marker_chunk=marker_chunk, marker_ts=marker_ts, lsl_local_clock_now=now_lc
                 )
@@ -675,13 +689,20 @@ class ProtocolRunner:
             self._p300.ingest_eeg_chunk(eeg_chunk=arr, eeg_ts=eeg_ts, lsl_local_clock_now=now_lc)
             self._ssvep.ingest_eeg_chunk(times=eeg_ts, samples=arr)
 
-        if self.state in (ProtocolState.P300Calib, ProtocolState.Main):
+        if self.state == ProtocolState.Main:
             extracted = self._p300.extract_ready_epochs()
         else:
             extracted = 0
         if extracted and self._logger is not None:
             self._logger.write("p300_epochs_extracted", {"n": int(extracted)})
-            if self.state == ProtocolState.P300Calib and not self._template_locked:
+            item_ep = self._current_queue_item()
+            if (
+                self.state == ProtocolState.Main
+                and item_ep is not None
+                and item_ep.kind == "p300"
+                and item_ep.p300_phase == "calib"
+                and not self._template_locked
+            ):
                 if self._p300.try_build_external_template_from_epochs(
                     min_epochs=int(self.cfg.template_warmup_target_epochs)
                 ):
@@ -738,6 +759,42 @@ class ProtocolRunner:
         if ok is False:
             return "неверно"
         return "нет решения"
+
+    def _p300_per_tile_metrics(self, dec_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
+        dbg = dec_dict.get("debug") if isinstance(dec_dict.get("debug"), dict) else {}
+        keys = dbg.get("stim_keys") or []
+        mode_used = str(dec_dict.get("mode_used") or "")
+        if mode_used == WINNER_MODE_TEMPLATE_CORR:
+            vals = dbg.get("template_corr_values") or dbg.get("final_metric_values")
+        else:
+            vals = dbg.get("abs_auc_values") or dbg.get("final_metric_values")
+        if not keys or vals is None:
+            return []
+        out: List[Dict[str, Any]] = []
+        for k, v in zip(keys, vals):
+            tid = stim_key_to_tile_digit(str(k))
+            out.append(
+                {
+                    "stim_key": str(k),
+                    "tile_id": int(tid) if tid is not None else None,
+                    "metric": float(v),
+                }
+            )
+        return out
+
+    def _p300_result_payload(self, dec_dict: Dict[str, Any]) -> Dict[str, Any]:
+        dbg = dec_dict.get("debug") if isinstance(dec_dict.get("debug"), dict) else {}
+        return {
+            "method": dec_dict.get("method"),
+            "can_decide": dec_dict.get("can_decide"),
+            "winner_tile_id": dec_dict.get("winner_tile_id"),
+            "winner_key": dec_dict.get("winner_key"),
+            "mode_used": dec_dict.get("mode_used"),
+            "min_epochs_per_class": dec_dict.get("min_epochs_per_class"),
+            "per_tile": self._p300_per_tile_metrics(dec_dict),
+            "margin": dbg.get("margin"),
+            "debug": dbg,
+        }
 
     def _log_p300_per_tile_metrics(self, method_label: str, dec_dict: Dict[str, Any], cue_tid: int) -> None:
         dbg = dec_dict.get("debug") if isinstance(dec_dict.get("debug"), dict) else {}
@@ -893,6 +950,14 @@ class ProtocolRunner:
             "cue_target_tile_id": cue_tid,
             "planned_target_tile_id": int(planned_tid) if planned_tid >= 0 else None,
             "ground_truth_tile_id": int(planned_tid) if planned_tid >= 0 else None,
+            "target": {
+                "tile_id_to_watch": int(cue_tid) if cue_tid >= 0 else None,
+                "planned_tile_id": int(planned_tid) if planned_tid >= 0 else None,
+            },
+            "results": {
+                "auc": self._p300_result_payload(auc_d),
+                "template_corr": self._p300_result_payload(tpl_d),
+            },
             "auc": auc_d,
             "template_corr": tpl_d,
             "methods_agree": bool(agree),
@@ -923,69 +988,28 @@ class ProtocolRunner:
             agree=bool(agree),
             queue_index=queue_index,
         )
-        self._p300.reset(params=self._p300.params)
-        self._p300_trial_armed = False
-        self._p300_trial_end_seen = False
-
-    def _run_p300_calib(self) -> None:
-        assert self._logger is not None
-        if not self._p300_trial_armed:
-            self.status_text = f"{self._status_progress_label()}: ждём trial_start (калибровка)…"
-            return
-        cue = self._p300.current_cue_target_id
-        if cue is None:
-            self.status_text = f"{self._status_progress_label()}: нет target в маркере…"
-            return
-        key = f"стимул_{int(cue)}"
-        n = len(self._p300.epochs_data.get(key, []))
-        self.status_text = (
-            f"{self._status_progress_label()}: плитка {cue}, эпох {n}/"
-            f"{self.cfg.template_warmup_target_epochs}"
-        )
-        if not self._finish_p300_trial_armed():
-            return
-
-        self._record_dual_p300_experiment(phase="calib")
-        self._p300_calib_trials_done += 1
-        template_ok = self._p300_template_ready()
-        calib_done = (
-            template_ok
-            or int(self._p300_calib_trials_done) >= int(self.cfg.p300_calib_trials)
-        )
-        if not calib_done:
-            nxt = int(self._p300_calib_trials_done) + 1
-            self._request_stim_p300_trial(
-                target_tile_id=int(self.cfg.calib_target_tile_id),
-                experiment_index=nxt,
-                experiment_total=int(self.cfg.p300_calib_trials),
-                label="Калибровка P300",
-            )
-            self.status_text = (
-                f"Калибровка: прогон {self._p300_calib_trials_done}/"
-                f"{self.cfg.p300_calib_trials}, шаблон={'да' if template_ok else 'нет'} — "
-                f"следующий прогон…"
-            )
-            return
-
-        if not template_ok:
-            plog.warn("калибровка завершена по числу trial, шаблон не собран — template_corr может быть слабым")
-        self._template_locked = True
-        self._logger.write(
-            "calibration_done",
-            {
-                "trials": int(self._p300_calib_trials_done),
-                "template_ready": bool(template_ok),
-                "target_tile_id": int(self._p300.external_template_target_id or self.cfg.calib_target_tile_id),
-            },
-        )
-        self._begin_main_phase()
+        keep_epochs = False
+        if phase == "calib" and queue_index is not None:
+            nxt_i = int(queue_index) + 1
+            if nxt_i < len(self._main_queue):
+                nxt = self._main_queue[nxt_i]
+                keep_epochs = nxt.kind == "p300" and nxt.p300_phase == "calib"
+        if keep_epochs:
+            self._p300_trial_armed = False
+            self._p300_trial_end_seen = False
+        else:
+            self._p300.reset(params=self._p300.params)
+            self._p300_trial_armed = False
+            self._p300_trial_end_seen = False
 
     def _begin_main_phase(self) -> None:
         assert self._logger is not None
         n_lamps = max(1, len(self._active_ssvep_freqs_hz()))
         seed_cfg = int(self.cfg.shuffle_seed)
         seed_arg: Optional[int] = None if seed_cfg < 0 else seed_cfg
-        self._main_queue, self._shuffle_seed_used = build_main_queue(
+        self._main_queue, self._shuffle_seed_used, self._main_block_order = build_main_queue(
+            p300_calib_trials=int(self.cfg.p300_calib_trials),
+            calib_target_tile_id=int(self.cfg.calib_target_tile_id),
             p300_trials=int(self.cfg.p300_main_trials),
             ssvep_continuous=int(self.cfg.ssvep_blocks_per_mode),
             ssvep_burst=int(self.cfg.ssvep_blocks_per_mode),
@@ -993,15 +1017,26 @@ class ProtocolRunner:
             shuffle_seed=seed_arg,
         )
         self._main_queue_index = 0
-        self._reset_for_new_p300_block()
-        self._set_state(ProtocolState.Main, detail="calibration done")
+        self._template_locked = False
+        self._p300_calib_trials_done = 0
+        self._p300_main_trials_done = 0
+        self._set_state(ProtocolState.Main, detail="main queue ready")
         plan_log = {
             "shuffle_seed": int(self._shuffle_seed_used or 0),
+            "block_order": list(self._main_block_order),
+            "block_order_ru": format_block_order_ru(self._main_block_order),
             "summary": queue_summary(self._main_queue),
             "queue": [x.to_dict() for x in self._main_queue],
         }
         self._logger.write("main_queue_ready", plan_log)
-        plog.info(f"=== MAIN очередь ({len(self._main_queue)}): seed={self._shuffle_seed_used} ===")
+        plog.info(
+            f"=== MAIN ({len(self._main_queue)} эксп.): порядок блоков — "
+            f"{format_block_order_ru(self._main_block_order)}; seed={self._shuffle_seed_used} ==="
+        )
+        plog.info(
+            "Блок P300: калибровка и main подряд; между trial P300 паузы нет. "
+            "Порядок трёх макро-блоков — по seed."
+        )
         stim_ctl.write_paused(
             self._logger.session_dir,
             reason="main_start",
@@ -1037,10 +1072,18 @@ class ProtocolRunner:
                 )
                 self._update_participant_instruction(kind="pause", pause_message="Перед P300")
             else:
+                if int(item.p300_block_index or 0) == 1:
+                    self._reset_for_new_p300_block()
+                    self._template_locked = False
                 self._set_state(ProtocolState.Main, detail="p300 item")
                 self._sync_stim_control(item)
-                self.status_text = f"{label}: P300 — смотрите на плитку {int(item.target_tile_id or 0)}…"
-                self._update_participant_instruction(kind="p300")
+                phase_ru = "калибровка" if item.p300_phase == "calib" else "main"
+                self.status_text = (
+                    f"{label}: P300 ({phase_ru}) — плитка {int(item.target_tile_id or 0)}…"
+                )
+                self._update_participant_instruction(
+                    kind="calib" if item.p300_phase == "calib" else "p300"
+                )
             return
         mode = str(item.ssvep_mode or "continuous")
         lamp0 = self._ssvep_target_lamp_0idx_for_item(item)
@@ -1064,12 +1107,20 @@ class ProtocolRunner:
                 plog.exc("_start_ssvep_block", e)
 
     def _complete_main_queue_item(self) -> None:
+        prev_i = int(self._main_queue_index)
+        prev_item = self._main_queue[prev_i] if 0 <= prev_i < len(self._main_queue) else None
         self._main_queue_index += 1
         if self._main_queue_index >= len(self._main_queue):
             self.clear_ssvep_display()
             self._set_state(ProtocolState.Finalize, detail="main done")
             return
-        self._advance_to_current_queue_item(start_pause=True)
+        nxt = self._main_queue[self._main_queue_index]
+        start_pause = not (
+            prev_item is not None
+            and nxt.kind == "p300"
+            and prev_item.kind == "p300"
+        )
+        self._advance_to_current_queue_item(start_pause=start_pause)
 
     def _run_main_queue_item(self) -> None:
         item = self._current_queue_item()
@@ -1085,16 +1136,55 @@ class ProtocolRunner:
         if self._p300.current_cue_target_id is None:
             self.status_text = f"{self._status_progress_label()}: P300 — нет target…"
             return
+        phase = str(item.p300_phase or "main")
+        if phase == "calib":
+            cue = self._p300.current_cue_target_id
+            if cue is not None:
+                key = f"стимул_{int(cue)}"
+                n_ep = len(self._p300.epochs_data.get(key, []))
+                self.status_text = (
+                    f"{self._status_progress_label()}: плитка {cue}, эпох "
+                    f"{n_ep}/{self.cfg.template_warmup_target_epochs}"
+                )
         if not self._finish_p300_trial_armed():
-            self.status_text = (
-                f"{self._status_progress_label()}: P300 — накопление эпох…"
-            )
+            if phase != "calib":
+                self.status_text = (
+                    f"{self._status_progress_label()}: P300 — накопление эпох…"
+                )
             return
         self._record_dual_p300_experiment(
-            phase="main",
+            phase=phase,
             queue_index=int(self._main_queue_index),
         )
-        self._p300_main_trials_done += 1
+        if phase == "calib":
+            self._p300_calib_trials_done += 1
+            nxt_i = int(self._main_queue_index) + 1
+            calib_continues = (
+                nxt_i < len(self._main_queue)
+                and self._main_queue[nxt_i].kind == "p300"
+                and self._main_queue[nxt_i].p300_phase == "calib"
+            )
+            if not calib_continues:
+                template_ok = self._p300_template_ready()
+                if not template_ok:
+                    plog.warn(
+                        "калибровка завершена по числу trial, шаблон не собран — "
+                        "template_corr может быть слабым"
+                    )
+                self._template_locked = True
+                self._logger.write(
+                    "calibration_done",
+                    {
+                        "trials": int(self._p300_calib_trials_done),
+                        "template_ready": bool(template_ok),
+                        "target_tile_id": int(
+                            self._p300.external_template_target_id
+                            or self.cfg.calib_target_tile_id
+                        ),
+                    },
+                )
+        else:
+            self._p300_main_trials_done += 1
         self._complete_main_queue_item()
 
     def _on_migalka_event(self, ev: Tuple[int, bool, str]) -> None:
@@ -1103,6 +1193,8 @@ class ProtocolRunner:
         # Use local clock as lsl_time surrogate; LSL mirror is sent separately.
         self._ssvep.ingest_migalka_marker(lsl_time=float(lsl_local_clock()), value=f"{100+int(lamp)}|{'on' if is_on else 'off'}")
         if self._logger is not None:
+            val = f"{100 + int(lamp)}|{'on' if is_on else 'off'}"
+            self._logger.record_marker(lsl_time=float(lsl_local_clock()), sample=val)
             self._logger.write("migalka_led", {"lamp": int(lamp), "on": bool(is_on), "raw": str(raw)})
 
     def _start_ssvep_block(self, *, mode: str, lamp_0idx: Optional[int] = None) -> None:
@@ -1110,7 +1202,7 @@ class ProtocolRunner:
         plog.info(f"=== SSVEP block START mode={mode!r} COM={self.cfg.com_port!r} ===")
         active_freqs = self._active_ssvep_freqs_hz()
         n_lamps = max(1, len(active_freqs))
-        fs_hz = float(self._eeg_nominal_fs_hz or self.cfg.ssvep_fs_hz)
+        fs_hz = float(self.cfg.ssvep_fs_hz)
         self._ssvep.reset(
             params=SSVEPParams(
                 fs_hz=fs_hz,
@@ -1177,9 +1269,19 @@ class ProtocolRunner:
             f"{self._status_progress_label()}: ССВП ({sm}), лампа {int(self._ssvep_target_lamp)} — "
             f"0/{self.cfg.ssvep_block_sec:.0f} с"
         )
+        freqs = [float(x) for x in self._active_ssvep_freqs_hz()]
+        item = self._current_queue_item()
+        self._logger.mark_experiment_start(
+            kind="ssvep",
+            phase="main",
+            queue_index=int(self._main_queue_index),
+            ssvep_mode=str(mode),
+            cue_target_lamp_0idx=int(self._ssvep_target_lamp) if self._ssvep_target_lamp is not None else None,
+            freqs_hz=freqs,
+        )
         self._logger.write(
             "ssvep_block_start",
-            {"mode": str(mode), "target_lamp": int(self._ssvep_target_lamp), "freqs_hz": [float(x) for x in self.cfg.ssvep_freqs_hz]},
+            {"mode": str(mode), "target_lamp": int(self._ssvep_target_lamp), "freqs_hz": freqs},
         )
 
     def _run_ssvep_blocks(self, *, mode: str) -> None:
@@ -1268,6 +1370,20 @@ class ProtocolRunner:
         self._logger.append_ssvep_block(rec)
         self._logger.write("ssvep_block_end", rec)
         cue_lamp = int(self._ssvep_target_lamp) if self._ssvep_target_lamp is not None else None
+        freqs = [float(x) for x in self._active_ssvep_freqs_hz()]
+        coef_by_lamp: List[Dict[str, Any]] = []
+        if dec.coef:
+            for i, c in enumerate(dec.coef):
+                coef_by_lamp.append(
+                    {
+                        "lamp_0idx": int(i),
+                        "lamp_1based": int(i) + 1,
+                        "freq_hz": float(freqs[i]) if i < len(freqs) else None,
+                        "coef": float(c),
+                        "is_target": cue_lamp is not None and int(i) == int(cue_lamp),
+                        "is_winner": dec.winner_0idx is not None and int(i) == int(dec.winner_0idx),
+                    }
+                )
         exp_rec = {
             "phase": "main",
             "kind": "ssvep",
@@ -1276,6 +1392,22 @@ class ProtocolRunner:
             "cue_target_lamp_0idx": cue_lamp,
             "cue_target_lamp_1based": int(cue_lamp) + 1 if cue_lamp is not None else None,
             "ground_truth_lamp_0idx": cue_lamp,
+            "target": {
+                "lamp_0idx": cue_lamp,
+                "lamp_1based": int(cue_lamp) + 1 if cue_lamp is not None else None,
+                "freq_hz": float(freqs[cue_lamp]) if cue_lamp is not None and cue_lamp < len(freqs) else None,
+            },
+            "results": {
+                "msi": {
+                    "winner_1based": dec.winner_1based,
+                    "winner_0idx": dec.winner_0idx,
+                    "coef": dec.coef,
+                    "coef_by_lamp": coef_by_lamp,
+                    "classify_allowed": bool(dec.classify_allowed),
+                    "mode": dec.mode,
+                    "debug": dec.debug,
+                }
+            },
             "winner_1based": dec.winner_1based,
             "winner_0idx": dec.winner_0idx,
             "correct": (
@@ -1286,6 +1418,7 @@ class ProtocolRunner:
             "coef": dec.coef,
             "classify_allowed": bool(dec.classify_allowed),
             "debug": dec.debug,
+            "freqs_hz": freqs,
         }
         self._logger.append_experiment(exp_rec)
         self._log_ssvep_msi_result(
