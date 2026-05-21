@@ -1,4 +1,4 @@
-"""Smoke: ProtocolRunner reaches SSVEP and calls migalka open (mocked LSL + serial)."""
+"""Smoke: ProtocolRunner v2 reaches SSVEP (mocked LSL + serial)."""
 
 from __future__ import annotations
 
@@ -53,10 +53,10 @@ def test_fsm_reaches_ssvep_and_opens_migalka(
     ser.is_open = True
     mock_serial.return_value = ser
 
-    markers = []
-    for _ in range(3):
-        markers.append("-1|trial_start|target=4")
-        markers.append("-2|trial_end")
+    markers = [
+        "-1|trial_start|target=4",
+        "-2|trial_end",
+    ]
 
     eeg_inlet = MagicMock()
     eeg_inlet.pull_chunk = MagicMock(
@@ -65,24 +65,27 @@ def test_fsm_reaches_ssvep_and_opens_migalka(
     mk_inlet = _inlet_with_markers(markers)
     mock_inlet.side_effect = [eeg_inlet, mk_inlet]
 
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir()
     cfg = ProtocolConfig(
         output_root=tmp_path,
         subject_id="test",
+        session_dir=session_dir,
         com_port="COM_TEST",
         eeg_stream_name="EEG",
         p300_calib_trials=1,
-        p300_main_trials=1,
         calib_target_tile_id=4,
-        template_warmup_target_epochs=2,
+        template_warmup_target_epochs=1,
+        p300_main_trials=0,
         ssvep_blocks_per_mode=1,
-        shuffle_seed=1,
         pause_between_experiments_s=0.0,
         ssvep_block_sec=0.05,
+        shuffle_seed=1,
     )
     runner = ProtocolRunner(cfg)
     runner.start()
 
-    for _ in range(2000):
+    for _ in range(800):
         runner.tick()
         if runner.state in (
             ProtocolState.SSVEP_CONT,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Операторский GUI гибридного протокола (60 прогонов: P300×2 + SSVEP×2)."""
+"""Операторский GUI гибридного протокола v2 (калибровка → 45 экспериментов)."""
 
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ if str(_ROOT) not in sys.path:
 
 from experiment_protocol.protocol_log import info as plog_info  # noqa: E402
 from experiment_protocol.protocol_runner import ProtocolConfig, ProtocolRunner  # noqa: E402
-from experiment_protocol.ssvep_cue_overlay import SsvepCueOverlay  # noqa: E402
 from experiment_protocol.unified_logger import UnifiedExperimentLogger  # noqa: E402
+from experiment_protocol.ssvep_cue_overlay import SsvepCueOverlay  # noqa: E402
 from p300_analysis.analysis_profiles import (  # noqa: E402
     ANALYSIS_PROFILE_GENERAL,
     ANALYSIS_PROFILE_RECENT,
@@ -120,7 +120,7 @@ def _selected_channels_0idx(checkboxes: list[QCheckBox]) -> tuple[int, ...]:
 class ProtocolRunnerWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Гибридный протокол v2 (калибровка + 45 случайных)")
+        self.setWindowTitle("Гибридный протокол (P300×2 + SSVEP×2)")
         self.setMinimumWidth(720)
         self.resize(760, 640)
 
@@ -257,8 +257,7 @@ class ProtocolRunnerWidget(QWidget):
         self.spin_calib_trials.setRange(1, 50)
         self.spin_calib_trials.setValue(3)
         self.spin_calib_trials.setToolTip(
-            "Подряд в начале: прогоны P300 на одной плитке для эталона. "
-            "Обычно хватает 3 прогонов (12 эпох на плитку); раньше — если шаблон уже собран."
+            "Подряд в начале: прогоны P300 на одной плитке для эталона."
         )
 
         self.spin_calib_target = QSpinBox()
@@ -268,15 +267,12 @@ class ProtocolRunnerWidget(QWidget):
         self.spin_template_epochs = QSpinBox()
         self.spin_template_epochs.setRange(4, 50)
         self.spin_template_epochs.setValue(12)
-        self.spin_template_epochs.setToolTip(
-            "Минимум эпох по целевой плитке для эталона. При 12 sequences в прогоне часто хватает 1–3 прогонов."
-        )
 
         self.spin_p300_main = QSpinBox()
         self.spin_p300_main.setRange(1, 200)
         self.spin_p300_main.setValue(15)
         self.spin_p300_main.setToolTip(
-            "В основном блоке: каждый прогон P300 даёт решение AUC и сравнение с шаблоном (один trial)."
+            "В основном блоке: каждый прогон P300 — AUC и сравнение с шаблоном (один trial)."
         )
 
         self.spin_ssvep = QSpinBox()
@@ -293,7 +289,7 @@ class ProtocolRunnerWidget(QWidget):
         self.spin_shuffle_seed = QSpinBox()
         self.spin_shuffle_seed.setRange(-1, 2_000_000_000)
         self.spin_shuffle_seed.setValue(-1)
-        self.spin_shuffle_seed.setToolTip("-1 = новый случайный порядок при каждом запуске; иначе фиксированный seed.")
+        self.spin_shuffle_seed.setToolTip("-1 = новый случайный порядок при каждом запуске.")
 
         self.spin_ssvep_block_sec = QDoubleSpinBox()
         self.spin_ssvep_block_sec.setRange(1.0, 120.0)
@@ -312,7 +308,6 @@ class ProtocolRunnerWidget(QWidget):
         stim_box = QGroupBox("Стимулятор P300 (PsychoPy, авто-режим)")
         stim_form = QFormLayout(stim_box)
 
-        # Stimulator (PsychoPy) auto-mode parameters
         self.spin_inter_trial = QDoubleSpinBox()
         self.spin_inter_trial.setRange(0.0, 30.0)
         self.spin_inter_trial.setDecimals(1)
@@ -324,15 +319,17 @@ class ProtocolRunnerWidget(QWidget):
         self.spin_sequences.setValue(12)
 
         self.chk_run_stimulus = QCheckBox(
-            "Запускать экранную стимуляцию (PsychoPy, случайная цель, без клика START)"
+            "Запускать экранную стимуляцию (PsychoPy, без кнопки START)"
         )
         self.chk_run_stimulus.setChecked(True)
         self.chk_run_stimulus.setToolTip(
-            "Запускает run_app.py в авто-режиме (случайная цель, без кнопки «Старт» на экране).\n"
-            "Первые прогоны можно задать с фиксированной плиткой для шаблона (параметры плана AUC).\n"
-            "Нужен установленный PsychoPy.\n"
-            "Маркеры trial_start/target уходят в LSL, как при ручном запуске."
+            "PsychoPy в авто-режиме: все P300 (калибровка и main) по stim_control.json.\n"
+            "Между SSVEP окно плиток закрывается — подсказки только в SsvepCueOverlay."
         )
+
+        stim_form.addRow("Пауза между trial P300 (с):", self.spin_inter_trial)
+        stim_form.addRow("Последовательностей в прогоне:", self.spin_sequences)
+        stim_form.addRow("", self.chk_run_stimulus)
 
         form.addRow("ID испытуемого:", self.ed_subject)
         form.addRow("Папка результатов:", self.ed_output)
@@ -341,17 +338,14 @@ class ProtocolRunnerWidget(QWidget):
 
         scroll_layout.addLayout(form)
         scroll_layout.addWidget(proto_box)
-        stim_form.addRow("Пауза между прогонами стимулятора (с):", self.spin_inter_trial)
-        stim_form.addRow("Последовательностей в одном прогоне:", self.spin_sequences)
-        stim_form.addRow("", self.chk_run_stimulus)
         scroll_layout.addWidget(stim_box)
         scroll_layout.addWidget(migalka_box)
         scroll_layout.addWidget(ssvep_box)
         scroll_layout.addWidget(p300_box)
 
         self.lbl_settings_hint = QLabel(
-            "Фаза 1: калибровка P300 (подряд, фикс. плитка). Фаза 2: 15 P300 + 15 SSVEP cont + 15 SSVEP burst "
-            "в случайном порядке; каждый P300 — AUC и шаблон; логи: experiments.ndjson. Консоль: [protocol]."
+            "Поток ЭЭГ — запись и онлайн-анализ; COM и частоты — мигалка; каналы — ROI для P300/ССВП. "
+            "Перед стартом проверьте ЭЭГ кнопкой «Проверить». Консоль: [protocol]."
         )
         self.lbl_settings_hint.setWordWrap(True)
         self.lbl_settings_hint.setStyleSheet("color: #555; font-size: 11px;")
@@ -764,8 +758,7 @@ class ProtocolRunnerWidget(QWidget):
                         str(session_dir),
                 ]
                 plog_info(
-                    "запуск стимулятора (все P300 по stim_control: калибровка + main): "
-                    + " ".join(stim_args)
+                    "запуск стимулятора (P300 по stim_control): " + " ".join(stim_args)
                 )
                 self._stimulus_proc = subprocess.Popen(
                     stim_args,
