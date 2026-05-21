@@ -115,6 +115,17 @@ def _resolve_dotnet_root() -> Path | None:
 
 
 def _configure_coreclr(dotnet_root: Path) -> None:
+    """Настроить CoreCLR один раз на процесс (pythonnet.set_runtime нельзя вызывать повторно)."""
+    try:
+        import pythonnet
+    except ImportError as e:
+        raise RuntimeError(
+            "Не установлен pythonnet / clr_loader. Установите зависимости: pip install -r requirements.txt"
+        ) from e
+    if pythonnet._RUNTIME is not None or pythonnet._LOADED:
+        _debug("CoreCLR runtime already configured; skipping set_runtime")
+        import clr  # noqa: F401,WPS433
+        return
     _debug(f"configuring CoreCLR runtime (DOTNET_ROOT={dotnet_root})")
     try:
         from clr_loader import get_coreclr

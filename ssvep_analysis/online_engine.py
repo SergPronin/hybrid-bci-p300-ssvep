@@ -48,11 +48,11 @@ class SSVEPOnlineEngine:
         if params is not None:
             self.params = params
         self._burst_gate = BurstGate(BurstGateConfig(window_sec=float(self.params.window_sec)))
-        self._msi = None
-        self._models = None
         self._n_samples = int(round(float(self.params.fs_hz) * float(self.params.window_sec)))
         self._buf_t = []
         self._buf_x = []
+        if self._msi is not None:
+            self._apply_templates()
 
     def ensure_msi_ready(self) -> None:
         if self._msi is not None:

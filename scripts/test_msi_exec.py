@@ -159,8 +159,14 @@ def build_model_signal_list(msi, numpy_templates: Sequence[np.ndarray], *, verbo
     return lst
 
 
+_MSI_RUNTIME_CACHE: tuple | None = None
+
+
 def load_msi_runtime():
     """Та же последовательность, что в test_msi_import.main до создания MSI (без печати «ok»)."""
+    global _MSI_RUNTIME_CACHE
+    if _MSI_RUNTIME_CACHE is not None:
+        return _MSI_RUNTIME_CACHE
     msi_res = tmi._msi_res()
     msi_dll = (msi_res / "MSIController.dll").resolve()
     if not msi_dll.is_file():
@@ -183,7 +189,8 @@ def load_msi_runtime():
     tmi._add_reference(clr, msi_dll)
     MSI = tmi._import_msi_type(clr)
     msi = MSI()
-    return msi, msi_res, dotnet_root
+    _MSI_RUNTIME_CACHE = (msi, msi_res, dotnet_root)
+    return _MSI_RUNTIME_CACHE
 
 
 def _format_coef_for_log(msi) -> str:
