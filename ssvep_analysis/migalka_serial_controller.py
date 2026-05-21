@@ -11,15 +11,11 @@ from ssvep_analysis.burst_gate import parse_led_serial_line
 from ssvep_analysis.migalka_lsl import MigalkaLslSender
 
 try:
-    from experiment_protocol.protocol_log import error as _log_error
     from experiment_protocol.protocol_log import info as _log_info
 except Exception:  # pragma: no cover
 
     def _log_info(msg: str) -> None:
         print(f"[migalka] {msg}", flush=True)
-
-    def _log_error(msg: str) -> None:
-        print(f"[migalka] ERROR {msg}", flush=True)
 
 
 @dataclass(frozen=True)
@@ -29,7 +25,6 @@ class MigalkaConfig:
     timeout_s: float = 0.1
     # Migalka protocol: "M <mode>" where 0=continuous, 1=burst (as in migalka.py)
     mode: int = 0
-    # six lamp frequency labels (strings), e.g. "10.0" or "0"
     freqs: Tuple[str, str, str, str, str, str] = ("0", "0", "0", "0", "0", "0")
 
 
@@ -52,89 +47,92 @@ class MigalkaSerialController:
         self._thread: Optional[threading.Thread] = None
         self._on_event = on_event
         self._lsl = MigalkaLslSender() if mirror_lsl else None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._last_mode: Optional[int] = None
 
     def is_open(self) -> bool:
         return self._ser is not None and bool(getattr(self._ser, "is_open", False))
 
+    def _write_line(self, line: str) -> None:
+        if not self.is_open():
+            return
+        assert self._ser is not None
+        payload = (line.strip() + "\n").encode("utf-8")
+        self._ser.write(payload)
+        self._ser.flush()
+
+    def _send_mode(self, mode: int) -> None:
+        m = 0 if int(mode) <= 0 else 1
+        self._write_line(f"M {m}")
+        self._last_mode = int(m)
+
+    def _send_freqs(self, freqs: Sequence[str]) -> None:
+        vals = [str(x).strip().replace(",", ".") for x in freqs]
+        if len(vals) != 6:
+            raise ValueError("Migalka expects 6 frequency values")
+        self._write_line(" ".join(vals))
+
     def _apply_config(self, cfg: MigalkaConfig) -> None:
-        """Режим M до частот — иначе Due мигает постоянным одну «сессию»."""
+        """Постоянный: M0 + частоты. Пакетный: M1 + (опц. нули) + частоты."""
         m = 0 if int(cfg.mode) <= 0 else 1
         self._send_mode(m)
-        time.sleep(0.08 if m == 1 else 0.05)
-        self._send_freqs(_OFF6)
-        time.sleep(0.05)
+        time.sleep(0.06)
         if m == 1:
-            self._send_mode(1)
+            self._send_freqs(_OFF6)
             time.sleep(0.05)
         self._send_freqs(cfg.freqs)
+        _log_info(f"apply: M {m}, freqs={' '.join(cfg.freqs)}")
 
-    def prepare_burst_handoff(self) -> None:
-        """После непрерывного ССВП: M1 + выкл, порт не закрываем (без reset Due)."""
-        with self._lock:
-            if not self.is_open():
-                _log_info("prepare_burst_handoff: порт закрыт")
-                return
-            _log_info("prepare_burst_handoff: M 1, лампы 0, COM остаётся открыт")
-            self._send_mode(1)
-            time.sleep(0.08)
-            self._send_mode(1)
-            time.sleep(0.05)
-            self._send_freqs(_OFF6)
+    def _ensure_reader_thread(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._read_loop, name="MigalkaSerialReader", daemon=True)
+        self._thread.start()
 
-    def reconfigure(self, cfg: MigalkaConfig) -> None:
-        with self._lock:
-            if not self.is_open():
-                self.open_and_start(cfg)
-                return
-            _log_info(
-                f"reconfigure: mode={cfg.mode} "
-                f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'}), freqs={cfg.freqs}"
-            )
-            self._apply_config(cfg)
+    def _open_port(self, cfg: MigalkaConfig) -> None:
+        _log_info(
+            f"открываем COM {cfg.port!r} baud={cfg.baudrate}, mode={cfg.mode} "
+            f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'})"
+        )
+        self._ser = serial.Serial(cfg.port, cfg.baudrate, timeout=cfg.timeout_s)
+        time.sleep(0.5)
+        self._running = True
+        self._ensure_reader_thread()
 
     def open_and_start(self, cfg: MigalkaConfig) -> None:
         with self._lock:
             if self.is_open():
-                _log_info(
-                    f"COM уже открыт — перенастройка mode={cfg.mode} "
-                    f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'}), freqs={cfg.freqs}"
-                )
+                _log_info("COM уже открыт — только apply_config")
                 self._apply_config(cfg)
                 return
-            _log_info(
-                f"открываем COM {cfg.port!r} baud={cfg.baudrate}, mode={cfg.mode} "
-                f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'}), freqs={cfg.freqs}"
-            )
-            self._ser = serial.Serial(
-                cfg.port,
-                cfg.baudrate,
-                timeout=cfg.timeout_s,
-                dsrdtr=False,
-                rtscts=False,
-            )
-            try:
-                self._ser.dtr = False
-                self._ser.rts = False
-            except Exception:
-                pass
-            self._running = True
-            m = 0 if int(cfg.mode) <= 0 else 1
-            self._send_mode(m)
-            time.sleep(0.1)
+            self._open_port(cfg)
             self._apply_config(cfg)
-            _log_info(f"команды отправлены: M {cfg.mode}, freqs={' '.join(cfg.freqs)}")
-            self._thread = threading.Thread(target=self._read_loop, name="MigalkaSerialReader", daemon=True)
-            self._thread.start()
-            _log_info("read_loop запущен")
+
+    def reconfigure(self, cfg: MigalkaConfig) -> None:
+        with self._lock:
+            if not self.is_open():
+                self._open_port(cfg)
+            self._apply_config(cfg)
+
+    def standby_burst_between_phases(self) -> None:
+        """После последнего continuous-блока: M1, лампы выкл, порт остаётся открыт."""
+        with self._lock:
+            if not self.is_open():
+                _log_info("standby_burst: порт закрыт")
+                return
+            _log_info("standby_burst: M1, лампы 0, без закрытия COM")
+            self._send_mode(1)
+            time.sleep(0.06)
+            self._send_freqs(_OFF6)
 
     def stop_and_close(self) -> None:
         with self._lock:
             _log_info("stop_and_close")
             self._running = False
             try:
-                self._send_freqs(_OFF6)
-                time.sleep(0.05)
+                if self.is_open():
+                    self._send_freqs(_OFF6)
+                    time.sleep(0.1)
             except Exception:
                 pass
             try:
@@ -143,36 +141,15 @@ class MigalkaSerialController:
             except Exception:
                 pass
             self._ser = None
+            self._last_mode = None
 
     def set_mode(self, mode: int) -> None:
-        self._send_mode(mode)
+        with self._lock:
+            self._send_mode(mode)
 
     def set_freqs(self, freqs: Sequence[str]) -> None:
-        tup = tuple(str(x) for x in freqs)
-        if len(tup) != 6:
-            raise ValueError("Migalka expects 6 frequency values")
-        self._send_freqs(tup)  # type: ignore[arg-type]
-
-    def _write_line(self, line: str) -> None:
-        if not self.is_open():
-            return
-        assert self._ser is not None
-        self._ser.write((line.strip() + "\n").encode("utf-8"))
-        self._ser.flush()
-
-    def _send_mode(self, mode: int) -> None:
-        if not self.is_open():
-            return
-        m = 0 if int(mode) <= 0 else 1
-        self._write_line(f"M {m}")
-
-    def _send_freqs(self, freqs: Sequence[str]) -> None:
-        if not self.is_open():
-            return
-        vals = [str(x).strip().replace(",", ".") for x in freqs]
-        if len(vals) != 6:
-            raise ValueError("Migalka expects 6 frequency values")
-        self._write_line(" ".join(vals))
+        with self._lock:
+            self._send_freqs(freqs)
 
     def _emit_event(self, lamp: int, is_on: bool, raw_line: str) -> None:
         ev: LampEvent = (int(lamp), bool(is_on), str(raw_line))

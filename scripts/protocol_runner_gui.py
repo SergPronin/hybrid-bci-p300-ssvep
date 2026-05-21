@@ -702,6 +702,7 @@ class ProtocolRunnerWidget(QWidget):
             ssvep_roi_channels_0idx=ssvep_roi,
         )
         self._runner = ProtocolRunner(cfg)
+        self._runner.set_ssvep_display_clear_callback(self._restore_operator_window)
         ch_log = ",".join(str(c + 1) for c in roi) if roi else "ALL"
         ssvep_ch_log = ",".join(str(c + 1) for c in ssvep_roi) if ssvep_roi else "ALL"
         plog_info(
@@ -721,16 +722,24 @@ class ProtocolRunnerWidget(QWidget):
         if self._ssvep_cue_overlay is not None:
             ov = self._ssvep_cue_overlay
             self._ssvep_cue_overlay = None
-            ov.hide_overlay()
+            ov.setVisible(False)
+            ov.hide()
             ov.close()
             ov.deleteLater()
-        if self._runner is not None:
-            self._runner.clear_ssvep_display()
         QApplication.processEvents()
 
     def _restore_operator_window(self) -> None:
         """После ССВП — снова окно настроек поверх чёрного оверлея."""
-        self._dismiss_ssvep_overlay()
+        if self._runner is not None:
+            self._runner.ssvep_blackout_visible = False
+            self._runner.ssvep_cue_visible = False
+        if self._ssvep_cue_overlay is not None:
+            ov = self._ssvep_cue_overlay
+            self._ssvep_cue_overlay = None
+            ov.setVisible(False)
+            ov.hide()
+            ov.close()
+            ov.deleteLater()
         self.showNormal()
         self.show()
         self.raise_()
@@ -742,7 +751,7 @@ class ProtocolRunnerWidget(QWidget):
             self._dismiss_ssvep_overlay()
             return
         if self._runner.state in ("finalize", "stopped"):
-            self._dismiss_ssvep_overlay()
+            self._restore_operator_window()
             return
         if bool(self._runner.ssvep_blackout_visible):
             if self._ssvep_cue_overlay is None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -149,6 +149,10 @@ class ProtocolRunner:
         self.ssvep_cue_freq_hz: float = 0.0
         self.ssvep_cue_mode_label: str = ""
         self.ssvep_blackout_visible: bool = False
+        self._on_ssvep_display_clear: Optional[Callable[[], None]] = None
+
+    def set_ssvep_display_clear_callback(self, cb: Optional[Callable[[], None]]) -> None:
+        self._on_ssvep_display_clear = cb
 
     def _set_ssvep_blackout(self, visible: bool) -> None:
         self.ssvep_blackout_visible = bool(visible)
@@ -159,6 +163,11 @@ class ProtocolRunner:
         """Сброс флагов оверлея (чёрный экран / подсказка ССВП)."""
         self._set_ssvep_blackout(False)
         self._set_ssvep_cue_overlay(ssvep_mode=None)
+        if self._on_ssvep_display_clear is not None:
+            try:
+                self._on_ssvep_display_clear()
+            except Exception:
+                pass
 
     @property
     def pause_active(self) -> bool:
@@ -671,7 +680,7 @@ class ProtocolRunner:
         )
         try:
             if str(mode) == "burst" and self._migalka.is_open():
-                plog.info("ССВП пакетный: перенастройка COM без переоткрытия (без reset Due)")
+                plog.info("ССВП пакетный: COM уже открыт после continuous — reconfigure без reset")
                 self._migalka.reconfigure(mcfg)
             else:
                 try:
@@ -759,9 +768,9 @@ class ProtocolRunner:
         )
         if cont_handoff_burst:
             try:
-                self._migalka.prepare_burst_handoff()
+                self._migalka.standby_burst_between_phases()
             except Exception as e:
-                plog.exc("prepare_burst_handoff", e)
+                plog.exc("standby_burst_between_phases", e)
                 try:
                     self._migalka.stop_and_close()
                 except Exception:

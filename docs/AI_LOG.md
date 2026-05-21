@@ -2,6 +2,16 @@
 
 ---
 
+## 2026-05-21 — Полный аудит ССВП: continuous не мигал, burst вспышка, чёрный экран
+
+**Найдено:** (1) `_apply_config` для постоянного слал `0 0 0 0 0 0` перед рабочими частотами — лампы не мигали; (2) `reconfigure()` → `open_and_start()` под одним `Lock` = **deadlock**, пакетный блок зависал; (3) рекурсия `clear_ssvep_display` ↔ `_restore_operator_window`; (4) `_finalize` не в том же tick.
+
+**Исправление:** migalka на `RLock`, постоянный = `M0` + freqs; пакетный = `M1` + off + freqs; `standby_burst_between_phases` без закрытия COM; callback `set_ssvep_display_clear_callback`; тесты `test_migalka_ssvep_sequence.py`, `test_ssvep_display_fsm.py`.
+
+**GitNexus risk:** LOW.
+
+---
+
 ## 2026-05-20 — Пакетный ССВП: режим M1 + снятие чёрного экрана в конце
 
 **Проблемы:** пакетный режим мигал как постоянный (COM уже открыт — `open_and_start` не слал `M 1`); чёрный экран оставался после конца протокола.
