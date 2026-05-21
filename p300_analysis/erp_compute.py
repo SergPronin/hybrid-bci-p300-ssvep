@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from p300_analysis.cca_algorithm import compute_cca_scores
 from p300_analysis.constants import MIN_EPOCHS_TO_DECIDE
 from p300_analysis.marker_parsing import stim_key_sort_key, stim_key_to_tile_digit
 from p300_analysis.msi_algorithm import compute_msi_like_scores
@@ -15,7 +16,7 @@ from p300_analysis.signal_processing import (
     normalize_channels,
     time_window_to_indices,
 )
-from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_MSI, WINNER_MODE_SIGNED_MEAN
+from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_CCA, WINNER_MODE_MSI, WINNER_MODE_SIGNED_MEAN
 
 
 def artifact_reject_epochs(
@@ -121,10 +122,21 @@ def compute_winner_metrics(
     window_x_ms: int,
     window_y_ms: int,
     winner_mode: str = WINNER_MODE_AUC,
+    p300_template: Optional[np.ndarray] = None,
 ) -> Tuple[int, str, Dict[str, Any]]:
     """Возвращает winner_idx, mode_used, data для debug_ndjson (winner_compare).
 
     Дополнительно вычисляет margin = (top1 - top2) / top1 для индикатора уверенности.
+
+    Args:
+        stim_keys: список ключей стимулов
+        raw_averaged: усредненный ERP
+        corrected: базально-скорректированный ERP
+        time_ms: временная шкала
+        window_x_ms: начало анализа окна
+        window_y_ms: конец анализа окна
+        winner_mode: режим выбора победителя
+        p300_template: загруженный P300-эталон для CCA (опционально)
     """
     dt_m = float(time_ms[1] - time_ms[0]) if time_ms.shape[0] > 1 else 1.0
     xi0, xi1 = time_window_to_indices(time_ms, window_x_ms, window_y_ms)
@@ -142,6 +154,18 @@ def compute_winner_metrics(
             abs_auc_values=abs_auc_values,
         )
         mode_used = WINNER_MODE_MSI
+    elif winner_mode == WINNER_MODE_CCA:
+        # Извлечь эталон для этого окна
+        template_for_window = p300_template
+        if p300_template is not None and p300_template.shape[0] > (xi1 - xi0):
+            # Если полный эталон больше чем окно, взять нужную часть
+            template_for_window = p300_template[xi0:xi1]
+        final_metric_values = compute_cca_scores(
+            corr_win=corr_win,
+            abs_auc_values=abs_auc_values,
+            p300_template=template_for_window,
+        )
+        mode_used = WINNER_MODE_CCA
     else:
         final_metric_values = abs_auc_values
         mode_used = WINNER_MODE_AUC

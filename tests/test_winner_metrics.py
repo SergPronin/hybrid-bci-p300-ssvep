@@ -15,7 +15,7 @@ from p300_analysis.signal_processing import (
     normalize_channels,
     time_window_to_indices,
 )
-from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_MSI, WINNER_MODE_SIGNED_MEAN
+from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_CCA, WINNER_MODE_MSI, WINNER_MODE_SIGNED_MEAN
 
 
 def test_auc_mode_uses_absolute_integral_and_matches_integrated_plot() -> None:
@@ -99,6 +99,66 @@ def test_msi_mode_is_available_and_prefers_p300_like_shape() -> None:
     )
 
     assert mode_used == WINNER_MODE_MSI
+    assert winner_idx == 0
+    assert len(dbg["final_metric_values"]) == 2
+
+
+def test_cca_mode_is_available_and_detects_p300_like_signal() -> None:
+    """CCA режим должен быть доступен и обнаруживать P300-подобные сигналы."""
+    stim_keys = ["стимул_0", "стимул_1"]
+    time_ms = np.array([0.0, 100.0, 200.0, 300.0, 400.0], dtype=np.float64)
+    corrected = np.array(
+        [
+            [0.0, -1.0, 5.0, -1.0, 0.0],   # P300-like bump
+            [0.0, 2.0, 2.0, 2.0, 0.0],     # flatter profile
+        ],
+        dtype=np.float64,
+    )
+
+    winner_idx, mode_used, dbg = compute_winner_metrics(
+        stim_keys,
+        raw_averaged=corrected,
+        corrected=corrected,
+        time_ms=time_ms,
+        window_x_ms=0,
+        window_y_ms=400,
+        winner_mode=WINNER_MODE_CCA,
+    )
+
+    assert mode_used == WINNER_MODE_CCA
+    # CCA должен обнаружить P300-подобный сигнал в стимуле 0
+    assert winner_idx == 0
+    assert len(dbg["final_metric_values"]) == 2
+
+
+def test_cca_with_custom_p300_template() -> None:
+    """CCA режим должен работать с загруженным P300 эталоном."""
+    stim_keys = ["стимул_0", "стимул_1"]
+    time_ms = np.array([0.0, 100.0, 200.0, 300.0, 400.0], dtype=np.float64)
+    corrected = np.array(
+        [
+            [0.0, -1.0, 5.0, -1.0, 0.0],   # P300-like bump
+            [0.0, 2.0, 2.0, 2.0, 0.0],     # flatter profile
+        ],
+        dtype=np.float64,
+    )
+
+    # Создать синтетический P300 эталон
+    p300_template = np.array([0.0, -0.5, 3.0, -0.5, 0.0], dtype=np.float64)
+
+    winner_idx, mode_used, dbg = compute_winner_metrics(
+        stim_keys,
+        raw_averaged=corrected,
+        corrected=corrected,
+        time_ms=time_ms,
+        window_x_ms=0,
+        window_y_ms=400,
+        winner_mode=WINNER_MODE_CCA,
+        p300_template=p300_template,
+    )
+
+    assert mode_used == WINNER_MODE_CCA
+    # С загруженным эталоном должен работать еще лучше
     assert winner_idx == 0
     assert len(dbg["final_metric_values"]) == 2
 

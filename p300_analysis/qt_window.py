@@ -100,6 +100,7 @@ from p300_analysis.run_export import (
 from p300_analysis.session_recorder import SessionRecorder
 from p300_analysis.winner_selection import (
     WINNER_MODE_AUC,
+    WINNER_MODE_CCA,
     WINNER_MODE_MSI,
     mode_to_short_label,
 )
@@ -208,6 +209,9 @@ class P300AnalyzerWindow(QMainWindow):
         self._exam_qt_tick_seq: int = 0
         self._recording_started_mono: float = 0.0
         self._shown_no_marker_hint: bool = False
+
+        # Список загруженных CSV файлов для построения эталона
+        self._loaded_csv_files: List[Path] = []
 
         self._timer = QTimer(self)
         self._timer.setInterval(50)
@@ -765,13 +769,31 @@ class P300AnalyzerWindow(QMainWindow):
         self.btn_save_exam.clicked.connect(self._on_save_exam_clicked)
         sidebar_layout.addWidget(self.btn_save_exam)
 
-        self.btn_load_continuous_csv = QPushButton("Загрузить continuous CSV")
-        self.btn_load_continuous_csv.setStyleSheet(
+        # Кнопка для загрузки одного исследования для анализа
+        self.btn_load_single_csv = QPushButton("Загрузить исследование (один файл)")
+        self.btn_load_single_csv.setStyleSheet(
             "QPushButton { background-color: #6f42c1; color: white; font-weight: bold; padding: 10px 12px; border-radius: 6px; } "
             "QPushButton:hover { background-color: #5f36a9; }"
         )
-        self.btn_load_continuous_csv.clicked.connect(self._on_load_continuous_csv_clicked)
-        sidebar_layout.addWidget(self.btn_load_continuous_csv)
+        self.btn_load_single_csv.setToolTip(
+            "Загрузить один CSV файл с исследованием для анализа.\n"
+            "Используется для офлайн-анализа или проверки отдельной сессии."
+        )
+        self.btn_load_single_csv.clicked.connect(self._on_load_continuous_csv_clicked)
+        sidebar_layout.addWidget(self.btn_load_single_csv)
+
+        # Кнопка для загрузки нескольких файлов для P300-эталона
+        self.btn_load_p300_data = QPushButton("Загрузить данные для P300-эталона")
+        self.btn_load_p300_data.setStyleSheet(
+            "QPushButton { background-color: #6f42c1; color: white; font-weight: bold; padding: 10px 12px; border-radius: 6px; } "
+            "QPushButton:hover { background-color: #5f36a9; }"
+        )
+        self.btn_load_p300_data.setToolTip(
+            "Выберите несколько CSV файлов одновременно для построения P300-эталона.\n"
+            "Можно выбрать 5 и более файлов за один раз."
+        )
+        self.btn_load_p300_data.clicked.connect(self._on_load_p300_data_files)
+        sidebar_layout.addWidget(self.btn_load_p300_data)
 
         self.btn_disconnect = QPushButton("Отключить LSL")
         self.btn_disconnect.setStyleSheet(
@@ -887,9 +909,38 @@ class P300AnalyzerWindow(QMainWindow):
         self.combo_winner_mode.addItem(
             "MSI-like (энергия окна + согласование с P300-шаблоном)", WINNER_MODE_MSI
         )
+        self.combo_winner_mode.addItem(
+            "CCA (каноническая корреляция с P300-шаблоном)", WINNER_MODE_CCA
+        )
         self.combo_winner_mode.setCurrentIndex(0)
         self.combo_winner_mode.currentIndexChanged.connect(self._on_params_changed)
         sidebar_layout.addWidget(self.combo_winner_mode)
+
+        # Кнопка для загрузки P300 эталона для CCA
+        button_load_template = QPushButton("Загрузить P300-эталон для CCA")
+        button_load_template.setToolTip(
+            "Загрузить P300-эталон, построенный из калибровочных сессий.\n"
+            "Используется только для режима CCA.\n"
+            "Построить эталон: python scripts/build_p300_template.py <csv_files>"
+        )
+        button_load_template.clicked.connect(self._on_load_p300_template)
+        sidebar_layout.addWidget(button_load_template)
+
+        # Кнопка для построения P300 эталона из загруженных данных
+        button_build_template = QPushButton("Построить P300-эталон")
+        button_build_template.setToolTip(
+            "Построить P300-эталон из загруженных CSV файлов.\n"
+            "Требуется минимум 5 сессий с разными плитками.\n"
+            "Эталон будет сохранен и автоматически загружен."
+        )
+        button_build_template.clicked.connect(self._on_build_p300_template)
+        sidebar_layout.addWidget(button_build_template)
+
+        self._template_label = QLabel("нет эталона")
+        self._template_label.setWordWrap(True)
+        self._template_label.setStyleSheet("QLabel { color: #888; font-size: 10px; padding: 2px; }")
+        sidebar_layout.addWidget(self._template_label)
+        self._p300_template: Optional[np.ndarray] = None
 
         sidebar_layout.addSpacing(6)
         sidebar_layout.addWidget(QLabel("Порог артефактов (мкВ, 0=выкл):"))
@@ -1020,6 +1071,47 @@ class P300AnalyzerWindow(QMainWindow):
 
         root_layout.addWidget(sidebar_scroll)
         root_layout.addWidget(plots_scroll, stretch=1)
+
+    def _on_load_p300_data_files(self) -> None:
+        """Загрузить несколько CSV файлов одновременно для P300-эталона."""
+        selected_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Выберите CSV файлы для P300-эталона (минимум 5)",
+            str(Path.home()),
+            "CSV (*.csv);;All files (*.*)",
+        )
+        if not selected_paths:
+            return
+
+        successfully_loaded = 0
+        failed_files = []
+
+        for selected_path in selected_paths:
+            try:
+                self._load_continuous_csv_for_analysis(Path(selected_path))
+                successfully_loaded += 1
+                LOG.info(f"✓ Загружен файл для эталона: {Path(selected_path).name}")
+            except Exception as e:
+                failed_files.append((Path(selected_path).name, str(e)))
+                LOG.warning(f"✗ Ошибка загрузки {Path(selected_path).name}: {e}")
+
+        # Показать сводку
+        message = f"Успешно загружено: {successfully_loaded}/{len(selected_paths)} файлов\n"
+        message += f"Всего загружено данных: {len(self._loaded_csv_files)} файлов\n\n"
+
+        if successfully_loaded > 0:
+            message += f"✓ Готово! Можно построить эталон.\n"
+            if len(self._loaded_csv_files) >= 5:
+                message += f"✓ Достаточно данных (нужно 5+)"
+                QMessageBox.information(self, "Данные загружены", message)
+            else:
+                message += f"⚠ Нужно ещё {5 - len(self._loaded_csv_files)} файлов"
+                QMessageBox.warning(self, "Недостаточно данных", message)
+        else:
+            message = f"✗ Не удалось загрузить ни одного файла:\n\n"
+            for fname, err in failed_files:
+                message += f"- {fname}: {err}\n"
+            QMessageBox.critical(self, "Ошибка загрузки", message)
 
     @staticmethod
     def _setup_plot(plot_widget: pg.PlotWidget, *, title: str) -> None:
@@ -2153,6 +2245,7 @@ class P300AnalyzerWindow(QMainWindow):
                 wx,
                 wy,
                 winner_mode=str(self.combo_winner_mode.currentData() or WINNER_MODE_AUC),
+                p300_template=self._p300_template,
             )
             winner_key = stim_keys[winner_idx]
             dbg["lsl_cue_target_id"] = self._lsl_cue_target_id
@@ -3496,7 +3589,52 @@ class P300AnalyzerWindow(QMainWindow):
         if onsets == 0:
             raise RuntimeError("В файле нет валидных onset marker>0 для построения эпох.")
 
+        # Сохранить путь к загруженному файлу для построения эталона
+        if path not in self._loaded_csv_files:
+            self._loaded_csv_files.append(path)
+
         self._redraw_from_epochs()
+
+    def _on_load_p300_template(self) -> None:
+        """Загрузить P300-эталон из файла NPZ."""
+        selected_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите P300-эталон (NPZ файл)",
+            str(Path.home()),
+            "NPZ Files (*.npz);;All files (*.*)",
+        )
+        if not selected_path:
+            return
+        try:
+            self._load_p300_template_file(Path(selected_path))
+        except Exception as e:
+            LOG.exception("Ошибка загрузки P300-эталона: %s", e)
+            QMessageBox.critical(self, "Ошибка загрузки эталона", str(e))
+
+    def _load_p300_template_file(self, path: Path) -> None:
+        """Загрузить и проверить P300-эталон."""
+        from p300_analysis.p300_template import load_p300_template
+
+        if not path.exists():
+            raise RuntimeError(f"Файл не найден: {path}")
+
+        template, time_ms, stim_templates = load_p300_template(path)
+
+        # Сохранить эталон
+        self._p300_template = template
+
+        # Обновить UI
+        template_info = f"✓ Эталон загружен ({len(template)} отсчетов, {len(stim_templates)} стимулов)"
+        self._template_label.setText(template_info)
+        self._template_label.setStyleSheet("QLabel { color: #0f0; font-size: 10px; padding: 2px; }")
+
+        LOG.info(f"Загружен P300-эталон: {path.name}")
+        LOG.info(f"  - форма: {template.shape}")
+        LOG.info(f"  - стимулы: {list(stim_templates.keys())}")
+
+        # Перерисовать результаты если есть данные
+        if self.epochs_data:
+            self._redraw_from_epochs()
         self.btn_save_exam.setEnabled(False)
         stim_info_parts: List[str] = []
         for col in ("stim_target", "stim_sequences", "stim_isi_s", "stim_flash_s", "stim_inter_block_s"):
@@ -3511,4 +3649,173 @@ class P300AnalyzerWindow(QMainWindow):
         self._set_status(
             f"Загружен {path.name}: эпох={onsets}, классов={len(self.epochs_data)}. "
             f"Построены графики и рассчитан winner офлайн.{stim_info}"
+        )
+
+    def _on_build_p300_template(self) -> None:
+        """Построить P300-эталон из загруженных CSV файлов."""
+        # Проверить, есть ли загруженные файлы
+        if not hasattr(self, '_loaded_csv_files') or not self._loaded_csv_files:
+            QMessageBox.warning(
+                self,
+                "Нет данных",
+                "Сначала загрузите CSV файлы с помощью кнопки 'Загрузить continuous CSV' в левом меню.\n"
+                "Рекомендуется загрузить минимум 5 сессий с разными плитками."
+            )
+            return
+
+        # Показать диалог с настройками
+        dialog = BuildP300TemplateDialog(self, self._loaded_csv_files)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        # Получить параметры
+        min_sessions, baseline_ms, artifact_uv, use_car, filename = dialog.get_params()
+
+        # Проверить минимальное количество файлов
+        if len(self._loaded_csv_files) < min_sessions:
+            QMessageBox.warning(
+                self,
+                "Недостаточно данных",
+                f"Загружено {len(self._loaded_csv_files)} файлов, но требуется минимум {min_sessions}.\n"
+                "Загрузите больше CSV файлов."
+            )
+            return
+
+        # Выбрать выходной файл
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить P300-эталон",
+            filename,
+            "NPZ Files (*.npz);;All files (*.*)",
+        )
+        if not output_path:
+            return
+
+        try:
+            # Показать прогресс
+            self._set_status("🔧 Построение P300-эталона...")
+
+            # Построить эталон
+            from p300_analysis.p300_template import build_p300_template, save_p300_template
+
+            template, time_ms, stim_templates = build_p300_template(
+                self._loaded_csv_files,
+                baseline_ms=baseline_ms,
+                artifact_uv=artifact_uv if artifact_uv > 0 else None,
+                use_car=use_car,
+            )
+
+            # Сохранить эталон
+            save_p300_template(template, time_ms, stim_templates, Path(output_path))
+
+            # Автоматически загрузить созданный эталон
+            self._load_p300_template_file(Path(output_path))
+
+            QMessageBox.information(
+                self,
+                "Эталон построен",
+                f"✓ P300-эталон успешно построен и загружен!\n\n"
+                f"Файл: {Path(output_path).name}\n"
+                f"Сессий: {len(self._loaded_csv_files)}\n"
+                f"Стимулов: {len(stim_templates)}\n"
+                f"Длина: {len(template)} отсчетов\n\n"
+                f"Теперь можно использовать режим CCA."
+            )
+
+            self._set_status(f"✓ Эталон построен: {Path(output_path).name}")
+
+        except Exception as e:
+            LOG.exception("Ошибка построения P300-эталона: %s", e)
+            QMessageBox.critical(
+                self,
+                "Ошибка построения эталона",
+                f"Не удалось построить эталон:\n\n{str(e)}"
+            )
+            self._set_status("❌ Ошибка построения эталона")
+
+
+class BuildP300TemplateDialog(QDialog):
+    """Диалог для настройки параметров построения P300-эталона."""
+
+    def __init__(self, parent: Optional[QWidget] = None, available_files: Optional[List[Path]] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Построение P300-эталона")
+        self.setModal(True)
+        self.resize(500, 400)
+
+        layout = QVBoxLayout()
+
+        # Информация о доступных файлах
+        if available_files:
+            info_label = QLabel(f"Найдено {len(available_files)} CSV файлов для построения эталона:")
+            info_label.setWordWrap(True)
+            layout.addWidget(info_label)
+
+            files_text = QTextEdit()
+            files_text.setPlainText("\n".join(f.name for f in available_files[:10]))
+            if len(available_files) > 10:
+                files_text.append(f"... и еще {len(available_files) - 10} файлов")
+            files_text.setMaximumHeight(100)
+            files_text.setReadOnly(True)
+            layout.addWidget(files_text)
+        else:
+            warning_label = QLabel("⚠ Нет загруженных CSV файлов. Сначала загрузите данные через меню 'Файл'.")
+            warning_label.setStyleSheet("color: #ff8c00;")
+            layout.addWidget(warning_label)
+
+        # Параметры построения
+        form_layout = QFormLayout()
+
+        self.spin_min_sessions = QSpinBox()
+        self.spin_min_sessions.setRange(1, 50)
+        self.spin_min_sessions.setValue(5)
+        self.spin_min_sessions.setToolTip("Минимальное количество сессий для построения эталона")
+        form_layout.addRow("Мин. количество сессий:", self.spin_min_sessions)
+
+        self.spin_baseline = QSpinBox()
+        self.spin_baseline.setRange(0, 500)
+        self.spin_baseline.setValue(100)
+        self.spin_baseline.setToolTip("Длина baseline окна в миллисекундах")
+        form_layout.addRow("Baseline (мс):", self.spin_baseline)
+
+        self.spin_artifact = QSpinBox()
+        self.spin_artifact.setRange(0, 1000)
+        self.spin_artifact.setValue(60)
+        self.spin_artifact.setToolTip("Порог отклонения артефактов в микровольтах (0 = отключено)")
+        form_layout.addRow("Порог артефактов (мкВ):", self.spin_artifact)
+
+        self.chk_car = QCheckBox("Использовать CAR")
+        self.chk_car.setChecked(False)
+        self.chk_car.setToolTip("Common Average Reference - вычесть среднее по каналам")
+        form_layout.addRow("", self.chk_car)
+
+        layout.addLayout(form_layout)
+
+        # Имя выходного файла
+        file_layout = QHBoxLayout()
+        file_layout.addWidget(QLabel("Имя файла эталона:"))
+        self.edit_filename = QLineEdit("p300_template.npz")
+        self.edit_filename.setToolTip("Имя файла для сохранения эталона (.npz)")
+        file_layout.addWidget(self.edit_filename)
+        layout.addLayout(file_layout)
+
+        # Кнопки
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            Qt.Horizontal, self
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.setLayout(layout)
+
+    def get_params(self) -> Tuple[int, int, int, bool, str]:
+        """Получить параметры из диалога."""
+        return (
+            self.spin_min_sessions.value(),
+            self.spin_baseline.value(),
+            self.spin_artifact.value(),
+            self.chk_car.isChecked(),
+            self.edit_filename.text().strip()
         )
