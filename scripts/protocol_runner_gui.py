@@ -126,6 +126,8 @@ class ProtocolRunnerWidget(QWidget):
 
         self._runner: ProtocolRunner | None = None
         self._stimulus_proc: subprocess.Popen[str] | None = None
+        self._session_dir: Path | None = None
+        self._last_stim_restart_attempt: float = 0.0
         self._last_status_printed: str = ""
         self._eeg_test_inlet = None
         self._ssvep_cue_overlay: SsvepCueOverlay | None = None
@@ -653,9 +655,60 @@ class ProtocolRunnerWidget(QWidget):
             except Exception:
                 pass
             self._runner = None
+        self._session_dir = None
         self._timer.stop()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+
+    def _spawn_stimulus(self, session_dir: Path) -> bool:
+        """Запустить run_app.py с stim_control (без ожидания LSL)."""
+        run_script = _ROOT / "run_app.py"
+        if not run_script.exists():
+            return False
+        stim_args = [
+            sys.executable,
+            str(run_script),
+            "--auto-random-protocol",
+            "--no-analyzer",
+            "--inter-trial-s",
+            str(float(self.spin_inter_trial.value())),
+            "--sequences",
+            str(int(self.spin_sequences.value())),
+            "--auto-plan-trials",
+            "0",
+            "--auto-plan-target-tile-id",
+            str(int(self.spin_calib_target.value())),
+            "--stim-control-dir",
+            str(session_dir),
+        ]
+        self._stimulus_proc = subprocess.Popen(stim_args, cwd=str(_ROOT))
+        return True
+
+    def _stimulus_needed_now(self) -> bool:
+        """Нужен живой PsychoPy (калибровка или P300 в main, не во время ССВП)."""
+        r = self._runner
+        if r is None or not self.chk_run_stimulus.isChecked():
+            return False
+        if r.state in ("ssvep_continuous", "ssvep_burst", "finalize", "stopped", "idle", "preflight"):
+            return False
+        if bool(r.ssvep_cue_visible) or bool(r.ssvep_blackout_visible):
+            return False
+        return r.state in ("p300_calib", "main")
+
+    def _ensure_stimulus_for_p300(self) -> None:
+        """После ССВП стимулятор убивается — перед P300 в очереди перезапускаем."""
+        if not self._stimulus_needed_now():
+            return
+        if self._session_dir is None:
+            return
+        if self._stimulus_proc is not None and self._stimulus_proc.poll() is None:
+            return
+        now = time.time()
+        if now - float(self._last_stim_restart_attempt) < 8.0:
+            return
+        self._last_stim_restart_attempt = now
+        if self._spawn_stimulus(self._session_dir):
+            plog_info("перезапуск PsychoPy для P300 (после этапа ССВП)")
 
     def _wait_bci_stim_markers(self, max_wait_sec: float = 35.0) -> bool:
         """Ждём BCI_StimMarkers после запуска run_app (не MigalkaStimMarkers от прошлого ССВП)."""
@@ -736,34 +789,11 @@ class ProtocolRunnerWidget(QWidget):
             output_root=Path(out_root),
             subject_id=subject,
         )
+        self._session_dir = session_dir
 
         if self.chk_run_stimulus.isChecked():
-            run_py = sys.executable
-            run_script = _ROOT / "run_app.py"
-            if run_script.exists():
-                stim_args = [
-                        run_py,
-                        str(run_script),
-                        "--auto-random-protocol",
-                        "--no-analyzer",
-                        "--inter-trial-s",
-                        str(float(self.spin_inter_trial.value())),
-                        "--sequences",
-                        str(int(self.spin_sequences.value())),
-                        "--auto-plan-trials",
-                        "0",
-                        "--auto-plan-target-tile-id",
-                        str(int(self.spin_calib_target.value())),
-                        "--stim-control-dir",
-                        str(session_dir),
-                ]
-                plog_info(
-                    "запуск стимулятора (P300 по stim_control): " + " ".join(stim_args)
-                )
-                self._stimulus_proc = subprocess.Popen(
-                    stim_args,
-                    cwd=str(_ROOT),
-                )
+            if self._spawn_stimulus(session_dir):
+                plog_info("запуск стимулятора (P300 по stim_control)")
                 plog_info(f"ожидание {BCI_STIM_MARKER_STREAM_NAME} (до 35 с)…")
                 if not self._wait_bci_stim_markers(max_wait_sec=35.0):
                     QMessageBox.warning(
@@ -886,6 +916,7 @@ class ProtocolRunnerWidget(QWidget):
             return
         self._runner.stop(reason="user_stop")
         self._runner = None
+        self._session_dir = None
         self._timer.stop()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -896,6 +927,7 @@ class ProtocolRunnerWidget(QWidget):
             return
         prev = getattr(self, "_last_status_printed", "")
         self._runner.tick()
+        self._ensure_stimulus_for_p300()
         self._sync_ssvep_cue_overlay()
         QApplication.processEvents()
         st = self._runner.status_text
