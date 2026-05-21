@@ -36,7 +36,6 @@ if str(_ROOT) not in sys.path:
 
 from experiment_protocol.protocol_log import info as plog_info  # noqa: E402
 from experiment_protocol.protocol_runner import ProtocolConfig, ProtocolRunner  # noqa: E402
-from experiment_protocol.protocol_instruction_overlay import ProtocolInstructionOverlay  # noqa: E402
 from experiment_protocol.ssvep_cue_overlay import SsvepCueOverlay  # noqa: E402
 from experiment_protocol.unified_logger import UnifiedExperimentLogger  # noqa: E402
 from p300_analysis.analysis_profiles import (  # noqa: E402
@@ -130,7 +129,6 @@ class ProtocolRunnerWidget(QWidget):
         self._last_status_printed: str = ""
         self._eeg_test_inlet = None
         self._ssvep_cue_overlay: SsvepCueOverlay | None = None
-        self._participant_overlay: ProtocolInstructionOverlay | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -643,7 +641,6 @@ class ProtocolRunnerWidget(QWidget):
         """Перед новым прогоном: закрыть старый runner/COM/LSL и убить зомби run_app."""
         self._close_eeg_test_inlet()
         self._dismiss_ssvep_overlay()
-        self._dismiss_participant_overlay()
         if self._stimulus_proc is not None:
             try:
                 if self._stimulus_proc.poll() is None:
@@ -828,12 +825,6 @@ class ProtocolRunnerWidget(QWidget):
         self._timer.start()
         self.lbl_status.setText("Запущено. Проверка перед стартом…")
 
-    def _dismiss_participant_overlay(self) -> None:
-        if self._participant_overlay is not None:
-            ov = self._participant_overlay
-            self._participant_overlay = None
-            ov.hide_overlay()
-
     def _dismiss_ssvep_overlay(self) -> None:
         if self._ssvep_cue_overlay is not None:
             ov = self._ssvep_cue_overlay
@@ -861,58 +852,6 @@ class ProtocolRunnerWidget(QWidget):
         self.raise_()
         self.activateWindow()
         QApplication.processEvents()
-
-    def _stimulus_process_running(self) -> bool:
-        return self._stimulus_proc is not None and self._stimulus_proc.poll() is None
-
-    def _sync_participant_overlay(self) -> None:
-        if self._runner is None:
-            if self._participant_overlay is not None:
-                self._participant_overlay.hide_overlay()
-                self._participant_overlay = None
-            return
-        instr = getattr(self._runner, "participant_instruction", None)
-        if not instr:
-            if self._participant_overlay is not None:
-                self._participant_overlay.hide_overlay()
-            return
-        t = str(instr.get("type") or "")
-        # P300 (калибровка и main): плитки рисует PsychoPy — PyQt-оверлей их перекрывает.
-        if t in ("calib", "p300") and self._stimulus_process_running():
-            self._dismiss_participant_overlay()
-            return
-        if self._participant_overlay is None:
-            self._participant_overlay = ProtocolInstructionOverlay()
-        if t == "blackout":
-            self._participant_overlay.show_blackout()
-            return
-        self._participant_overlay.show_cue_widgets()
-        if t == "calib":
-            self._participant_overlay.show_message(
-                title=f"Калибровка {instr.get('index')}/{instr.get('total')}",
-                kind_label="Сбор шаблона P300",
-                hint="Смотрите на плитку:",
-                big_text=str(instr.get("tile")),
-            )
-        elif t == "p300":
-            self._participant_overlay.show_p300_cue(
-                experiment_index=int(instr.get("index") or 1),
-                experiment_total=int(instr.get("total") or 1),
-                target_tile_id=int(instr.get("tile") or 0),
-            )
-        elif t == "ssvep":
-            self._participant_overlay.show_ssvep_cue(
-                experiment_index=int(instr.get("index") or 1),
-                experiment_total=int(instr.get("total") or 1),
-                lamp_1based=int(instr.get("lamp_1based") or 1),
-                freq_hz=float(instr.get("freq_hz") or 0),
-                mode_label=str(instr.get("mode_label") or "ССВП"),
-            )
-        elif t == "pause":
-            self._participant_overlay.show_pause(
-                message=str(instr.get("message") or "Пауза"),
-                seconds_left=instr.get("seconds_left"),
-            )
 
     def _sync_ssvep_cue_overlay(self) -> None:
         if self._runner is None:
@@ -943,7 +882,6 @@ class ProtocolRunnerWidget(QWidget):
     def _on_stop(self) -> None:
         self._close_eeg_test_inlet()
         self._dismiss_ssvep_overlay()
-        self._dismiss_participant_overlay()
         if self._stimulus_proc is not None:
             try:
                 if self._stimulus_proc.poll() is None:
@@ -965,7 +903,6 @@ class ProtocolRunnerWidget(QWidget):
             return
         prev = getattr(self, "_last_status_printed", "")
         self._runner.tick()
-        self._sync_participant_overlay()
         self._sync_ssvep_cue_overlay()
         QApplication.processEvents()
         st = self._runner.status_text

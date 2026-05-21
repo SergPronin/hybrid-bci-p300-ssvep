@@ -97,6 +97,7 @@ class StimulusApp:
         self._auto_pending_first_trial = bool(self.auto_random_trials) and self.stim_control_dir is None
         self._tiles_visual: list = []
         self._tile_texts: list = []
+        self._tile_draw_size = float(config.TILE_SIZE_PX * config.TILE_DISPLAY_SCALE)
         self._build_visual_grid()
         self.start_button = visual.Rect(
             self.win,
@@ -209,43 +210,28 @@ class StimulusApp:
             pos=(0, 0),
         )
 
-        # Overlay text shown between trials in auto mode
+        # Одно окно: подпись сверху + подсветка целевой плитки (без перекрывающего fullscreen).
         w, h = float(self.win.size[0]), float(self.win.size[1])
-        # Operator tuning: title/sub ~1.5x smaller, target number ~2x bigger
-        title_h = max(32, int(h * 0.10 / 1.5))
-        sub_h = max(24, int(h * 0.085 / 1.5))
+        self._banner_line1 = ""
+        self._banner_line2 = ""
+        self._highlight_tile_id: int | None = None
+        title_h = max(22, int(h * 0.045))
+        sub_h = max(18, int(h * 0.032))
         self._auto_overlay_title = visual.TextStim(
             self.win,
             text="",
-            pos=(0, int(h * 0.18)),
+            pos=(0, int(h * 0.40)),
             color="white",
             height=title_h,
-            wrapWidth=w * 0.9,
+            wrapWidth=w * 0.92,
         )
         self._auto_overlay_sub = visual.TextStim(
             self.win,
             text="",
-            pos=(0, int(h * -0.02)),
-            color="white",
+            pos=(0, int(h * 0.34)),
+            color="#cccccc",
             height=sub_h,
-            wrapWidth=w * 0.9,
-        )
-        self._auto_overlay_target_num = visual.TextStim(
-            self.win,
-            text="",
-            pos=(0, int(h * -0.22)),
-            color="yellow",
-            height=max(28, int((h * 0.44) / 3.0)),
-            bold=True,
-        )
-        self._auto_overlay_bg = visual.Rect(
-            self.win,
-            width=w,
-            height=h,
-            pos=(0, 0),
-            fillColor="#202020",
-            lineColor=None,
-            opacity=1.0,
+            wrapWidth=w * 0.92,
         )
 
     def _right_panel_x(self) -> float:
@@ -343,6 +329,7 @@ class StimulusApp:
         self.win.callOnFlip(self.controller.lsl.send, -3, cfg_payload)
         self.show_controls = False
         self.win.mouseVisible = False
+        self._set_phase_banner(line1="", line2="", highlight_tile_id=None)
         self.controller.start_experiment(sequences, target_tile_id=tgt)
         core.wait(0.2)
 
@@ -393,15 +380,26 @@ class StimulusApp:
         """С протоколом v2 все P300 (включая калибровку) — только по stim_control.json."""
         return self.stim_control_dir is not None
 
-    def _draw_protocol_wait_overlay(self, *, message: str) -> None:
-        self._auto_overlay_title.text = "Ожидание протокола"
-        self._auto_overlay_sub.text = str(
-            message or "Скоро начнётся прогон — не закрывайте окно"
-        )
-        self._auto_overlay_target_num.text = ""
-        self._auto_overlay_bg.draw()
-        self._auto_overlay_title.draw()
-        self._auto_overlay_sub.draw()
+    def _set_phase_banner(
+        self,
+        *,
+        line1: str,
+        line2: str = "",
+        highlight_tile_id: int | None = None,
+    ) -> None:
+        self._banner_line1 = str(line1)
+        self._banner_line2 = str(line2)
+        self._highlight_tile_id = int(highlight_tile_id) if highlight_tile_id is not None else None
+
+    def _draw_phase_banner(self) -> None:
+        if not self.auto_random_trials:
+            return
+        if self._banner_line1:
+            self._auto_overlay_title.text = self._banner_line1
+            self._auto_overlay_title.draw()
+        if self._banner_line2:
+            self._auto_overlay_sub.text = self._banner_line2
+            self._auto_overlay_sub.draw()
 
     def _poll_stim_control(self) -> bool:
         """True — кадр отрисован, основной цикл должен continue."""
@@ -411,48 +409,52 @@ class StimulusApp:
 
         cmd = sc.read_control(self.stim_control_dir)  # type: ignore[arg-type]
         if cmd is None:
-            self._draw_protocol_wait_overlay(message="Нет stim_control.json")
+            self._set_phase_banner(line1="Ожидание протокола", line2="Нет stim_control.json")
+            self._draw()
             self.win.flip()
             return True
         state = str(cmd.get("state") or "paused")
         if state == "done":
             return False
         if state == "paused":
-            self._draw_protocol_wait_overlay(message=str(cmd.get("message") or ""))
+            msg = str(cmd.get("message") or "Скоро начнётся прогон")
+            self._set_phase_banner(line1="Ожидание протокола", line2=msg, highlight_tile_id=None)
+            self._draw()
             self.win.flip()
             return True
         if state == "trial":
+            tid = int(cmd.get("target_tile_id") or 0)
+            label = str(cmd.get("label") or "P300")
+            exp_i = int(cmd.get("experiment_index") or 1)
+            exp_t = int(cmd.get("experiment_total") or 1)
             if not self._stim_control_wait_trial:
-                tid = int(cmd.get("target_tile_id") or 0)
                 self._auto_trials_started += 1
                 self._schedule_auto_trial(target_tile_id=tid)
                 self._stim_control_wait_trial = True
             if self._auto_pause_active():
+                self._set_phase_banner(
+                    line1=f"{label} — {exp_i} / {exp_t}",
+                    line2=f"Смотрите на плитку {tid}",
+                    highlight_tile_id=tid,
+                )
                 self._draw()
-                self._draw_auto_overlay()
                 self.win.flip()
                 return True
-        self._draw_protocol_wait_overlay(message="…")
+        self._set_phase_banner(line1="Ожидание протокола", line2="…")
+        self._draw()
         self.win.flip()
         return True
 
-    def _draw_auto_overlay(self) -> None:
-        """Draw 'experiment number' + instruction during pause."""
-        if not self.auto_random_trials:
-            return
+    def _update_pause_banner(self) -> None:
         if self._auto_pause_until is None or self._auto_next_target is None:
             return
-        # В авто-режиме self._auto_trials_started уже является номером следующего trial (1-based),
-        # т.к. инкремент делается перед планированием паузы/оверлея.
         exp_n = max(1, int(self._auto_trials_started))
-        self._auto_overlay_title.text = f"Эксперимент №{exp_n}"
         tid = int(self._auto_next_target)
-        self._auto_overlay_sub.text = "Смотрите на плитку:"
-        self._auto_overlay_target_num.text = str(tid)
-        self._auto_overlay_bg.draw()
-        self._auto_overlay_title.draw()
-        self._auto_overlay_sub.draw()
-        self._auto_overlay_target_num.draw()
+        self._set_phase_banner(
+            line1=f"Эксперимент №{exp_n}",
+            line2=f"Смотрите на плитку {tid}",
+            highlight_tile_id=tid,
+        )
 
     def _rand_target_avoid(self, *, prev: int | None) -> int:
         n = len(self.grid.tiles)
@@ -571,9 +573,11 @@ class StimulusApp:
         return plan
 
     def _draw(self) -> None:
+        hi = self._highlight_tile_id
         for (tile, rect, tile_text) in zip(
             self.grid.tiles, self._tiles_visual, self._tile_texts
         ):
+            is_hi = hi is not None and int(tile.id) == int(hi)
             if tile.active:
                 if not self.show_controls:
                     if self.controller.get_target_id() == tile.id and self.controller.get_target_color():
@@ -584,8 +588,22 @@ class StimulusApp:
                     rect.fillColor = config.TILE_DEFAULT_COLOR
             else:
                 rect.fillColor = config.TILE_DEFAULT_COLOR
+            if is_hi and not self.show_controls:
+                rect.lineColor = "#ffdd44"
+                rect.lineWidth = 5
+                tile_text.color = "#ffdd44"
+                tile_text.height = self._tile_draw_size * 0.42
+                tile_text.text = f"►{tile.id}◄"
+            else:
+                rect.lineColor = config.TILE_LINE_COLOR
+                rect.lineWidth = 1
+                tile_text.color = "white"
+                tile_text.height = self._tile_draw_size * 0.25
+                tile_text.text = str(tile.id)
             rect.draw()
             tile_text.draw()
+        if self.auto_random_trials and not self.show_controls:
+            self._draw_phase_banner()
         if self.show_controls:
             self.start_button.draw()
             self.stop_button.draw()
@@ -650,8 +668,8 @@ class StimulusApp:
                 self._schedule_auto_trial(target_tile_id=int(tgt0))
             # If we're between trials in auto mode, just render overlay and wait
             if self._auto_pause_active():
+                self._update_pause_banner()
                 self._draw()
-                self._draw_auto_overlay()
                 self.win.flip()
                 keys = event.getKeys()
                 if "escape" in keys:
@@ -691,8 +709,9 @@ class StimulusApp:
                         self.controller.stop()
                         self.show_controls = True
                         self.win.mouseVisible = True
+            if self._auto_pause_active():
+                self._update_pause_banner()
             self._draw()
-            self._draw_auto_overlay()
             self.win.flip()
             keys = event.getKeys()
             if "escape" in keys:
