@@ -13,6 +13,7 @@ class QueueItem:
     ssvep_mode: Optional[str] = None  # "continuous" | "burst"
     target_lamp_0idx: Optional[int] = None  # для SSVEP
     target_tile_id: Optional[int] = None  # для P300 (0..8), назначается при сборке очереди
+    phase: str = "main"  # "calib" | "main"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -20,6 +21,7 @@ class QueueItem:
             "ssvep_mode": self.ssvep_mode,
             "target_lamp_0idx": self.target_lamp_0idx,
             "target_tile_id": self.target_tile_id,
+            "phase": self.phase,
         }
 
 

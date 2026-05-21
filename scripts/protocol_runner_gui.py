@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -56,6 +57,17 @@ from ssvep_analysis.lamp_frequencies import (  # noqa: E402
     lamp_frequency_choices,
     lamp_frequency_closest_index,
 )
+
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
+try:
+    import pyqtgraph as _pg  # type: ignore
+
+    _pg.setConfigOption("background", "#f8f8f8")
+    _pg.setConfigOption("foreground", "#222")
+    _HAVE_PG = True
+except Exception:
+    _pg = None  # type: ignore
+    _HAVE_PG = False
 
 # Как SSVEPAnalyzerWindow.DEFAULT_LAMP_FREQS — 4 лампы
 _DEFAULT_LAMP_FREQS = (
@@ -124,8 +136,8 @@ class ProtocolRunnerWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Гибридный протокол (P300×2 + SSVEP×2)")
-        self.setMinimumWidth(720)
-        self.resize(760, 640)
+        self.setMinimumWidth(620)
+        self.resize(740, 300)
 
         self._runner: ProtocolRunner | None = None
         self._stimulus_proc: subprocess.Popen[str] | None = None
@@ -134,40 +146,46 @@ class ProtocolRunnerWidget(QWidget):
         self._last_status_printed: str = ""
         self._eeg_test_inlet = None
         self._ssvep_cue_overlay: SsvepCueOverlay | None = None
+        self._eeg_graph_buf: list[float] = []
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-
-        scroll_content = QWidget()
-        scroll_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-        scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(4, 4, 4, 4)
-
-        form = QFormLayout()
-
-        self.ed_subject = QLineEdit("испытуемый_001")
-        self.ed_output = QLineEdit(str((_ROOT / "experiment_runs").resolve()))
-
-        eeg_row = QHBoxLayout()
+        # ── Виджеты верхней панели (всегда видны) ──────────────────────
         self.cb_eeg = QComboBox()
-        self.cb_eeg.setMinimumWidth(360)
+        self.cb_eeg.setMinimumWidth(280)
         self.btn_refresh_eeg = QPushButton("Обновить")
         self.btn_refresh_eeg.setToolTip("Найти потоки LSL типа EEG/Signal в сети")
-        self.btn_test_eeg = QPushButton("Проверить")
-        self.btn_test_eeg.setToolTip("Открыть выбранный поток и прочитать тестовый фрагмент данных")
-        eeg_row.addWidget(self.cb_eeg, stretch=1)
-        eeg_row.addWidget(self.btn_refresh_eeg)
-        eeg_row.addWidget(self.btn_test_eeg)
-        self._eeg_row_widget = QWidget()
-        self._eeg_row_widget.setLayout(eeg_row)
+        self.btn_test_eeg = QPushButton("Подключить")
+        self.btn_test_eeg.setToolTip(
+            "Открыть поток и показать живой график ЭЭГ. Повторный клик — отключить."
+        )
         self.lbl_eeg_status = QLabel("Поток ЭЭГ не выбран. Нажмите «Обновить».")
         self.lbl_eeg_status.setWordWrap(True)
         self.lbl_eeg_status.setStyleSheet("color: #555; font-size: 11px;")
+
+        # Живой график ЭЭГ
+        if _HAVE_PG:
+            self._eeg_plot_widget: QWidget | None = _pg.PlotWidget()
+            self._eeg_plot_widget.setFixedHeight(130)
+            self._eeg_plot_widget.setLabel("left", "мкВ", color="#333")
+            self._eeg_plot_widget.setLabel("bottom", "отсчёты")
+            self._eeg_plot_widget.showGrid(x=False, y=True, alpha=0.3)
+            self._eeg_plot_widget.getPlotItem().setMenuEnabled(False)
+            self._eeg_plot_widget.setMouseEnabled(x=False, y=False)
+            self._eeg_plot_curve = self._eeg_plot_widget.plot(
+                [], pen=_pg.mkPen("#2980b9", width=1)
+            )
+            self._eeg_plot_widget.hide()
+        else:
+            self._eeg_plot_widget = None
+            self._eeg_plot_curve = None
+
+        self.btn_settings_toggle = QPushButton("⚙  Развернуть настройки")
+        self.btn_settings_toggle.setStyleSheet(
+            "text-align:left; padding:4px 8px; border:1px solid #bbb; border-radius:3px;"
+        )
+
+        # ── Виджеты настроек (скрыты по умолчанию) ─────────────────────
+        self.ed_subject = QLineEdit("испытуемый_001")
+        self.ed_output = QLineEdit(str((_ROOT / "experiment_runs").resolve()))
 
         com_row = QHBoxLayout()
         self.cb_com = QComboBox()
@@ -224,7 +242,7 @@ class ProtocolRunnerWidget(QWidget):
         ssvep_outer.addLayout(ssvep_top)
         self._ssvep_ch_host = QWidget()
         self._ssvep_ch_layout = QGridLayout(self._ssvep_ch_host)
-        self._lbl_ssvep_ch_hint = QLabel("Сначала выберите поток ЭЭГ (LSL) выше.")
+        self._lbl_ssvep_ch_hint = QLabel("Сначала подключитесь к потоку ЭЭГ.")
         self._lbl_ssvep_ch_hint.setWordWrap(True)
         self._lbl_ssvep_ch_hint.setStyleSheet("color: #666;")
         ssvep_outer.addWidget(self._lbl_ssvep_ch_hint)
@@ -247,7 +265,7 @@ class ProtocolRunnerWidget(QWidget):
         p300_outer.addLayout(p300_top)
         self._p300_ch_host = QWidget()
         self._p300_ch_layout = QGridLayout(self._p300_ch_host)
-        self._lbl_p300_ch_hint = QLabel("Сначала выберите поток ЭЭГ (LSL) выше.")
+        self._lbl_p300_ch_hint = QLabel("Сначала подключитесь к потоку ЭЭГ.")
         self._lbl_p300_ch_hint.setWordWrap(True)
         self._lbl_p300_ch_hint.setStyleSheet("color: #666;")
         p300_outer.addWidget(self._lbl_p300_ch_hint)
@@ -255,15 +273,15 @@ class ProtocolRunnerWidget(QWidget):
         self._p300_ch_host.hide()
         self._ssvep_ch_host.hide()
 
-        proto_box = QGroupBox("Протокол (калибровка → 45 экспериментов в случайном порядке)")
+        proto_box = QGroupBox("Протокол (калибровка + основной блок, случайный порядок)")
         proto_form = QFormLayout(proto_box)
 
         self.spin_calib_trials = QSpinBox()
-        self.spin_calib_trials.setRange(1, 50)
+        self.spin_calib_trials.setRange(0, 50)
         self.spin_calib_trials.setValue(5)
         self.spin_calib_trials.setToolTip(
-            "Подряд в начале: прогоны P300 на одной плитке для эталона. "
-            "5 прогонов × 12 sequences ≈ больше эпох на цель (порог шаблона 12)."
+            "Прогонов P300 на одной плитке для эталона (0 = отключить калибровку). "
+            "5 прогонов × 12 sequences ≈ порог шаблона 12."
         )
 
         self.spin_calib_target = QSpinBox()
@@ -337,29 +355,64 @@ class ProtocolRunnerWidget(QWidget):
         stim_form.addRow("Последовательностей в прогоне:", self.spin_sequences)
         stim_form.addRow("", self.chk_run_stimulus)
 
-        form.addRow("ID испытуемого:", self.ed_subject)
-        form.addRow("Папка результатов:", self.ed_output)
-        form.addRow("Поток ЭЭГ (LSL):", self._eeg_row_widget)
-        form.addRow("", self.lbl_eeg_status)
+        # ── Панель настроек (прокручиваемая, скрыта) ───────────────────
+        settings_content = QWidget()
+        settings_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        settings_v = QVBoxLayout(settings_content)
+        settings_v.setContentsMargins(4, 4, 4, 4)
 
-        scroll_layout.addLayout(form)
-        scroll_layout.addWidget(proto_box)
-        scroll_layout.addWidget(stim_box)
-        scroll_layout.addWidget(migalka_box)
-        scroll_layout.addWidget(ssvep_box)
-        scroll_layout.addWidget(p300_box)
-
-        self.lbl_settings_hint = QLabel(
-            "Поток ЭЭГ — запись и онлайн-анализ; COM и частоты — мигалка; каналы — ROI для P300/ССВП. "
-            "Перед стартом проверьте ЭЭГ кнопкой «Проверить». Консоль: [protocol]."
+        settings_form = QFormLayout()
+        settings_form.addRow("ID испытуемого:", self.ed_subject)
+        settings_form.addRow("Папка результатов:", self.ed_output)
+        settings_v.addLayout(settings_form)
+        settings_v.addWidget(proto_box)
+        settings_v.addWidget(stim_box)
+        settings_v.addWidget(migalka_box)
+        settings_v.addWidget(ssvep_box)
+        settings_v.addWidget(p300_box)
+        lbl_hint = QLabel(
+            "COM и частоты — мигалка; каналы — ROI для P300/ССВП. Консоль: [protocol]."
         )
-        self.lbl_settings_hint.setWordWrap(True)
-        self.lbl_settings_hint.setStyleSheet("color: #555; font-size: 11px;")
-        scroll_layout.addWidget(self.lbl_settings_hint)
-        scroll_layout.addStretch(1)
+        lbl_hint.setWordWrap(True)
+        lbl_hint.setStyleSheet("color: #555; font-size: 11px;")
+        settings_v.addWidget(lbl_hint)
+        settings_v.addStretch(1)
 
-        scroll.setWidget(scroll_content)
-        root.addWidget(scroll, stretch=1)
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        settings_scroll.setFrameShape(QScrollArea.NoFrame)
+        settings_scroll.setWidget(settings_content)
+
+        self._settings_panel = QWidget()
+        self._settings_panel.setVisible(False)
+        sp_layout = QVBoxLayout(self._settings_panel)
+        sp_layout.setContentsMargins(0, 0, 0, 0)
+        sp_layout.addWidget(settings_scroll)
+
+        # ── Главный layout ──────────────────────────────────────────────
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(4)
+
+        compact_top = QWidget()
+        compact_v = QVBoxLayout(compact_top)
+        compact_v.setContentsMargins(4, 4, 4, 4)
+        compact_v.setSpacing(4)
+
+        eeg_row_h = QHBoxLayout()
+        eeg_row_h.addWidget(QLabel("ЭЭГ (LSL):"))
+        eeg_row_h.addWidget(self.cb_eeg, stretch=1)
+        eeg_row_h.addWidget(self.btn_refresh_eeg)
+        eeg_row_h.addWidget(self.btn_test_eeg)
+        compact_v.addLayout(eeg_row_h)
+        compact_v.addWidget(self.lbl_eeg_status)
+        if self._eeg_plot_widget is not None:
+            compact_v.addWidget(self._eeg_plot_widget)
+        compact_v.addWidget(self.btn_settings_toggle)
+
+        root.addWidget(compact_top)
+        root.addWidget(self._settings_panel, stretch=1)
 
         btn_row = QHBoxLayout()
         self.btn_start = QPushButton("Запустить протокол")
@@ -369,20 +422,27 @@ class ProtocolRunnerWidget(QWidget):
         btn_row.addWidget(self.btn_stop)
         root.addLayout(btn_row)
 
-        self.lbl_status = QLabel("Ожидание. Подключите ЭЭГ/LSL и стимулятор, затем нажмите «Запустить протокол».")
+        self.lbl_status = QLabel("Ожидание. Подключитесь к ЭЭГ, затем нажмите «Запустить протокол».")
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setStyleSheet("padding: 4px 0;")
         root.addWidget(self.lbl_status)
 
+        # ── Таймеры ─────────────────────────────────────────────────────
         self._timer = QTimer(self)
         self._timer.setInterval(50)
         self._timer.timeout.connect(self._on_tick)
 
+        self._eeg_graph_timer = QTimer(self)
+        self._eeg_graph_timer.setInterval(80)
+        self._eeg_graph_timer.timeout.connect(self._on_eeg_graph_tick)
+
+        # ── Сигналы ─────────────────────────────────────────────────────
         self.btn_start.clicked.connect(self._on_start)
         self.btn_stop.clicked.connect(self._on_stop)
         self.btn_refresh_com.clicked.connect(self._refresh_com_ports)
         self.btn_refresh_eeg.clicked.connect(self._refresh_eeg_streams)
         self.btn_test_eeg.clicked.connect(self._on_test_eeg_connect)
+        self.btn_settings_toggle.clicked.connect(self._toggle_settings)
         self.cb_eeg.currentIndexChanged.connect(self._rebuild_channel_checkboxes_from_selection)
         self.cb_p300_profile.currentIndexChanged.connect(self._on_p300_profile_changed)
         self.cb_ssvep_profile.currentIndexChanged.connect(self._on_ssvep_profile_changed)
@@ -397,7 +457,45 @@ class ProtocolRunnerWidget(QWidget):
         self._refresh_eeg_streams()
         self._update_lamp_buttons()
 
+    def _toggle_settings(self) -> None:
+        visible = not self._settings_panel.isVisible()
+        self._settings_panel.setVisible(visible)
+        if visible:
+            self.btn_settings_toggle.setText("▲  Свернуть настройки")
+            self.setMinimumHeight(500)
+            if self.height() < 600:
+                self.resize(self.width(), 660)
+        else:
+            self.btn_settings_toggle.setText("⚙  Развернуть настройки")
+            self.setMinimumHeight(180)
+            self.adjustSize()
+
+    def _on_eeg_graph_tick(self) -> None:
+        if self._eeg_test_inlet is None or self._eeg_plot_widget is None:
+            return
+        try:
+            try:
+                chunk, ts = self._eeg_test_inlet.pull_chunk(timeout=0.0, max_samples=64)
+            except TypeError:
+                chunk, ts = self._eeg_test_inlet.pull_chunk(timeout=0.0)
+            if ts and chunk:
+                for samp in chunk:
+                    try:
+                        ch0 = float(samp[0]) if hasattr(samp, "__len__") and len(samp) > 0 else float(samp)
+                    except Exception:
+                        ch0 = 0.0
+                    self._eeg_graph_buf.append(ch0)
+                if len(self._eeg_graph_buf) > 750:
+                    self._eeg_graph_buf = self._eeg_graph_buf[-750:]
+                if self._eeg_plot_curve is not None:
+                    import numpy as _np
+                    self._eeg_plot_curve.setData(_np.asarray(self._eeg_graph_buf, dtype=_np.float32))
+        except Exception:
+            pass
+
     def _close_eeg_test_inlet(self) -> None:
+        if hasattr(self, "_eeg_graph_timer"):
+            self._eeg_graph_timer.stop()
         if self._eeg_test_inlet is None:
             return
         try:
@@ -542,6 +640,15 @@ class ProtocolRunnerWidget(QWidget):
         )
 
     def _on_test_eeg_connect(self) -> None:
+        # Повторный клик = отключить
+        if self._eeg_test_inlet is not None:
+            self._close_eeg_test_inlet()
+            self.btn_test_eeg.setText("Подключить")
+            if self._eeg_plot_widget is not None:
+                self._eeg_plot_widget.hide()
+            self._eeg_graph_buf.clear()
+            self.lbl_eeg_status.setText("Поток отключён.")
+            return
         key = self._selected_eeg_stream_key()
         if key is None:
             QMessageBox.warning(self, "ЭЭГ", "Сначала выберите поток в списке (кнопка «Обновить»).")
@@ -554,7 +661,6 @@ class ProtocolRunnerWidget(QWidget):
                 f"Поток «{key[0]}» не найден в сети LSL.\nЗапустите запись ЭЭГ и нажмите «Обновить».",
             )
             return
-        self._close_eeg_test_inlet()
         try:
             inlet = stream_inlet_with_buffer(info, buffer_seconds=5)
             try:
@@ -562,14 +668,27 @@ class ProtocolRunnerWidget(QWidget):
             except TypeError:
                 chunk, ts = inlet.pull_chunk(timeout=1.0)
             n_samp = len(ts) if ts else 0
-            inlet.close_stream()
             name = info.name() or "?"
             ch = int(info.channel_count())
             fs = float(info.nominal_srate() or 0.0)
             self.lbl_eeg_status.setText(
-                f"Подключение OK: {name}, {ch} кан., Fs={fs:g} Гц, получено сэмплов: {n_samp}."
+                f"Подключено: {name}, {ch} кан., Fs={fs:g} Гц."
             )
-            plog_info(f"тест ЭЭГ: {stream_display_label(info)}, samples={n_samp}")
+            plog_info(f"ЭЭГ подключено: {stream_display_label(info)}, samples={n_samp}")
+            # Предзаполнить буфер начальными данными
+            self._eeg_graph_buf = []
+            if chunk and ts:
+                for samp in chunk:
+                    try:
+                        ch0 = float(samp[0]) if hasattr(samp, "__len__") and len(samp) > 0 else float(samp)
+                    except Exception:
+                        ch0 = 0.0
+                    self._eeg_graph_buf.append(ch0)
+            self._eeg_test_inlet = inlet
+            if self._eeg_plot_widget is not None:
+                self._eeg_plot_widget.show()
+            self._eeg_graph_timer.start()
+            self.btn_test_eeg.setText("Отключить")
             self._rebuild_channel_checkboxes_from_selection()
         except Exception as e:
             self.lbl_eeg_status.setText(f"Ошибка подключения: {e}")
@@ -697,7 +816,7 @@ class ProtocolRunnerWidget(QWidget):
             return False
         if bool(r.ssvep_cue_visible) or bool(r.ssvep_blackout_visible):
             return False
-        return r.state in ("p300_calib", "main")
+        return r.state == "main"
 
     def _ensure_stimulus_for_p300(self) -> None:
         """После ССВП стимулятор убивается — перед P300 в очереди перезапускаем."""
