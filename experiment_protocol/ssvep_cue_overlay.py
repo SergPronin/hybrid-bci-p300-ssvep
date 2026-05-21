@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 # Номер лампы (1…4) → направление взгляда испытуемого
 _LAMP_ARROW: dict[int, str] = {1: "←", 2: "→", 3: "↑", 4: "↓"}

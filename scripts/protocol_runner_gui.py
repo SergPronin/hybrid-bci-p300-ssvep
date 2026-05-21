@@ -4,18 +4,22 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from collections import deque
 from pathlib import Path
 import subprocess
 
-import numpy as np
-import pyqtgraph as pg
+# Один Qt-биндинг на процесс: PyQt6 (как ssvep_analyzer). PyQt5 + PyQt6 → segfault / «QApplication before QWidget».
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt6")
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import (
+import numpy as np
+
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import (
     QApplication,
+    QFrame,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -33,6 +37,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+import pyqtgraph as pg  # noqa: E402  # после PyQt6
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -56,15 +62,16 @@ from p300_analysis.lsl_streams import (  # noqa: E402
     stream_inlet_with_buffer,
     wait_for_stimulus_marker_stream,
 )
-from ssvep_analyzer import (  # noqa: E402
-    SSVEPAnalyzerWindow,
+from ssvep_analysis.lamp_frequencies import (  # noqa: E402
+    CHANNEL_CB_COLUMNS,
+    MSI_DEFAULT_FS,
+    MSI_DEFAULT_WINDOW_SEC,
     lamp_frequency_choices,
     lamp_frequency_closest_index,
 )
 
-# Как SSVEPAnalyzerWindow — MSI и лампы
-MSI_DEFAULT_FS = float(SSVEPAnalyzerWindow.DEFAULT_FS)
-MSI_DEFAULT_WINDOW_SEC = float(SSVEPAnalyzerWindow.WINDOW_SEC)
+MSI_DEFAULT_FS = float(MSI_DEFAULT_FS)
+MSI_DEFAULT_WINDOW_SEC = float(MSI_DEFAULT_WINDOW_SEC)
 # Лампа 1: 1000/117 ≈ 8.547 Гц (как в рабочих сессиях)
 _DEFAULT_LAMP_FREQS = (
     1000.0 / 117.0,
@@ -78,7 +85,7 @@ _PROFILE_SSVEP_DEFAULT = "ssvep_default"
 _DEFAULT_P300_CHANNELS_0IDX = (4, 5, 6, 7, 18, 19)  # 5, 6, 7, 8, 19, 20
 _DEFAULT_SSVEP_CHANNELS_0IDX = (8, 9, 20)  # 9, 10, 21
 _MAX_LAMPS = 6
-_CHANNEL_COLUMNS = int(SSVEPAnalyzerWindow.CHANNEL_CB_COLUMNS)
+_CHANNEL_COLUMNS = int(CHANNEL_CB_COLUMNS)
 _CHANNEL_SCROLL_MAX_H = 200
 _MONITOR_EEG_PLOT_MAX = 1500
 
@@ -122,9 +129,9 @@ def _wrap_channel_scroll(host: QWidget, *, max_height: int = _CHANNEL_SCROLL_MAX
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setMaximumHeight(int(max_height))
-    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-    scroll.setFrameShape(QScrollArea.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
     scroll.setWidget(host)
     return scroll
 
@@ -170,11 +177,14 @@ class ProtocolRunnerWidget(QWidget):
 
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
-        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        settings_scroll.setFrameShape(QScrollArea.StyledPanel)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        settings_scroll.setFrameShape(QFrame.Shape.StyledPanel)
 
         scroll_content = QWidget()
-        scroll_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+        scroll_content.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.MinimumExpanding,
+        )
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(4, 4, 4, 4)
 
@@ -1240,7 +1250,7 @@ def main() -> None:
     app.setStyle("Fusion")
     w = ProtocolRunnerWidget()
     w.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

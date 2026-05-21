@@ -78,23 +78,13 @@ from ssvep_analysis.migalka_lsl import STREAM_NAME as MIGALKA_MARKER_STREAM  # n
 EXPERIMENT_LOG_DIR = _REPO / "ssvep_experiment_logs"
 BURST_DEBUG_DIR = _REPO / "ssvep_burst_debug"
 
-# Как в WinForms: for (int i = 1; i <= 500; i++) Items.Add((1000.0f / i).ToString().Replace(',', '.'))
-_LAMP_FREQ_CHOICES: List[Tuple[str, float]] = []
-
-
-def lamp_frequency_choices() -> List[Tuple[str, float]]:
-    """500 дискретных частот: 1000/i Гц, i = 1..500; подпись с десятичной точкой."""
-    if not _LAMP_FREQ_CHOICES:
-        for i in range(1, 501):
-            v = 1000.0 / float(i)
-            s = f"{v}".replace(",", ".")
-            _LAMP_FREQ_CHOICES.append((s, v))
-    return _LAMP_FREQ_CHOICES
-
-
-def lamp_frequency_closest_index(target_hz: float) -> int:
-    arr = np.array([v for _, v in lamp_frequency_choices()], dtype=np.float64)
-    return int(np.argmin(np.abs(arr - float(target_hz))))
+from ssvep_analysis.lamp_frequencies import (  # noqa: E402
+    CHANNEL_CB_COLUMNS as _CHANNEL_CB_COLUMNS,
+    MSI_DEFAULT_FS as _MSI_DEFAULT_FS,
+    MSI_DEFAULT_WINDOW_SEC as _MSI_DEFAULT_WINDOW_SEC,
+    lamp_frequency_choices,
+    lamp_frequency_closest_index,
+)
 
 
 def _resolve_eeg_streams(timeout: float = 2.0) -> List[StreamInfo]:
@@ -202,8 +192,8 @@ def _coef_to_strings(msi, freqs_hz: Sequence[float]) -> List[str]:
 
 
 class SSVEPAnalyzerWindow(QMainWindow):
-    DEFAULT_FS = 250.0
-    WINDOW_SEC = 2.0
+    DEFAULT_FS = _MSI_DEFAULT_FS
+    WINDOW_SEC = _MSI_DEFAULT_WINDOW_SEC
     BUFFER_MARGIN = 1.15
     MAX_ROLLING_BUFFER_SEC = 8.0
     CLASSIFY_MS = 200
@@ -214,7 +204,7 @@ class SSVEPAnalyzerWindow(QMainWindow):
     # В поток ламп — не чаще одного MSI-решения на длину окна (см. _append_winner_trace).
     WINNER_TRACE_PER_LINE = 24
     CHANNEL_PLOT_SEP = 100.0
-    CHANNEL_CB_COLUMNS = 4
+    CHANNEL_CB_COLUMNS = _CHANNEL_CB_COLUMNS
     MAX_LAMPS = 6
     GANTT_SPAN_SEC = 30.0
     GANTT_MSI_HISTORY = 200
