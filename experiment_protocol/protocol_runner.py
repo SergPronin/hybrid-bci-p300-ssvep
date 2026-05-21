@@ -34,7 +34,7 @@ from p300_analysis.marker_parsing import parse_trial_end, parse_trial_target_til
 from p300_analysis.online_engine import P300Decision, P300EngineParams, P300OnlineEngine
 from p300_analysis.winner_selection import WINNER_MODE_AUC, WINNER_MODE_TEMPLATE_CORR
 from ssvep_analysis.migalka_serial_controller import MigalkaConfig, MigalkaSerialController
-from ssvep_analysis.online_engine import SSVEPOnlineEngine, SSVEPParams
+from ssvep_analysis.online_engine import SSVEPDecision, SSVEPOnlineEngine, SSVEPParams
 
 
 @dataclass(frozen=True)
@@ -142,6 +142,7 @@ class ProtocolRunner:
 
         self._ssvep_block_started_at: Optional[float] = None
         self._ssvep_target_lamp: Optional[int] = None
+        self._ssvep_last_msi_log_at: Optional[float] = None
         self._template_locked: bool = False
 
         # Неблокирующая пауза перед стартом следующей "единицы эксперимента" (trial/block).
@@ -726,6 +727,113 @@ class ProtocolRunner:
             return True
         return False
 
+    def _p300_tile_label(self, tile_id: Optional[int]) -> str:
+        if tile_id is None:
+            return "—"
+        return str(int(tile_id))
+
+    def _p300_correct_label(self, ok: Optional[bool]) -> str:
+        if ok is True:
+            return "верно"
+        if ok is False:
+            return "неверно"
+        return "нет решения"
+
+    def _log_p300_per_tile_metrics(self, method_label: str, dec_dict: Dict[str, Any], cue_tid: int) -> None:
+        dbg = dec_dict.get("debug") if isinstance(dec_dict.get("debug"), dict) else {}
+        keys = dbg.get("stim_keys") or []
+        vals = dbg.get("final_metric_values")
+        if not keys or vals is None:
+            return
+        plog.info(f"  {method_label} — метрики по плиткам:")
+        for k, v in zip(keys, vals):
+            tid = stim_key_to_tile_digit(str(k))
+            mark = " ← цель" if tid is not None and int(tid) == int(cue_tid) else ""
+            plog.info(f"    плитка {tid}: {float(v):.4f}{mark}")
+
+    def _log_p300_experiment_result(
+        self,
+        *,
+        phase: str,
+        cue_tid: int,
+        planned_tid: int,
+        auc_d: Dict[str, Any],
+        tpl_d: Dict[str, Any],
+        agree: bool,
+        queue_index: Optional[int] = None,
+    ) -> None:
+        phase_ru = {"calib": "калибровка", "main": "основной блок"}.get(str(phase), str(phase))
+        exp_tag = self._status_progress_label() if phase == "main" else f"Калибровка P300"
+        plog.info(f"════ Итог P300 ({phase_ru}, {exp_tag}) ════")
+        plog.info(f"Испытуемый смотрел на плитку: {cue_tid}")
+        if planned_tid >= 0 and int(planned_tid) != int(cue_tid):
+            plog.info(f"Плановая плитка в очереди: {int(planned_tid)}")
+        auc_w = auc_d.get("winner_tile_id")
+        tpl_w = tpl_d.get("winner_tile_id")
+        auc_ok = auc_d.get("winner_tile_id") == cue_tid if cue_tid >= 0 else None
+        tpl_ok = tpl_d.get("winner_tile_id") == cue_tid if cue_tid >= 0 else None
+        plog.info(
+            f"AUC → плитка {self._p300_tile_label(auc_w)} ({self._p300_correct_label(auc_ok)})"
+        )
+        plog.info(
+            f"Шаблон → плитка {self._p300_tile_label(tpl_w)} ({self._p300_correct_label(tpl_ok)})"
+        )
+        plog.info(f"Методы совпали: {'да' if agree else 'нет'}")
+        if cue_tid >= 0:
+            self._log_p300_per_tile_metrics("AUC", auc_d, cue_tid)
+            self._log_p300_per_tile_metrics("Шаблон", tpl_d, cue_tid)
+        if queue_index is not None:
+            plog.info(f"Индекс в очереди: {int(queue_index)}")
+
+    def _log_ssvep_msi_result(
+        self,
+        *,
+        dec: SSVEPDecision,
+        mode: str,
+        target_lamp_0idx: Optional[int],
+        elapsed_s: Optional[float] = None,
+        final: bool = False,
+    ) -> None:
+        freqs = list(self._active_ssvep_freqs_hz())
+        tag = "итог блока" if final else "MSI (окно)"
+        elapsed_sfx = f", t={float(elapsed_s):.1f} с" if elapsed_s is not None else ""
+        plog.info(f"──── ССВП {_ru_ssvep_stim_mode(mode)} — {tag}{elapsed_sfx} ────")
+        if target_lamp_0idx is not None:
+            plog.info(
+                f"Целевая лампа: L{int(target_lamp_0idx) + 1} "
+                f"({freqs[int(target_lamp_0idx)]:.3f} Гц)"
+                if 0 <= int(target_lamp_0idx) < len(freqs)
+                else f"Целевая лампа (0-based): {int(target_lamp_0idx)}"
+            )
+        if not dec.classify_allowed:
+            plog.info(f"MSI: классификация недоступна — {dec.debug}")
+            return
+        w1 = dec.winner_1based
+        w0 = dec.winner_0idx
+        ok = (
+            int(w0) == int(target_lamp_0idx)
+            if w0 is not None and target_lamp_0idx is not None
+            else None
+        )
+        plog.info(
+            f"MSI победитель: L{w1} (индекс {w0}) — {self._p300_correct_label(ok)}"
+            if w1 is not None
+            else "MSI победитель: не определён"
+        )
+        if dec.coef:
+            plog.info("MSI Coef по лампам:")
+            for i, c in enumerate(dec.coef):
+                freq = float(freqs[i]) if i < len(freqs) else 0.0
+                mark = ""
+                if target_lamp_0idx is not None and int(i) == int(target_lamp_0idx):
+                    mark = " ← цель"
+                if w0 is not None and int(i) == int(w0):
+                    mark += " ★выбор MSI"
+                plog.info(f"  L{i + 1} ({freq:.3f} Гц): {float(c):.6f}{mark}")
+        dbg = dec.debug or {}
+        if dbg:
+            plog.info(f"MSI debug: {dbg}")
+
     def _decision_to_dict(self, decision: P300Decision, *, method: str) -> Dict[str, Any]:
         winner_tile = (
             stim_key_to_tile_digit(str(decision.winner_key))
@@ -806,9 +914,14 @@ class ProtocolRunner:
         }
         self._logger.append_p300_trial(legacy)
         self._logger.write("trial_decision_dual", legacy)
-        plog.info(
-            f"P300 [{phase}] cue={cue_tid} auc={auc_d.get('winner_tile_id')} "
-            f"tpl={tpl_d.get('winner_tile_id')} agree={agree}"
+        self._log_p300_experiment_result(
+            phase=str(phase),
+            cue_tid=int(cue_tid),
+            planned_tid=int(planned_tid),
+            auc_d=auc_d,
+            tpl_d=tpl_d,
+            agree=bool(agree),
+            queue_index=queue_index,
         )
         self._p300.reset(params=self._p300.params)
         self._p300_trial_armed = False
@@ -1056,6 +1169,7 @@ class ProtocolRunner:
 
         self._ssvep_migalka_fail_streak = 0
         self._ssvep_block_started_at = float(time.time())
+        self._ssvep_last_msi_log_at = None
         self._set_ssvep_blackout(True)
         plog.info(f"мигалка запущена, блок {self.cfg.ssvep_block_sec}s, лампа-цель={self._ssvep_target_lamp}")
         sm = _ru_ssvep_stim_mode(mode)
@@ -1105,6 +1219,19 @@ class ProtocolRunner:
             f"{elapsed:.1f}/{self.cfg.ssvep_block_sec:.0f} с, лампа {self._ssvep_target_lamp}"
         )
         if elapsed < float(self.cfg.ssvep_block_sec):
+            if self._ssvep.can_classify():
+                last = self._ssvep_last_msi_log_at
+                if last is None or (float(time.time()) - float(last)) >= 2.0:
+                    snap = self._ssvep.classify()
+                    if snap.classify_allowed:
+                        self._log_ssvep_msi_result(
+                            dec=snap,
+                            mode=str(mode),
+                            target_lamp_0idx=self._ssvep_target_lamp,
+                            elapsed_s=elapsed,
+                            final=False,
+                        )
+                        self._ssvep_last_msi_log_at = float(time.time())
             return
 
         # End of block: stop migalka and compute MSI decision from last window
@@ -1161,6 +1288,13 @@ class ProtocolRunner:
             "debug": dec.debug,
         }
         self._logger.append_experiment(exp_rec)
+        self._log_ssvep_msi_result(
+            dec=dec,
+            mode=str(mode),
+            target_lamp_0idx=cue_lamp,
+            elapsed_s=float(self.cfg.ssvep_block_sec),
+            final=True,
+        )
 
         if mode == "continuous":
             self._ssvep_block_count_cont += 1
