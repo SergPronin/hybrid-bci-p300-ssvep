@@ -11,15 +11,14 @@ from collections import deque
 from pathlib import Path
 import subprocess
 
-# Один Qt-биндинг на процесс: PyQt6 (как ssvep_analyzer). PyQt5 + PyQt6 → segfault / «QApplication before QWidget».
-os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt6")
+# Только PyQt5 (как в 8d20668). Не импортировать ssvep_analyzer — там PyQt6.
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 
 import numpy as np
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import (
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (
     QApplication,
-    QFrame,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -38,7 +37,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-import pyqtgraph as pg  # noqa: E402  # после PyQt6
+import pyqtgraph as pg  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -47,9 +46,6 @@ if str(_ROOT) not in sys.path:
 from experiment_protocol.protocol_log import info as plog_info  # noqa: E402
 from experiment_protocol.protocol_runner import ProtocolConfig, ProtocolRunner  # noqa: E402
 from experiment_protocol.unified_logger import UnifiedExperimentLogger  # noqa: E402
-from experiment_protocol.protocol_instruction_overlay import (  # noqa: E402
-    ProtocolInstructionOverlay,
-)
 from experiment_protocol.ssvep_cue_overlay import SsvepCueOverlay  # noqa: E402
 from p300_analysis.analysis_profiles import (  # noqa: E402
     ANALYSIS_PROFILE_GENERAL,
@@ -132,9 +128,9 @@ def _wrap_channel_scroll(host: QWidget, *, max_height: int = _CHANNEL_SCROLL_MAX
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setMaximumHeight(int(max_height))
-    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    scroll.setFrameShape(QScrollArea.NoFrame)
     scroll.setWidget(host)
     return scroll
 
@@ -171,7 +167,6 @@ class ProtocolRunnerWidget(QWidget):
         self._last_status_printed: str = ""
         self._eeg_test_inlet = None
         self._ssvep_cue_overlay: SsvepCueOverlay | None = None
-        self._instruction_overlay: ProtocolInstructionOverlay | None = None
         self._eeg_monitor_buf: deque[float] = deque(maxlen=_MONITOR_EEG_PLOT_MAX)
         self._eeg_monitor_channel = 0
         self._eeg_monitor_fs_hz = float(MSI_DEFAULT_FS)
@@ -181,14 +176,11 @@ class ProtocolRunnerWidget(QWidget):
 
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
-        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        settings_scroll.setFrameShape(QFrame.Shape.StyledPanel)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        settings_scroll.setFrameShape(QScrollArea.StyledPanel)
 
         scroll_content = QWidget()
-        scroll_content.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.MinimumExpanding,
-        )
+        scroll_content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(4, 4, 4, 4)
 
@@ -920,7 +912,6 @@ class ProtocolRunnerWidget(QWidget):
         """Перед новым прогоном: закрыть старый runner/COM/LSL и убить зомби run_app."""
         self._close_eeg_test_inlet()
         self._dismiss_ssvep_overlay()
-        self._dismiss_instruction_overlay()
         if self._stimulus_proc is not None:
             try:
                 if self._stimulus_proc.poll() is None:
@@ -1145,85 +1136,6 @@ class ProtocolRunnerWidget(QWidget):
             ov.deleteLater()
         QApplication.processEvents()
 
-    def _dismiss_instruction_overlay(self) -> None:
-        if self._instruction_overlay is not None:
-            ov = self._instruction_overlay
-            self._instruction_overlay = None
-            ov.hide_overlay()
-            ov.deleteLater()
-        QApplication.processEvents()
-
-    def _sync_instruction_overlay(self) -> None:
-        """P300 / пауза / калибровка — полноэкранная подсказка испытуемому."""
-        if self._runner is None:
-            self._dismiss_instruction_overlay()
-            return
-        if self._runner.state in ("finalize", "stopped", "idle"):
-            self._dismiss_instruction_overlay()
-            return
-        if bool(self._runner.ssvep_blackout_visible) or bool(self._runner.ssvep_cue_visible):
-            self._dismiss_instruction_overlay()
-            return
-
-        instr = self._runner.participant_instruction
-        if not instr:
-            self._dismiss_instruction_overlay()
-            return
-
-        if self._instruction_overlay is None:
-            self._instruction_overlay = ProtocolInstructionOverlay()
-
-        kind = str(instr.get("type") or "")
-        if kind == "blackout":
-            self._instruction_overlay.show_blackout()
-        elif kind == "pause":
-            tile = instr.get("tile")
-            if tile is not None and int(tile) >= 0:
-                phase = "Калибровка P300" if str(instr.get("phase")) == "calib" else "P300"
-                self._instruction_overlay.show_p300_cue(
-                    experiment_index=int(instr.get("index") or 1),
-                    experiment_total=int(instr.get("total") or 1),
-                    target_tile_id=int(tile),
-                    phase_label=f"{phase} — {instr.get('message') or 'пауза'}",
-                )
-            else:
-                self._instruction_overlay.show_pause(
-                    message=str(instr.get("message") or "Пауза"),
-                    seconds_left=instr.get("seconds_left"),
-                )
-        elif kind == "calib":
-            self._instruction_overlay.show_p300_cue(
-                experiment_index=int(instr.get("index") or 1),
-                experiment_total=int(instr.get("total") or 1),
-                target_tile_id=int(instr.get("tile") or 0),
-                phase_label="Калибровка P300",
-            )
-        elif kind == "p300":
-            self._instruction_overlay.show_p300_cue(
-                experiment_index=int(instr.get("index") or 1),
-                experiment_total=int(instr.get("total") or 1),
-                target_tile_id=int(instr.get("tile") or 0),
-                phase_label="P300",
-            )
-        elif kind == "ssvep":
-            self._instruction_overlay.show_ssvep_cue(
-                experiment_index=int(instr.get("index") or 1),
-                experiment_total=int(instr.get("total") or 1),
-                lamp_1based=int(instr.get("lamp_1based") or 1),
-                freq_hz=float(instr.get("freq_hz") or 0.0),
-                mode_label=str(instr.get("mode_label") or "ССВП"),
-            )
-        else:
-            self._dismiss_instruction_overlay()
-            return
-        self._instruction_overlay.raise_()
-        self._instruction_overlay.activateWindow()
-
-    def _sync_participant_displays(self) -> None:
-        """Оверлеи испытуемого поверх окна оператора."""
-        self._sync_ssvep_cue_overlay()
-        self._sync_instruction_overlay()
-
     def _restore_operator_window(self) -> None:
         """После ССВП — снова окно настроек поверх чёрного оверлея."""
         if self._runner is not None:
@@ -1236,7 +1148,6 @@ class ProtocolRunnerWidget(QWidget):
             ov.hide()
             ov.close()
             ov.deleteLater()
-        self._dismiss_instruction_overlay()
         self.showNormal()
         self.show()
         self.raise_()
@@ -1254,8 +1165,6 @@ class ProtocolRunnerWidget(QWidget):
             if self._ssvep_cue_overlay is None:
                 self._ssvep_cue_overlay = SsvepCueOverlay()
             self._ssvep_cue_overlay.show_blackout()
-            self._ssvep_cue_overlay.raise_()
-            self._ssvep_cue_overlay.activateWindow()
             return
         if not bool(self._runner.ssvep_cue_visible):
             if self._ssvep_cue_overlay is not None and not bool(self._runner.ssvep_blackout_visible):
@@ -1270,13 +1179,10 @@ class ProtocolRunnerWidget(QWidget):
             freq_hz=float(self._runner.ssvep_cue_freq_hz),
             mode_label=str(self._runner.ssvep_cue_mode_label),
         )
-        self._ssvep_cue_overlay.raise_()
-        self._ssvep_cue_overlay.activateWindow()
 
     def _on_stop(self) -> None:
         self._close_eeg_test_inlet()
         self._dismiss_ssvep_overlay()
-        self._dismiss_instruction_overlay()
         if self._stimulus_proc is not None:
             try:
                 if self._stimulus_proc.poll() is None:
@@ -1300,7 +1206,7 @@ class ProtocolRunnerWidget(QWidget):
         prev = getattr(self, "_last_status_printed", "")
         self._runner.tick()
         self._ensure_stimulus_for_p300()
-        self._sync_participant_displays()
+        self._sync_ssvep_cue_overlay()
         QApplication.processEvents()
         st = self._runner.status_text
         self.lbl_status.setText(st)
@@ -1340,7 +1246,7 @@ def main() -> None:
     app.setStyle("Fusion")
     w = ProtocolRunnerWidget()
     w.show()
-    sys.exit(app.exec())
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":

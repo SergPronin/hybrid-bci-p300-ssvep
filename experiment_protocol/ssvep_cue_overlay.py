@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 # Номер лампы (1…4) → направление взгляда испытуемого
 _LAMP_ARROW: dict[int, str] = {1: "←", 2: "→", 3: "↑", 4: "↓"}
@@ -29,54 +29,50 @@ class SsvepCueOverlay(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setStyleSheet("background-color: #202020;")
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 40, 40, 40)
         root.addStretch(2)
 
         self.lbl_title = QLabel("")
-        self.lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_title.setAlignment(Qt.AlignCenter)
         self.lbl_title.setStyleSheet("color: white;")
-        self.lbl_title.setFont(QFont("", 42, QFont.Weight.Bold))
+        self.lbl_title.setFont(QFont("", 42, QFont.Bold))
         root.addWidget(self.lbl_title)
 
         self.lbl_mode = QLabel("")
-        self.lbl_mode.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_mode.setAlignment(Qt.AlignCenter)
         self.lbl_mode.setStyleSheet("color: #cccccc;")
         self.lbl_mode.setFont(QFont("", 22))
         root.addWidget(self.lbl_mode)
 
         self.lbl_sub = QLabel("Смотрите в направление стрелки (лампа на мигалке):")
-        self.lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_sub.setAlignment(Qt.AlignCenter)
         self.lbl_sub.setStyleSheet("color: white;")
         self.lbl_sub.setFont(QFont("", 28))
         root.addWidget(self.lbl_sub)
 
         self.lbl_arrow = QLabel("")
-        self.lbl_arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_arrow.setAlignment(Qt.AlignCenter)
         self.lbl_arrow.setStyleSheet("color: #ffdd44;")
-        self.lbl_arrow.setFont(QFont("", 140, QFont.Weight.Bold))
+        self.lbl_arrow.setFont(QFont("", 140, QFont.Bold))
         root.addWidget(self.lbl_arrow)
 
         self.lbl_direction = QLabel("")
-        self.lbl_direction.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_direction.setAlignment(Qt.AlignCenter)
         self.lbl_direction.setStyleSheet("color: #cccccc;")
         self.lbl_direction.setFont(QFont("", 26))
         root.addWidget(self.lbl_direction)
 
         self.lbl_lamp = QLabel("")
-        self.lbl_lamp.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_lamp.setAlignment(Qt.AlignCenter)
         self.lbl_lamp.setStyleSheet("color: #ffdd44;")
-        self.lbl_lamp.setFont(QFont("", 96, QFont.Weight.Bold))
+        self.lbl_lamp.setFont(QFont("", 96, QFont.Bold))
         root.addWidget(self.lbl_lamp)
 
         self.lbl_hz = QLabel("")
-        self.lbl_hz.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_hz.setAlignment(Qt.AlignCenter)
         self.lbl_hz.setStyleSheet("color: #ffdd44;")
         self.lbl_hz.setFont(QFont("", 32))
         root.addWidget(self.lbl_hz)
@@ -98,7 +94,7 @@ class SsvepCueOverlay(QWidget):
         screen = QApplication.primaryScreen()
         if screen is not None:
             self.setGeometry(screen.geometry())
-        self.setWindowState(Qt.WindowState.WindowNoState)
+        self.setWindowState(Qt.WindowNoState)
         self.show()
         self.raise_()
 
