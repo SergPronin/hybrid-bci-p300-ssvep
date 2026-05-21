@@ -48,6 +48,9 @@ class SSVEPOnlineEngine:
         if params is not None:
             self.params = params
         self._burst_gate = BurstGate(BurstGateConfig(window_sec=float(self.params.window_sec)))
+        n_lamps = len(self.params.freqs_hz)
+        if n_lamps > 0:
+            self._burst_gate.set_active_lamps(n_lamps)
         self._n_samples = int(round(float(self.params.fs_hz) * float(self.params.window_sec)))
         self._buf_t = []
         self._buf_x = []
@@ -102,8 +105,12 @@ class SSVEPOnlineEngine:
             return False
         if str(self.params.mode) != "burst":
             return True
-        # Burst gating requires sufficient ON time in the same analysis window
-        return bool(self._burst_gate.classify_allowed(float(self._buf_t[-1])) if self._buf_t else False)
+        if not self._buf_t:
+            return False
+        allowed, _reason = self._burst_gate.classify_allowed(
+            np.asarray(self._buf_t, dtype=np.float64)
+        )
+        return bool(allowed)
 
     def classify(self) -> SSVEPDecision:
         self.ensure_msi_ready()
