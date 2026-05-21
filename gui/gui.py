@@ -63,6 +63,7 @@ class StimulusApp:
         self.auto_random_trials = bool(auto_random_trials)
         self.stim_control_dir = Path(stim_control_dir) if stim_control_dir else None
         self._stim_control_wait_trial = False
+        self._stim_control_last_ms = 0
         self.inter_trial_s = max(0.0, float(inter_trial_s))
         self.auto_plan_trials = max(0, int(auto_plan_trials))
         self.auto_plan_target_tile_id = int(auto_plan_target_tile_id)
@@ -455,6 +456,7 @@ class StimulusApp:
             self._clear_waiting_overlay()
             return False
         if state == "paused":
+            self._stim_control_wait_trial = False
             msg = str(cmd.get("message") or "Скоро начнётся прогон")
             self._show_waiting_overlay(line1="Ожидание протокола", line2=msg)
             self._draw()
@@ -463,7 +465,9 @@ class StimulusApp:
             return True
         if state == "trial":
             tid = int(cmd.get("target_tile_id") or 0)
-            if not self._stim_control_wait_trial:
+            cmd_ms = int(cmd.get("unix_ms") or 0)
+            if not self._stim_control_wait_trial and cmd_ms != int(self._stim_control_last_ms):
+                self._stim_control_last_ms = cmd_ms
                 self._clear_waiting_overlay()
                 self._auto_trials_started += 1
                 self._schedule_auto_trial(target_tile_id=tid)
@@ -473,6 +477,8 @@ class StimulusApp:
                 self._draw_auto_overlay()
                 self.win.flip()
                 return True
+            # Пауза закончилась — идёт прогон с плитками (не перекрывать ожиданием).
+            return False
         self._show_waiting_overlay(line1="Ожидание протокола", line2="…")
         self._draw()
         self._draw_auto_overlay()
@@ -717,7 +723,9 @@ class StimulusApp:
                         self.show_controls = True
                         self.win.mouseVisible = True
             self._draw()
-            self._draw_auto_overlay()
+            # Серый оверлей только между trial, не во время мигания плиток.
+            if self._auto_pause_active() or self._overlay_force_show:
+                self._draw_auto_overlay()
             self.win.flip()
             keys = event.getKeys()
             if "escape" in keys:
