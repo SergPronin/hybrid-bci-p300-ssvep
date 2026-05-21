@@ -1,0 +1,51 @@
+{
+  "schema": "hybrid_protocol/v1",
+  "session_id": "session_20260520_123843_923082",
+  "subject_id": "subject_001",
+  "protocol_plan": {
+    "p300": {
+      "modes": [
+        "auc",
+        "template_corr"
+      ],
+      "trials_per_mode": 1,
+      "warmup_target_epochs": 12
+    },
+    "ssvep": {
+      "modes": [
+        "continuous",
+        "burst"
+      ],
+      "blocks_per_mode": 1,
+      "block_sec": 6.0,
+      "window_sec": 2.0,
+      "fs_hz": 250.0,
+      "freqs_hz": [
+        10.0,
+        12.0,
+        15.0,
+        20.0,
+        8.57,
+        7.5
+      ]
+    }
+  },
+  "start": {
+    "note": "protocol_start"
+  },
+  "paths": {
+    "events": "D:\\PyhtonVGUProjeckt\\hybrid-bci-p300-ssvep\\experiment_runs\\session_20260520_123843_923082_subject_001\\events.ndjson",
+    "manifest": "D:\\PyhtonVGUProjeckt\\hybrid-bci-p300-ssvep\\experiment_runs\\session_20260520_123843_923082_subject_001\\manifest.json",
+    "eeg_npz": "D:\\PyhtonVGUProjeckt\\hybrid-bci-p300-ssvep\\experiment_runs\\session_20260520_123843_923082_subject_001\\eeg.npz",
+    "p300_trials": "D:\\PyhtonVGUProjeckt\\hybrid-bci-p300-ssvep\\experiment_runs\\session_20260520_123843_923082_subject_001\\p300_trials.ndjson",
+    "ssvep_blocks": "D:\\PyhtonVGUProjeckt\\hybrid-bci-p300-ssvep\\experiment_runs\\session_20260520_123843_923082_subject_001\\ssvep_blocks.ndjson"
+  },
+  "stop": {
+    "reason": "user_stop"
+  },
+  "n_events": 1754,
+  "eeg_npz": "D:\\PyhtonVGUProjeckt\\hybrid-bci-p300-ssvep\\experiment_runs\\session_20260520_123843_923082_subject_001\\eeg.npz",
+  "eeg_samples": 110030,
+  "eeg_channels": 21,
+  "eeg_t_span_sec": 110.0
+}

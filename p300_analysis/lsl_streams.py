@@ -96,6 +96,16 @@ def select_eeg_stream(
                 return s
         except Exception:
             continue
+    # NeuronSpectrum и др.: имя потока часто с датой/временем — допускаем префикс.
+    if want_name:
+        prefix = want_name.lower()
+        for s in streams:
+            try:
+                n = (s.name() or "").strip()
+                if n.lower().startswith(prefix):
+                    return s
+            except Exception:
+                continue
     return None
 
 

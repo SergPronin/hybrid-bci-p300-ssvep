@@ -50,9 +50,18 @@ def _guess_msi_target_framework_major(msi_dll: Path) -> int | None:
     return max(majors)
 
 
+def _dotnet_exe_in_root(dotnet_root: Path) -> Path | None:
+    """Путь к dotnet CLI внутри DOTNET_ROOT (dotnet.exe на Windows)."""
+    for name in ("dotnet.exe", "dotnet"):
+        candidate = dotnet_root / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _installed_netcore_major_versions(dotnet_root: Path) -> set[int]:
-    dotnet_exe = dotnet_root / "dotnet"
-    if not dotnet_exe.is_file():
+    dotnet_exe = _dotnet_exe_in_root(dotnet_root)
+    if dotnet_exe is None:
         return set()
     try:
         out = subprocess.run(
@@ -106,11 +115,23 @@ def _resolve_dotnet_root() -> Path | None:
         if p.is_dir():
             return p
     for candidate in (
+        Path(r"C:\Program Files\dotnet"),
+        Path(r"C:\Program Files (x86)\dotnet"),
         Path("/opt/homebrew/share/dotnet"),
         Path("/usr/local/share/dotnet"),
     ):
-        if candidate.is_dir():
+        if candidate.is_dir() and _dotnet_exe_in_root(candidate) is not None:
             return candidate
+    try:
+        import shutil
+
+        which = shutil.which("dotnet")
+        if which:
+            root = Path(which).resolve().parent
+            if root.is_dir():
+                return root
+    except Exception:
+        pass
     return None
 
 

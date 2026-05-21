@@ -1,0 +1,47 @@
+{
+  "schema": "hybrid_protocol/v1",
+  "session_id": "session_20260521_121300_780809",
+  "subject_id": "smoke_test",
+  "protocol_plan": {
+    "p300": {
+      "modes": [
+        "auc",
+        "template_corr"
+      ],
+      "trials_per_mode": 1,
+      "warmup_target_epochs": 2
+    },
+    "ssvep": {
+      "modes": [
+        "continuous",
+        "burst"
+      ],
+      "blocks_per_mode": 1,
+      "block_sec": 0.2,
+      "window_sec": 2.0,
+      "fs_hz": 250.0,
+      "freqs_hz": [
+        10.0,
+        10.1010101010101,
+        11.494252873563218,
+        13.157894736842104
+      ],
+      "roi_channels_0idx": []
+    }
+  },
+  "start": {
+    "note": "protocol_start"
+  },
+  "paths": {
+    "events": "experiment_runs\\_protocol_smoke\\session_20260521_121300_780809_smoke_test\\events.ndjson",
+    "manifest": "experiment_runs\\_protocol_smoke\\session_20260521_121300_780809_smoke_test\\manifest.json",
+    "eeg_npz": "experiment_runs\\_protocol_smoke\\session_20260521_121300_780809_smoke_test\\eeg.npz",
+    "p300_trials": "experiment_runs\\_protocol_smoke\\session_20260521_121300_780809_smoke_test\\p300_trials.ndjson",
+    "ssvep_blocks": "experiment_runs\\_protocol_smoke\\session_20260521_121300_780809_smoke_test\\ssvep_blocks.ndjson"
+  },
+  "stop": {
+    "reason": "timeout"
+  },
+  "n_events": 2,
+  "eeg_npz": null
+}
