@@ -31,6 +31,10 @@ class MigalkaLslSender:
             print(f"LSL Migalka: не удалось создать стрим: {e}")
             self._outlet = None
 
+    def close(self) -> None:
+        """Освободить LSL outlet (иначе MigalkaStimMarkers виден после остановки протокола)."""
+        self._outlet = None
+
     def send_lamp_event(self, lamp_index: int, event: str) -> None:
         """lamp_index 0..5 → маркер 100+index|on|off (как BCI_StimMarkers)."""
         if self._outlet is None:

@@ -43,11 +43,13 @@ from p300_analysis.analysis_profiles import (  # noqa: E402
     get_analysis_profile,
 )
 from p300_analysis.lsl_streams import (  # noqa: E402
+    BCI_STIM_MARKER_STREAM_NAME,
     discover_eeg_streams,
     select_eeg_stream,
     stream_channel_labels,
     stream_display_label,
     stream_inlet_with_buffer,
+    wait_for_stimulus_marker_stream,
 )
 from ssvep_analyzer import lamp_frequency_choices, lamp_frequency_closest_index  # noqa: E402
 
@@ -595,7 +597,53 @@ class ProtocolRunnerWidget(QWidget):
     def _ssvep_freqs_hz(self) -> tuple[float, ...]:
         return tuple(_combo_freq_hz(c) for c in self._freq_combos)
 
+    def _cleanup_before_start(self) -> None:
+        """Перед новым прогоном: закрыть старый runner/COM/LSL и убить зомби run_app."""
+        self._close_eeg_test_inlet()
+        self._dismiss_ssvep_overlay()
+        if self._stimulus_proc is not None:
+            try:
+                if self._stimulus_proc.poll() is None:
+                    self._stimulus_proc.terminate()
+                    try:
+                        self._stimulus_proc.wait(timeout=3)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            self._stimulus_proc = None
+        if self._runner is not None:
+            try:
+                if str(self._runner.state) not in ("idle", "stopped"):
+                    self._runner.stop(reason="restart")
+            except Exception:
+                pass
+            self._runner = None
+        self._timer.stop()
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+
+    def _wait_bci_stim_markers(self, max_wait_sec: float = 35.0) -> bool:
+        """Ждём BCI_StimMarkers после запуска run_app (не MigalkaStimMarkers от прошлого ССВП)."""
+        deadline = time.time() + float(max_wait_sec)
+        while time.time() < deadline:
+            info_mk, _ = wait_for_stimulus_marker_stream(max_wait_sec=0.8, poll_interval_sec=0.2)
+            if info_mk is not None:
+                try:
+                    plog_info(f"стимулятор LSL OK: {info_mk.name()!r}")
+                except Exception:
+                    plog_info("стимулятор LSL OK")
+                return True
+            remain = max(0.0, deadline - time.time())
+            self.lbl_status.setText(
+                f"Ожидание {BCI_STIM_MARKER_STREAM_NAME}… ({remain:.0f} с)"
+            )
+            QApplication.processEvents()
+            time.sleep(0.25)
+        return False
+
     def _on_start(self) -> None:
+        self._cleanup_before_start()
         subject = self.ed_subject.text().strip()
         out_root = self.ed_output.text().strip()
         com = self.cb_com.currentText().strip()
@@ -684,10 +732,21 @@ class ProtocolRunnerWidget(QWidget):
                     stim_args,
                     cwd=str(_ROOT),
                 )
-                plog_info("ожидание стимулятора и BCI_StimMarkers (3 с)…")
-                for _ in range(30):
-                    QApplication.processEvents()
-                    time.sleep(0.1)
+                plog_info(f"ожидание {BCI_STIM_MARKER_STREAM_NAME} (до 35 с)…")
+                if not self._wait_bci_stim_markers(max_wait_sec=35.0):
+                    QMessageBox.warning(
+                        self,
+                        "Стимулятор",
+                        f"Поток «{BCI_STIM_MARKER_STREAM_NAME}» не появился за 35 с.\n"
+                        "Дождитесь окна PsychoPy или перезапустите «Запустить протокол».",
+                    )
+                    try:
+                        if self._stimulus_proc.poll() is None:
+                            self._stimulus_proc.terminate()
+                    except Exception:
+                        pass
+                    self._stimulus_proc = None
+                    return
 
         cfg = ProtocolConfig(
             output_root=Path(out_root),
@@ -826,6 +885,7 @@ class ProtocolRunnerWidget(QWidget):
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
             self._restore_operator_window()
+            self._runner = None
         elif str(st).startswith("Готово."):
             self._restore_operator_window()
 

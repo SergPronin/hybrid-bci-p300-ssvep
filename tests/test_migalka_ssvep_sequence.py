@@ -36,14 +36,13 @@ def test_continuous_apply_sends_m0_then_freqs_not_only_zeros() -> None:
     assert lines.count("M 0") == 1
 
 
-def test_burst_apply_sends_m1_before_active_freqs() -> None:
+def test_burst_apply_zeros_then_m1_then_active_freqs() -> None:
     ctrl, lines, _ = _capture_controller()
     cfg = MigalkaConfig(port="COM1", mode=1, freqs=("12.0", "0", "0", "0", "0", "0"))
     ctrl._apply_config(cfg)
-    m_indices = [i for i, ln in enumerate(lines) if ln.startswith("M ")]
-    assert lines[m_indices[0]] == "M 1"
-    assert "0 0 0 0 0 0" in lines
-    assert "12.0" in lines[-1]
+    assert lines[0] == "0 0 0 0 0 0"
+    assert lines[1] == "M 1"
+    assert lines[-1] == "12.0 0 0 0 0 0"
 
 
 def test_standby_burst_keeps_m1_zeros() -> None:

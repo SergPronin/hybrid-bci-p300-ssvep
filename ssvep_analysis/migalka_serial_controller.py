@@ -32,6 +32,9 @@ LampEvent = Tuple[int, bool, str]  # (lamp_index, is_on, raw_line)
 
 _OFF6 = ("0", "0", "0", "0", "0", "0")
 
+# Пауза после M1 до строки частот (прошивка должна успеть сменить mode).
+_BURST_MODE_SETTLE_S = 0.35
+
 
 class MigalkaSerialController:
     """Direct COM control for Arduino Due Migalka + optional LSL marker mirroring."""
@@ -73,15 +76,46 @@ class MigalkaSerialController:
         self._write_line(" ".join(vals))
 
     def _apply_config(self, cfg: MigalkaConfig) -> None:
-        """Постоянный: M0 + частоты. Пакетный: M1 + (опц. нули) + частоты."""
+        """Постоянный: M0 + частоты (как migalka.py / MyForm).
+
+        Пакетный: сначала 0×6 (гасит continuous-таймеры), затем M1, затем частоты.
+        Без строки нулей между M1 и частотами — иначе в прошивке при M1 сразу
+        перезапускаются старые targetFreq[] и лампы мигают как в постоянном режиме.
+        """
         m = 0 if int(cfg.mode) <= 0 else 1
-        self._send_mode(m)
-        time.sleep(0.06)
         if m == 1:
             self._send_freqs(_OFF6)
-            time.sleep(0.05)
-        self._send_freqs(cfg.freqs)
+            time.sleep(0.15)
+            self._send_mode(1)
+            time.sleep(_BURST_MODE_SETTLE_S)
+            self._send_freqs(cfg.freqs)
+        else:
+            self._send_mode(0)
+            time.sleep(0.06)
+            self._send_freqs(cfg.freqs)
         _log_info(f"apply: M {m}, freqs={' '.join(cfg.freqs)}")
+
+    def halt_lamps(self) -> None:
+        """Погасить все лампы (0×6), не закрывая порт — перед stop или перед пакетным."""
+        with self._lock:
+            if not self.is_open():
+                return
+            _log_info("halt_lamps: 0×6")
+            self._send_freqs(_OFF6)
+            time.sleep(0.35)
+
+    def prepare_burst_handoff(self) -> None:
+        """После continuous: M1 + нули, порт остаётся открыт (без close/reopen)."""
+        with self._lock:
+            if not self.is_open():
+                return
+            _log_info("handoff continuous->burst: 0×6, M1, 0×6 (порт открыт)")
+            self._send_freqs(_OFF6)
+            time.sleep(0.15)
+            self._send_mode(1)
+            time.sleep(0.2)
+            self._send_freqs(_OFF6)
+            time.sleep(0.15)
 
     def _ensure_reader_thread(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -90,14 +124,22 @@ class MigalkaSerialController:
         self._thread.start()
 
     def _open_port(self, cfg: MigalkaConfig) -> None:
+        burst = int(cfg.mode) > 0
         _log_info(
             f"открываем COM {cfg.port!r} baud={cfg.baudrate}, mode={cfg.mode} "
-            f"({'постоянный' if int(cfg.mode) == 0 else 'пакетный'})"
+            f"({'постоянный' if not burst else 'пакетный'})"
         )
         self._ser = serial.Serial(cfg.port, cfg.baudrate, timeout=cfg.timeout_s)
-        time.sleep(0.5)
         self._running = True
         self._ensure_reader_thread()
+        if burst:
+            # После continuous порт закрыт, но таймеры на Due могут ещё крутиться.
+            # Сразу гасим, без 0.5 с тишины в постоянном режиме.
+            _log_info("пакетный: сразу 0×6 после открытия COM")
+            self._send_freqs(_OFF6)
+            time.sleep(0.2)
+        else:
+            time.sleep(0.5)
 
     def open_and_start(self, cfg: MigalkaConfig) -> None:
         with self._lock:
@@ -132,7 +174,7 @@ class MigalkaSerialController:
             try:
                 if self.is_open():
                     self._send_freqs(_OFF6)
-                    time.sleep(0.1)
+                    time.sleep(0.35)
             except Exception:
                 pass
             try:
@@ -142,6 +184,8 @@ class MigalkaSerialController:
                 pass
             self._ser = None
             self._last_mode = None
+            if self._lsl is not None:
+                self._lsl.close()
 
     def set_mode(self, mode: int) -> None:
         with self._lock:

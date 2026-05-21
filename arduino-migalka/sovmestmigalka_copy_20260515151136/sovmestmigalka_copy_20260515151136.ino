@@ -83,7 +83,7 @@ static void applyTargetFreq(int i, float temp_freq, bool force) {
 
   targetFreq[i] = temp_freq;
 
-  if (temp_freq > 0.0f) {
+    if (temp_freq > 0.0f) {
     freq[i] = (long)lround(period_float / temp_freq);
 
     if (mode == 0) {
@@ -91,7 +91,8 @@ static void applyTargetFreq(int i, float temp_freq, bool force) {
       led_timers[i].stop();
       led_timers[i].start(freq[i]);
     } else {
-      beginBurstPhase(i);
+      // Пакетный: старт с паузы (лампы выкл), иначе первые MIN_BURST_MS выглядят как постоянный режим.
+      beginPausePhase(i);
     }
   } else {
     lampOff(i);

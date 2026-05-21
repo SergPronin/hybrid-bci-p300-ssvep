@@ -392,9 +392,19 @@ class ProtocolRunner:
                 f"Preflight: нет потока {BCI_STIM_MARKER_STREAM_NAME!r} "
                 f"(найдены Markers: {names}; нужен run_app.py / PsychoPy, не только мигалка)"
             )
+            only_migalka = names == ["MigalkaStimMarkers"] or (
+                len(names) == 1 and "migalka" in (names[0] or "").lower()
+            )
+            hint = (
+                " Остался поток мигалки от прошлого ССВП — нажмите «Запустить» снова "
+                "(GUI перезапустит стимулятор) или перезапустите protocol_runner_gui."
+                if only_migalka
+                else ""
+            )
             self.status_text = (
                 f"Предстарт: нет потока маркеров плиток «{BCI_STIM_MARKER_STREAM_NAME}». "
                 "Запустите стимулятор (галочка в GUI или run_app.py) и подождите 5–10 с."
+                f"{hint}"
             )
             return
         try:
@@ -680,8 +690,8 @@ class ProtocolRunner:
         )
         try:
             if str(mode) == "burst" and self._migalka.is_open():
-                plog.info("ССВП пакетный: COM уже открыт после continuous — reconfigure без reset")
-                self._migalka.reconfigure(mcfg)
+                plog.info("пакетный: COM уже открыт после continuous — только apply")
+                self._migalka.open_and_start(mcfg)
             else:
                 try:
                     self._migalka.stop_and_close()
@@ -767,14 +777,12 @@ class ProtocolRunner:
             and (int(self._ssvep_block_count_cont) + 1) >= int(self.cfg.ssvep_blocks_per_mode)
         )
         if cont_handoff_burst:
+            plog.info("последний continuous -> halt + handoff M1 (COM остаётся открыт)")
             try:
-                self._migalka.standby_burst_between_phases()
+                self._migalka.halt_lamps()
+                self._migalka.prepare_burst_handoff()
             except Exception as e:
-                plog.exc("standby_burst_between_phases", e)
-                try:
-                    self._migalka.stop_and_close()
-                except Exception:
-                    pass
+                plog.exc("handoff continuous->burst", e)
         else:
             try:
                 self._migalka.stop_and_close()
