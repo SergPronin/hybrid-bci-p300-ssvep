@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import time
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ class SessionPaths:
     eeg_npz_path: Path
     p300_trials_path: Path
     ssvep_blocks_path: Path
+    experiments_path: Path
 
 
 class UnifiedExperimentLogger:
@@ -55,6 +57,8 @@ class UnifiedExperimentLogger:
         "_manifest",
         "_p300_trials_fh",
         "_ssvep_blocks_fh",
+        "_experiments_fh",
+        "_n_experiments",
     )
 
     def __init__(
@@ -79,6 +83,8 @@ class UnifiedExperimentLogger:
         self._manifest = manifest
         self._p300_trials_fh = open(paths.p300_trials_path, "a", encoding="utf-8", buffering=1)
         self._ssvep_blocks_fh = open(paths.ssvep_blocks_path, "a", encoding="utf-8", buffering=1)
+        self._experiments_fh = open(paths.experiments_path, "a", encoding="utf-8", buffering=1)
+        self._n_experiments = 0
 
     @property
     def session_dir(self) -> Path:
@@ -88,6 +94,18 @@ class UnifiedExperimentLogger:
     def paths(self) -> SessionPaths:
         return self._paths
 
+    @staticmethod
+    def allocate_session_dir(*, output_root: Path, subject_id: str) -> Path:
+        """Создать папку сессии до старта стимулятора (общий stim_control)."""
+        output_root.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        pid = f"{int(time.time() * 1000) % 1_000_000:06d}"
+        session_id = f"session_{stamp}_{pid}"
+        session_dir = output_root / f"{session_id}_{subject_id}".strip("_")
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "plots").mkdir(exist_ok=True)
+        return session_dir
+
     @classmethod
     def open_new(
         cls,
@@ -96,14 +114,21 @@ class UnifiedExperimentLogger:
         subject_id: str,
         protocol_plan: Dict[str, Any],
         start_payload: Dict[str, Any],
+        session_dir: Optional[Path] = None,
     ) -> "UnifiedExperimentLogger":
         output_root.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        pid = f"{int(time.time() * 1000) % 1_000_000:06d}"
-        session_id = f"session_{stamp}_{pid}"
-        session_dir = output_root / f"{session_id}_{subject_id}".strip("_")
-        session_dir.mkdir(parents=True, exist_ok=True)
-        (session_dir / "plots").mkdir(exist_ok=True)
+        if session_dir is None:
+            session_dir = cls.allocate_session_dir(output_root=output_root, subject_id=subject_id)
+        else:
+            session_dir = Path(session_dir)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / "plots").mkdir(exist_ok=True)
+        subj = str(subject_id).strip("_")
+        suffix = f"_{subj}" if subj else ""
+        if suffix and session_dir.name.endswith(suffix):
+            session_id = session_dir.name[: -len(suffix)]
+        else:
+            session_id = session_dir.name
 
         paths = SessionPaths(
             session_dir=session_dir,
@@ -112,6 +137,7 @@ class UnifiedExperimentLogger:
             eeg_npz_path=session_dir / "eeg.npz",
             p300_trials_path=session_dir / "p300_trials.ndjson",
             ssvep_blocks_path=session_dir / "ssvep_blocks.ndjson",
+            experiments_path=session_dir / "experiments.ndjson",
         )
         fh = open(paths.events_path, "a", encoding="utf-8", buffering=1)
 
@@ -127,6 +153,7 @@ class UnifiedExperimentLogger:
                 "eeg_npz": str(paths.eeg_npz_path),
                 "p300_trials": str(paths.p300_trials_path),
                 "ssvep_blocks": str(paths.ssvep_blocks_path),
+                "experiments": str(paths.experiments_path),
             },
         }
 
@@ -219,6 +246,20 @@ class UnifiedExperimentLogger:
         except Exception:
             pass
 
+    def append_experiment(self, rec: Dict[str, Any]) -> int:
+        """Одна строка = одна единица протокола (калибровка / P300 / SSVEP) для разбора медиками."""
+        if self._closed:
+            return self._n_experiments
+        self._n_experiments += 1
+        row = dict(rec)
+        row.setdefault("experiment_record_id", int(self._n_experiments))
+        try:
+            self._experiments_fh.write(json.dumps(_json_safe(row), ensure_ascii=False) + "\n")
+            self._experiments_fh.flush()
+        except Exception:
+            pass
+        return int(self._n_experiments)
+
     def finalize(self, *, stop_payload: Dict[str, Any]) -> Path:
         if self._closed:
             return self._dir
@@ -227,6 +268,7 @@ class UnifiedExperimentLogger:
         manifest = dict(self._manifest)
         manifest["stop"] = _json_safe(stop_payload)
         manifest["n_events"] = int(self._n_events)
+        manifest["n_experiments"] = int(self._n_experiments)
 
         if self._eeg_times and self._eeg_data:
             eeg = np.vstack(self._eeg_data)
@@ -258,14 +300,61 @@ class UnifiedExperimentLogger:
         except Exception:
             pass
 
+        self._export_experiments_csv()
         self.close()
         return self._dir
+
+    def _export_experiments_csv(self) -> None:
+        src = self._paths.experiments_path
+        if not src.is_file():
+            return
+        dst = self._dir / "experiments.csv"
+        rows: List[Dict[str, Any]] = []
+        try:
+            for line in src.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rows.append(json.loads(line))
+        except Exception:
+            return
+        if not rows:
+            return
+        flat: List[Dict[str, Any]] = []
+        for r in rows:
+            flat.append(
+                {
+                    "experiment_record_id": r.get("experiment_record_id"),
+                    "phase": r.get("phase"),
+                    "kind": r.get("kind"),
+                    "queue_index": r.get("queue_index"),
+                    "cue_target_tile_id": r.get("cue_target_tile_id"),
+                    "ground_truth_tile_id": r.get("ground_truth_tile_id"),
+                    "auc_winner_tile": (r.get("auc") or {}).get("winner_tile_id"),
+                    "template_winner_tile": (r.get("template_corr") or {}).get("winner_tile_id"),
+                    "methods_agree": r.get("methods_agree"),
+                    "correct_auc": r.get("correct_auc"),
+                    "correct_template": r.get("correct_template"),
+                    "ssvep_mode": r.get("ssvep_mode"),
+                    "cue_target_lamp_1based": r.get("cue_target_lamp_1based"),
+                    "winner_1based": r.get("winner_1based"),
+                    "correct_ssvep": r.get("correct"),
+                }
+            )
+        fieldnames = list(flat[0].keys())
+        try:
+            with dst.open("w", encoding="utf-8", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(flat)
+        except Exception:
+            pass
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        for h in (self._p300_trials_fh, self._ssvep_blocks_fh, self._fh):
+        for h in (self._p300_trials_fh, self._ssvep_blocks_fh, self._experiments_fh, self._fh):
             try:
                 h.close()
             except Exception:

@@ -11,6 +11,7 @@ def main(
     auto_plan_target_epochs: int = 12,
     sequences_override: int | None = None,
     auto_max_trials: int | None = None,
+    stim_control_dir: str | None = None,
 ) -> None:
     app = StimulusApp(
         auto_random_trials=auto_random_trials,
@@ -21,6 +22,7 @@ def main(
         auto_plan_target_epochs=auto_plan_target_epochs,
         sequences_override=sequences_override,
         auto_max_trials=auto_max_trials,
+        stim_control_dir=stim_control_dir,
     )
     app.run()
 

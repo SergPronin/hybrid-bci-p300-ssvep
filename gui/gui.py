@@ -1,6 +1,7 @@
 import math
 import random
-from typing import List, Tuple
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 from psychopy import core, event, visual
 
@@ -57,8 +58,11 @@ class StimulusApp:
         auto_plan_target_epochs: int = 12,
         sequences_override: int | None = None,
         auto_max_trials: int | None = None,
+        stim_control_dir: str | Path | None = None,
     ) -> None:
         self.auto_random_trials = bool(auto_random_trials)
+        self.stim_control_dir = Path(stim_control_dir) if stim_control_dir else None
+        self._stim_control_wait_trial = False
         self.inter_trial_s = max(0.0, float(inter_trial_s))
         self.auto_plan_trials = max(0, int(auto_plan_trials))
         self.auto_plan_target_tile_id = int(auto_plan_target_tile_id)
@@ -384,6 +388,53 @@ class StimulusApp:
             self._start_trial_with_target(tgt)
         return False
 
+    def _in_stim_control_phase(self) -> bool:
+        return (
+            self.stim_control_dir is not None
+            and self._auto_trials_started >= len(self._auto_target_plan)
+        )
+
+    def _draw_protocol_wait_overlay(self, *, message: str) -> None:
+        self._auto_overlay_title.text = "Ожидание протокола"
+        self._auto_overlay_sub.text = str(message or "Пауза — смотрите на инструкцию на втором экране")
+        self._auto_overlay_target_num.text = ""
+        self._auto_overlay_bg.draw()
+        self._auto_overlay_title.draw()
+        self._auto_overlay_sub.draw()
+
+    def _poll_stim_control(self) -> bool:
+        """True — кадр отрисован, основной цикл должен continue."""
+        if not self._in_stim_control_phase():
+            return False
+        from experiment_protocol import stim_control as sc
+
+        cmd = sc.read_control(self.stim_control_dir)  # type: ignore[arg-type]
+        if cmd is None:
+            self._draw_protocol_wait_overlay(message="Нет stim_control.json")
+            self.win.flip()
+            return True
+        state = str(cmd.get("state") or "paused")
+        if state == "done":
+            return False
+        if state == "paused":
+            self._draw_protocol_wait_overlay(message=str(cmd.get("message") or ""))
+            self.win.flip()
+            return True
+        if state == "trial":
+            if not self._stim_control_wait_trial:
+                tid = int(cmd.get("target_tile_id") or 0)
+                self._auto_trials_started += 1
+                self._schedule_auto_trial(target_tile_id=tid)
+                self._stim_control_wait_trial = True
+            if self._auto_pause_active():
+                self._draw()
+                self._draw_auto_overlay()
+                self.win.flip()
+                return True
+        self._draw_protocol_wait_overlay(message="…")
+        self.win.flip()
+        return True
+
     def _draw_auto_overlay(self) -> None:
         """Draw 'experiment number' + instruction during pause."""
         if not self.auto_random_trials:
@@ -561,9 +612,29 @@ class StimulusApp:
 
     def run(self) -> None:
         while True:
-            # Stop auto stimulator after N trials (so protocol can move to SSVEP without extra P300).
-            if self.auto_random_trials and self._auto_max_trials is not None and self._auto_trials_started >= int(self._auto_max_trials):
+            if self._poll_stim_control():
+                keys = event.getKeys()
+                if "escape" in keys:
+                    break
+                continue
+            # Stop auto stimulator after N trials (калибровка без control; далее — stim_control).
+            if (
+                self.auto_random_trials
+                and self._auto_max_trials is not None
+                and not self._in_stim_control_phase()
+                and self._auto_trials_started >= int(self._auto_max_trials)
+            ):
                 break
+            if self._in_stim_control_phase():
+                cmd = None
+                try:
+                    from experiment_protocol import stim_control as sc
+
+                    cmd = sc.read_control(self.stim_control_dir)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+                if cmd and str(cmd.get("state")) == "done":
+                    break
             if self._auto_pending_first_trial:
                 self._auto_pending_first_trial = False
                 # Show instruction before the very first auto trial as well
@@ -601,14 +672,17 @@ class StimulusApp:
                     print("TRIAL END")
                     if self.auto_random_trials:
                         self.controller.stop()
-                        # Plan the next target now, but show overlay during pause
-                        if self._auto_trials_started < len(self._auto_target_plan):
+                        if self._in_stim_control_phase():
+                            self._stim_control_wait_trial = False
+                        elif self._auto_trials_started < len(self._auto_target_plan):
                             nxt = int(self._auto_target_plan[self._auto_trials_started])
-                        else:
+                            self._auto_trials_started += 1
+                            self._schedule_auto_trial(target_tile_id=int(nxt))
+                        elif not self.stim_control_dir:
                             prev = int(self._auto_target_plan[-1]) if self._auto_target_plan else None
                             nxt = int(self._rand_target_avoid(prev=prev))
-                        self._auto_trials_started += 1
-                        self._schedule_auto_trial(target_tile_id=int(nxt))
+                            self._auto_trials_started += 1
+                            self._schedule_auto_trial(target_tile_id=int(nxt))
                     else:
                         self.controller.stop()
                         self.show_controls = True

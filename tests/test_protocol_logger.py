@@ -19,6 +19,7 @@ def test_unified_logger_writes_session_files(tmp_path: Path) -> None:
     logger.append_eeg_chunk([1.0, 1.1], np.zeros((2, 3)), stream="EEG", lsl_local_clock=123.0)
     logger.append_p300_trial({"trial": 1, "winner_key": "стимул_0"})
     logger.append_ssvep_block({"block": 1, "winner": 2})
+    logger.append_experiment({"kind": "p300", "phase": "main"})
     out_dir = logger.finalize(stop_payload={"reason": "done"})
 
     assert out_dir.exists()
@@ -27,7 +28,9 @@ def test_unified_logger_writes_session_files(tmp_path: Path) -> None:
     assert (out_dir / "eeg.npz").exists()
     assert (out_dir / "p300_trials.ndjson").exists()
     assert (out_dir / "ssvep_blocks.ndjson").exists()
+    assert (out_dir / "experiments.ndjson").exists()
 
     manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest.get("n_experiments") == 1
     assert manifest["schema"] == "hybrid_protocol/v1"
 

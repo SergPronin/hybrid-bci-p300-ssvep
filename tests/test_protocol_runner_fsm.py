@@ -54,11 +54,9 @@ def test_fsm_reaches_ssvep_and_opens_migalka(
     mock_serial.return_value = ser
 
     markers = []
-    for t in range(2):
-        markers.append(f"-1|trial_start|target={t}")
+    for _ in range(3):
+        markers.append("-1|trial_start|target=4")
         markers.append("-2|trial_end")
-    markers.append(f"-1|trial_start|target=0")
-    markers.append("-2|trial_end")
 
     eeg_inlet = MagicMock()
     eeg_inlet.pull_chunk = MagicMock(
@@ -72,17 +70,26 @@ def test_fsm_reaches_ssvep_and_opens_migalka(
         subject_id="test",
         com_port="COM_TEST",
         eeg_stream_name="EEG",
-        p300_trials_per_mode=1,
+        p300_calib_trials=1,
+        p300_main_trials=1,
+        calib_target_tile_id=4,
+        template_warmup_target_epochs=2,
         ssvep_blocks_per_mode=1,
+        shuffle_seed=1,
         pause_between_experiments_s=0.0,
         ssvep_block_sec=0.05,
     )
     runner = ProtocolRunner(cfg)
     runner.start()
 
-    for _ in range(500):
+    for _ in range(2000):
         runner.tick()
-        if runner.state in (ProtocolState.SSVEP_CONT, ProtocolState.SSVEP_BURST, ProtocolState.Finalize, ProtocolState.Stopped):
+        if runner.state in (
+            ProtocolState.SSVEP_CONT,
+            ProtocolState.SSVEP_BURST,
+            ProtocolState.Finalize,
+            ProtocolState.Stopped,
+        ):
             break
 
     assert mock_serial.called, "serial.Serial должен вызываться для мигалки"

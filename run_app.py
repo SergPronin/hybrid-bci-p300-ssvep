@@ -94,6 +94,12 @@ def main() -> None:
         default=None,
         help="Ограничить число auto-trial (после достижения — стимулятор завершится).",
     )
+    parser.add_argument(
+        "--stim-control-dir",
+        type=str,
+        default="",
+        help="Папка сессии с stim_control.json: P300 trial по команде протокола (после калибровки).",
+    )
     args = parser.parse_args()
 
     analyzer_proc: subprocess.Popen[str] | None = None
@@ -116,6 +122,7 @@ def main() -> None:
         auto_plan_target_epochs=int(args.auto_plan_target_epochs),
         sequences_override=int(args.sequences) if args.sequences is not None else None,
         auto_max_trials=int(args.auto_max_trials) if args.auto_max_trials is not None else None,
+        stim_control_dir=str(args.stim_control_dir).strip() or None,
     )
     if analyzer_proc is not None and analyzer_proc.poll() is None:
         print(

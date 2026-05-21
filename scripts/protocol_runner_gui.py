@@ -36,7 +36,9 @@ if str(_ROOT) not in sys.path:
 
 from experiment_protocol.protocol_log import info as plog_info  # noqa: E402
 from experiment_protocol.protocol_runner import ProtocolConfig, ProtocolRunner  # noqa: E402
+from experiment_protocol.protocol_instruction_overlay import ProtocolInstructionOverlay  # noqa: E402
 from experiment_protocol.ssvep_cue_overlay import SsvepCueOverlay  # noqa: E402
+from experiment_protocol.unified_logger import UnifiedExperimentLogger  # noqa: E402
 from p300_analysis.analysis_profiles import (  # noqa: E402
     ANALYSIS_PROFILE_GENERAL,
     ANALYSIS_PROFILE_RECENT,
@@ -119,7 +121,7 @@ def _selected_channels_0idx(checkboxes: list[QCheckBox]) -> tuple[int, ...]:
 class ProtocolRunnerWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Гибридный протокол (P300×2 + SSVEP×2)")
+        self.setWindowTitle("Гибридный протокол v2 (калибровка + 45 случайных)")
         self.setMinimumWidth(720)
         self.resize(760, 640)
 
@@ -128,6 +130,7 @@ class ProtocolRunnerWidget(QWidget):
         self._last_status_printed: str = ""
         self._eeg_test_inlet = None
         self._ssvep_cue_overlay: SsvepCueOverlay | None = None
+        self._participant_overlay: ProtocolInstructionOverlay | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -249,13 +252,63 @@ class ProtocolRunnerWidget(QWidget):
         self._p300_ch_host.hide()
         self._ssvep_ch_host.hide()
 
-        self.spin_p300 = QSpinBox()
-        self.spin_p300.setRange(1, 200)
-        self.spin_p300.setValue(15)
+        proto_box = QGroupBox("Протокол (калибровка → 45 экспериментов в случайном порядке)")
+        proto_form = QFormLayout(proto_box)
+
+        self.spin_calib_trials = QSpinBox()
+        self.spin_calib_trials.setRange(1, 50)
+        self.spin_calib_trials.setValue(12)
+        self.spin_calib_trials.setToolTip(
+            "Подряд в начале: прогоны P300 для сбора персонального шаблона (фиксированная плитка)."
+        )
+
+        self.spin_calib_target = QSpinBox()
+        self.spin_calib_target.setRange(0, 8)
+        self.spin_calib_target.setValue(4)
+
+        self.spin_template_epochs = QSpinBox()
+        self.spin_template_epochs.setRange(4, 50)
+        self.spin_template_epochs.setValue(12)
+
+        self.spin_p300_main = QSpinBox()
+        self.spin_p300_main.setRange(1, 200)
+        self.spin_p300_main.setValue(15)
+        self.spin_p300_main.setToolTip(
+            "В основном блоке: каждый прогон P300 даёт решение AUC и сравнение с шаблоном (один trial)."
+        )
 
         self.spin_ssvep = QSpinBox()
         self.spin_ssvep.setRange(1, 200)
         self.spin_ssvep.setValue(15)
+        self.spin_ssvep.setToolTip("По 15 блоков ССВП: непрерывный и пакетный (вперемешку с P300).")
+
+        self.spin_pause = QDoubleSpinBox()
+        self.spin_pause.setRange(0.0, 60.0)
+        self.spin_pause.setDecimals(1)
+        self.spin_pause.setSingleStep(0.5)
+        self.spin_pause.setValue(2.0)
+
+        self.spin_shuffle_seed = QSpinBox()
+        self.spin_shuffle_seed.setRange(-1, 2_000_000_000)
+        self.spin_shuffle_seed.setValue(-1)
+        self.spin_shuffle_seed.setToolTip("-1 = новый случайный порядок при каждом запуске; иначе фиксированный seed.")
+
+        self.spin_ssvep_block_sec = QDoubleSpinBox()
+        self.spin_ssvep_block_sec.setRange(1.0, 120.0)
+        self.spin_ssvep_block_sec.setDecimals(1)
+        self.spin_ssvep_block_sec.setValue(6.0)
+
+        proto_form.addRow("Калибровка: число прогонов P300:", self.spin_calib_trials)
+        proto_form.addRow("Калибровка: целевая плитка (0…8):", self.spin_calib_target)
+        proto_form.addRow("Мин. эпох на шаблон:", self.spin_template_epochs)
+        proto_form.addRow("Основной блок: прогонов P300:", self.spin_p300_main)
+        proto_form.addRow("ССВП: блоков на режим (cont+burst):", self.spin_ssvep)
+        proto_form.addRow("Пауза между экспериментами (с):", self.spin_pause)
+        proto_form.addRow("Seed перемешивания (-1=случайно):", self.spin_shuffle_seed)
+        proto_form.addRow("Длительность блока ССВП (с):", self.spin_ssvep_block_sec)
+
+        stim_box = QGroupBox("Стимулятор P300 (PsychoPy, авто-режим)")
+        stim_form = QFormLayout(stim_box)
 
         # Stimulator (PsychoPy) auto-mode parameters
         self.spin_inter_trial = QDoubleSpinBox()
@@ -267,18 +320,6 @@ class ProtocolRunnerWidget(QWidget):
         self.spin_sequences = QSpinBox()
         self.spin_sequences.setRange(1, 50)
         self.spin_sequences.setValue(12)
-
-        self.spin_plan_trials = QSpinBox()
-        self.spin_plan_trials.setRange(1, 50)
-        self.spin_plan_trials.setValue(15)
-
-        self.spin_plan_target = QSpinBox()
-        self.spin_plan_target.setRange(0, 8)
-        self.spin_plan_target.setValue(4)
-
-        self.spin_plan_target_epochs = QSpinBox()
-        self.spin_plan_target_epochs.setRange(1, 50)
-        self.spin_plan_target_epochs.setValue(12)
 
         self.chk_run_stimulus = QCheckBox(
             "Запускать экранную стимуляцию (PsychoPy, случайная цель, без клика START)"
@@ -295,23 +336,20 @@ class ProtocolRunnerWidget(QWidget):
         form.addRow("Папка результатов:", self.ed_output)
         form.addRow("Поток ЭЭГ (LSL):", self._eeg_row_widget)
         form.addRow("", self.lbl_eeg_status)
-        form.addRow("Прогонов P300 на режим:", self.spin_p300)
-        form.addRow("Блоков ССВП на режим:", self.spin_ssvep)
-        form.addRow("Пауза между прогонами стимулятора (с):", self.spin_inter_trial)
-        form.addRow("Последовательностей в одном прогоне:", self.spin_sequences)
-        form.addRow("План AUC: число прогонов:", self.spin_plan_trials)
-        form.addRow("План AUC: целевая плитка (0…8):", self.spin_plan_target)
-        form.addRow("Эпох на целевую плитку (шаблон):", self.spin_plan_target_epochs)
-        form.addRow("", self.chk_run_stimulus)
 
         scroll_layout.addLayout(form)
+        scroll_layout.addWidget(proto_box)
+        stim_form.addRow("Пауза между прогонами стимулятора (с):", self.spin_inter_trial)
+        stim_form.addRow("Последовательностей в одном прогоне:", self.spin_sequences)
+        stim_form.addRow("", self.chk_run_stimulus)
+        scroll_layout.addWidget(stim_box)
         scroll_layout.addWidget(migalka_box)
         scroll_layout.addWidget(ssvep_box)
         scroll_layout.addWidget(p300_box)
 
         self.lbl_settings_hint = QLabel(
-            "Поток ЭЭГ — запись и онлайн-анализ; COM и частоты — мигалка; каналы — ROI для P300/ССВП. "
-            "Перед стартом проверьте ЭЭГ кнопкой «Проверить». Консоль: [protocol]."
+            "Фаза 1: калибровка P300 (подряд, фикс. плитка). Фаза 2: 15 P300 + 15 SSVEP cont + 15 SSVEP burst "
+            "в случайном порядке; каждый P300 — AUC и шаблон; логи: experiments.ndjson. Консоль: [protocol]."
         )
         self.lbl_settings_hint.setWordWrap(True)
         self.lbl_settings_hint.setStyleSheet("color: #555; font-size: 11px;")
@@ -601,6 +639,7 @@ class ProtocolRunnerWidget(QWidget):
         """Перед новым прогоном: закрыть старый runner/COM/LSL и убить зомби run_app."""
         self._close_eeg_test_inlet()
         self._dismiss_ssvep_overlay()
+        self._dismiss_participant_overlay()
         if self._stimulus_proc is not None:
             try:
                 if self._stimulus_proc.poll() is None:
@@ -698,15 +737,16 @@ class ProtocolRunnerWidget(QWidget):
             QMessageBox.warning(self, "Мигалка", "Задайте хотя бы одну лампу с частотой > 0.")
             return
 
+        session_dir = UnifiedExperimentLogger.allocate_session_dir(
+            output_root=Path(out_root),
+            subject_id=subject,
+        )
+
         if self.chk_run_stimulus.isChecked():
             run_py = sys.executable
             run_script = _ROOT / "run_app.py"
             if run_script.exists():
-                # AUC + template_corr: по spin_p300 прогонов на каждый режим
-                n_stim_trials = max(
-                    int(self.spin_p300.value()) * 2 + 2,
-                    int(self.spin_plan_trials.value()) + 2,
-                )
+                n_calib = int(self.spin_calib_trials.value())
                 stim_args = [
                         run_py,
                         str(run_script),
@@ -717,17 +757,19 @@ class ProtocolRunnerWidget(QWidget):
                         "--sequences",
                         str(int(self.spin_sequences.value())),
                         "--auto-max-trials",
-                        str(n_stim_trials),
+                        str(max(n_calib + 1, n_calib)),
                         "--auto-plan-trials",
-                        str(int(self.spin_plan_trials.value())),
+                        str(n_calib),
                         "--auto-plan-target-tile-id",
-                        str(int(self.spin_plan_target.value())),
+                        str(int(self.spin_calib_target.value())),
                         "--auto-plan-target-repeats",
                         "0",
                         "--auto-plan-target-epochs",
-                        str(int(self.spin_plan_target_epochs.value())),
+                        str(int(self.spin_template_epochs.value())),
+                        "--stim-control-dir",
+                        str(session_dir),
                 ]
-                plog_info(f"запуск стимулятора ({n_stim_trials} прогонов): {' '.join(stim_args)}")
+                plog_info(f"запуск стимулятора (калибровка={n_calib}, main P300 по stim_control): {' '.join(stim_args)}")
                 self._stimulus_proc = subprocess.Popen(
                     stim_args,
                     cwd=str(_ROOT),
@@ -751,11 +793,18 @@ class ProtocolRunnerWidget(QWidget):
         cfg = ProtocolConfig(
             output_root=Path(out_root),
             subject_id=subject,
+            session_dir=session_dir,
             com_port=com,
             eeg_stream_name=eeg_name,
             eeg_stream_session_id=eeg_sid,
-            p300_trials_per_mode=int(self.spin_p300.value()),
+            p300_calib_trials=int(self.spin_calib_trials.value()),
+            calib_target_tile_id=int(self.spin_calib_target.value()),
+            template_warmup_target_epochs=int(self.spin_template_epochs.value()),
+            p300_main_trials=int(self.spin_p300_main.value()),
             ssvep_blocks_per_mode=int(self.spin_ssvep.value()),
+            pause_between_experiments_s=float(self.spin_pause.value()),
+            shuffle_seed=int(self.spin_shuffle_seed.value()),
+            ssvep_block_sec=float(self.spin_ssvep_block_sec.value()),
             ssvep_freqs_hz=freqs,
             roi_channels_0idx=roi,
             ssvep_roi_channels_0idx=ssvep_roi,
@@ -765,8 +814,10 @@ class ProtocolRunnerWidget(QWidget):
         ch_log = ",".join(str(c + 1) for c in roi) if roi else "ALL"
         ssvep_ch_log = ",".join(str(c + 1) for c in ssvep_roi) if ssvep_roi else "ALL"
         plog_info(
-            f"GUI Start: subject={subject!r} EEG={eeg_name!r} P300={self.spin_p300.value()} "
-            f"SSVEP={self.spin_ssvep.value()} COM={com!r} P300_ch={ch_log} SSVEP_ch={ssvep_ch_log} "
+            f"GUI Start: subject={subject!r} EEG={eeg_name!r} "
+            f"calib={self.spin_calib_trials.value()} main_P300={self.spin_p300_main.value()} "
+            f"SSVEP={self.spin_ssvep.value()}×2 seed={self.spin_shuffle_seed.value()} "
+            f"COM={com!r} P300_ch={ch_log} SSVEP_ch={ssvep_ch_log} "
             f"migalka_Hz={list(freqs)} inter_trial={self.spin_inter_trial.value()} "
             f"seq={self.spin_sequences.value()}"
         )
@@ -776,6 +827,12 @@ class ProtocolRunnerWidget(QWidget):
         self.btn_stop.setEnabled(True)
         self._timer.start()
         self.lbl_status.setText("Запущено. Проверка перед стартом…")
+
+    def _dismiss_participant_overlay(self) -> None:
+        if self._participant_overlay is not None:
+            ov = self._participant_overlay
+            self._participant_overlay = None
+            ov.hide_overlay()
 
     def _dismiss_ssvep_overlay(self) -> None:
         if self._ssvep_cue_overlay is not None:
@@ -804,6 +861,51 @@ class ProtocolRunnerWidget(QWidget):
         self.raise_()
         self.activateWindow()
         QApplication.processEvents()
+
+    def _sync_participant_overlay(self) -> None:
+        if self._runner is None:
+            if self._participant_overlay is not None:
+                self._participant_overlay.hide_overlay()
+                self._participant_overlay = None
+            return
+        instr = getattr(self._runner, "participant_instruction", None)
+        if not instr:
+            if self._participant_overlay is not None:
+                self._participant_overlay.hide_overlay()
+            return
+        if self._participant_overlay is None:
+            self._participant_overlay = ProtocolInstructionOverlay()
+        t = str(instr.get("type") or "")
+        if t == "blackout":
+            self._participant_overlay.show_blackout()
+            return
+        self._participant_overlay.show_cue_widgets()
+        if t == "calib":
+            self._participant_overlay.show_message(
+                title=f"Калибровка {instr.get('index')}/{instr.get('total')}",
+                kind_label="Сбор шаблона P300",
+                hint="Смотрите на плитку:",
+                big_text=str(instr.get("tile")),
+            )
+        elif t == "p300":
+            self._participant_overlay.show_p300_cue(
+                experiment_index=int(instr.get("index") or 1),
+                experiment_total=int(instr.get("total") or 1),
+                target_tile_id=int(instr.get("tile") or 0),
+            )
+        elif t == "ssvep":
+            self._participant_overlay.show_ssvep_cue(
+                experiment_index=int(instr.get("index") or 1),
+                experiment_total=int(instr.get("total") or 1),
+                lamp_1based=int(instr.get("lamp_1based") or 1),
+                freq_hz=float(instr.get("freq_hz") or 0),
+                mode_label=str(instr.get("mode_label") or "ССВП"),
+            )
+        elif t == "pause":
+            self._participant_overlay.show_pause(
+                message=str(instr.get("message") or "Пауза"),
+                seconds_left=instr.get("seconds_left"),
+            )
 
     def _sync_ssvep_cue_overlay(self) -> None:
         if self._runner is None:
@@ -834,6 +936,7 @@ class ProtocolRunnerWidget(QWidget):
     def _on_stop(self) -> None:
         self._close_eeg_test_inlet()
         self._dismiss_ssvep_overlay()
+        self._dismiss_participant_overlay()
         if self._stimulus_proc is not None:
             try:
                 if self._stimulus_proc.poll() is None:
@@ -855,6 +958,7 @@ class ProtocolRunnerWidget(QWidget):
             return
         prev = getattr(self, "_last_status_printed", "")
         self._runner.tick()
+        self._sync_participant_overlay()
         self._sync_ssvep_cue_overlay()
         QApplication.processEvents()
         st = self._runner.status_text

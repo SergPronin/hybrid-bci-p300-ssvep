@@ -44,12 +44,7 @@ def test_cont_to_burst_handoff_keeps_com_open(
     eeg_inlet = MagicMock()
     eeg_inlet.pull_chunk = MagicMock(return_value=(np.zeros((10, 4)), list(range(10))))
     mk_inlet = MagicMock()
-    mk_inlet.pull_chunk = MagicMock(
-        return_value=(
-            [["-1|trial_start|target=0"], ["-2|trial_end"], ["-1|trial_start|target=0"], ["-2|trial_end"]],
-            [0.0, 1.0, 2.0, 3.0],
-        )
-    )
+    mk_inlet.pull_chunk = MagicMock(return_value=([], []))
     mock_inlet.side_effect = [eeg_inlet, mk_inlet]
 
     cfg = ProtocolConfig(
@@ -57,8 +52,10 @@ def test_cont_to_burst_handoff_keeps_com_open(
         subject_id="test",
         com_port="COM_TEST",
         eeg_stream_name="EEG",
-        p300_trials_per_mode=1,
+        p300_calib_trials=0,
+        p300_main_trials=0,
         ssvep_blocks_per_mode=1,
+        shuffle_seed=0,
         pause_between_experiments_s=0.0,
         ssvep_block_sec=0.01,
     )
